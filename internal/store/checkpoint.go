@@ -67,15 +67,24 @@ func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.S
 	return cps, nil
 }
 
-// MarkDone 标记完成。
-func (s *Store) MarkDone(ctx context.Context, task, symbol, lastDate string) error {
-	var d interface{}
-	if lastDate != "" {
-		d = lastDate
-	}
-	_, err := s.DB.ExecContext(ctx,
-		"UPDATE sync_checkpoint SET status='done', last_synced_date=?, last_error='' WHERE symbol=? AND task=?",
-		d, symbol, task)
+// MarkDone 根据实际入库覆盖范围标记完成。
+func (s *Store) MarkDone(ctx context.Context, task, symbol, targetDate string) error {
+	_, err := s.DB.ExecContext(ctx, `
+		UPDATE sync_checkpoint cp
+		INNER JOIN stock_basic b ON b.symbol=cp.symbol
+		LEFT JOIN (
+			SELECT symbol,MIN(trade_date) first_date,MAX(trade_date) last_date,COUNT(*) kline_count
+			FROM kline_daily WHERE symbol=? GROUP BY symbol
+		) k ON k.symbol=cp.symbol
+		SET cp.first_synced_date=k.first_date,
+			cp.last_synced_date=k.last_date,
+			cp.kline_count=IFNULL(k.kline_count,0),
+			cp.status=CASE
+				WHEN k.last_date IS NOT NULL AND k.last_date>=?
+				 AND (b.list_date IS NULL OR b.list_date>? OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
+				THEN 'done' ELSE 'pending' END,
+			cp.last_error=''
+		WHERE cp.symbol=? AND cp.task=?`, symbol, targetDate, targetDate, symbol, task)
 	return err
 }
 
@@ -110,21 +119,32 @@ func (s *Store) ResetRunning(ctx context.Context, task string) (int64, error) {
 	return res.RowsAffected()
 }
 
-// ReconcileCheckpoints 按库内每只证券的最新日线重建断点状态。达到目标交易日
-// 的证券不访问上游；空历史和落后目标的证券才保留为 pending。
+// ReconcileCheckpoints 按库内日期覆盖范围重建断点状态。仅“已覆盖上市日期且最新日线
+// 达到目标交易日”的证券才算完成，避免只有最新一天的数据被误判为 done。
 func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `
 		UPDATE sync_checkpoint cp
+		INNER JOIN stock_basic b ON b.symbol=cp.symbol
 		LEFT JOIN (
-			SELECT symbol, MAX(trade_date) AS last_date
+			SELECT symbol, MIN(trade_date) AS first_date, MAX(trade_date) AS last_date, COUNT(*) AS kline_count
 			FROM kline_daily
 			GROUP BY symbol
 		) k ON k.symbol=cp.symbol
-		SET cp.last_synced_date=k.last_date,
-			cp.status=CASE WHEN k.last_date IS NOT NULL AND k.last_date>=? THEN 'done' ELSE 'pending' END,
+		SET cp.first_synced_date=k.first_date,
+			cp.last_synced_date=k.last_date,
+			cp.kline_count=IFNULL(k.kline_count,0),
+			cp.status=CASE
+				WHEN k.last_date IS NOT NULL AND k.last_date>=?
+				 AND (
+					b.list_date IS NULL
+					OR b.list_date>?
+					OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY)
+				 ) THEN 'done'
+				ELSE 'pending'
+			END,
 			cp.retry_count=0,
 			cp.last_error=''
-		WHERE cp.task=?`, targetDate, task)
+		WHERE cp.task=?`, targetDate, targetDate, task)
 	if err != nil {
 		return 0, fmt.Errorf("reconcile checkpoints: %w", err)
 	}
@@ -161,6 +181,11 @@ func (s *Store) SyncStatus(ctx context.Context, task string) (*model.SyncStatus,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	_ = s.DB.QueryRowContext(ctx, `SELECT
+		SUM(status='done'),
+		SUM(status<>'done' AND kline_count>0),
+		SUM(kline_count=0)
+		FROM sync_checkpoint WHERE task=?`, task).Scan(&st.Complete, &st.Partial, &st.Empty)
 	latest, err := s.LatestKlineDate(ctx)
 	if err == nil {
 		st.LatestDate = latest

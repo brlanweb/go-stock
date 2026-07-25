@@ -81,6 +81,9 @@ export interface SyncStatus {
     running: number
     failed: number
     latest_date?: string
+    complete: number
+    partial: number
+    empty: number
   }
   backfill_running: boolean
 }
@@ -103,6 +106,18 @@ export interface HeatmapGroup {
   change_pct: number
   main_net_inflow?: number
   items: HeatmapItem[]
+}
+
+export interface Recommendation {
+  date: string
+  rank: number
+  symbol: string
+  code: string
+  name: string
+  sector: string
+  probability: number
+  reason: string
+  model: string
 }
 
 export interface HeatmapResponse {
@@ -132,6 +147,7 @@ export const api = {
   search: (q: string) => req<Security[]>(`/search?q=${encodeURIComponent(q)}`),
   indices: () => req<IndexQuote[]>('/indices'),
   watchlist: () => req<Quote[] | string[]>('/watchlist'),
+  recommendations: () => req<Recommendation[]>('/recommendations'),
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),
   delWatch: (code: string) => req(`/watchlist/${code}`, { method: 'DELETE' }),
   syncStatus: () => req<SyncStatus>('/sync/status'),

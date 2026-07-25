@@ -26,6 +26,11 @@ type Config struct {
 
 	QuoteTTLSeconds int // 实时行情缓存 TTL
 
+	AIBaseURL string // OpenAI 兼容模型地址
+	AIAPIKey  string // 模型密钥
+	AIModel   string // 模型名称
+	AIPrompt  string // 股票分析提示词
+
 	LogLevel string
 }
 
@@ -50,6 +55,10 @@ func Load() (*Config, error) {
 		BackfillWorkers: getEnvInt("GOSTOCK_BACKFILL_WORKERS", 2),
 		BackfillQPS:     getEnvFloat("GOSTOCK_BACKFILL_QPS", 3),
 		QuoteTTLSeconds: getEnvInt("GOSTOCK_QUOTE_TTL", 3),
+		AIBaseURL:       getEnv("GOSTOCK_AI_BASE_URL", ""),
+		AIAPIKey:        getEnv("GOSTOCK_AI_API_KEY", ""),
+		AIModel:         getEnv("GOSTOCK_AI_MODEL", ""),
+		AIPrompt:        getEnv("GOSTOCK_AI_PROMPT", ""),
 		LogLevel:        getEnv("GOSTOCK_LOG_LEVEL", "info"),
 	}
 	if c.DBPassword == "" {

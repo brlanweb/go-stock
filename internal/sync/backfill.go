@@ -116,11 +116,10 @@ func (e *Engine) syncStock(ctx context.Context, symbol, mode string) error {
 	if err := e.st.UpsertKlines(ctx, klines); err != nil {
 		return err
 	}
-	last := klines[len(klines)-1].Date
 	if err := e.st.InitCheckpoints(ctx, TaskBackfill, []string{symbol}); err != nil {
 		return err
 	}
-	return e.st.MarkDone(ctx, TaskBackfill, symbol, last)
+	return e.st.MarkDone(ctx, TaskBackfill, symbol, latestExpectedTradeDate(time.Now()))
 }
 
 // StartBackfill 启动受控缺失补齐：只处理空历史或最新日线落后目标交易日的证券。
@@ -243,17 +242,18 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 // backfillOne 拉取单只股票的历史K线（断点后增量）。
 func (e *Engine) backfillOne(ctx context.Context, cp model.SyncCheckpoint) error {
 	targetDate := latestExpectedTradeDate(time.Now())
-	latestDate, err := e.st.LatestKlineDateForSymbol(ctx, cp.Symbol)
+	coverage, err := e.st.KlineCoverage(ctx, cp.Symbol)
 	if err != nil {
 		return err
 	}
-	if latestDate >= targetDate {
-		return e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, latestDate)
+	if coverage.Complete {
+		return e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, targetDate)
 	}
 
+	// 历史头部不完整时必须从上市日起重拉；只有头部完整、尾部落后时才增量追加。
 	beg := "0"
-	if latestDate != "" {
-		t, err := time.Parse("2006-01-02", latestDate)
+	if coverage.HistoryStartComplete && coverage.LastDate != "" {
+		t, err := time.Parse("2006-01-02", coverage.LastDate)
 		if err != nil {
 			return fmt.Errorf("解析最新日线日期: %w", err)
 		}
@@ -264,14 +264,22 @@ func (e *Engine) backfillOne(ctx context.Context, cp model.SyncCheckpoint) error
 		return err
 	}
 	if len(klines) == 0 {
-		// 无新数据也标记为当前库内日期。停牌、未上市或数据源无返回不会形成热循环。
-		return e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, latestDate)
+		return fmt.Errorf("上游未返回可验证的历史K线")
 	}
 	if err := e.st.UpsertKlines(ctx, klines); err != nil {
 		return err
 	}
-	last := klines[len(klines)-1].Date
-	return e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, last)
+	if err := e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, targetDate); err != nil {
+		return err
+	}
+	updated, err := e.st.KlineCoverage(ctx, cp.Symbol)
+	if err != nil {
+		return err
+	}
+	if !updated.Complete {
+		return fmt.Errorf("历史覆盖仍不完整 first=%s last=%s count=%d", updated.FirstDate, updated.LastDate, updated.Count)
+	}
+	return nil
 }
 
 func latestExpectedTradeDate(now time.Time) string {

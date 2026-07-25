@@ -159,6 +159,9 @@ type SyncStatus struct {
 	Running    int    `json:"running"`
 	Failed     int    `json:"failed"`
 	LatestDate string `json:"latest_date,omitempty"` // 库内最新K线日期
+	Complete   int    `json:"complete"`              // 通过首尾覆盖校验的证券数
+	Partial    int    `json:"partial"`               // 有数据但历史头部/尾部不完整
+	Empty      int    `json:"empty"`                 // 尚无任何日K
 }
 
 // HeatmapItem 大盘云图中的单个证券块。

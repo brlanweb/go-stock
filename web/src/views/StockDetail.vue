@@ -10,7 +10,23 @@ const tab = ref<'day' | 'week' | 'month'>('day')
 const errMsg = ref('')
 const syncMsg = ref('')
 const syncing = ref(false)
+const watched = ref(false)
 let klChart: Chart | null = null
+
+async function loadWatchState() {
+  try {
+    const items = await api.watchlist()
+    watched.value = items.some(item => typeof item === 'string' ? item === props.symbol : item.symbol === props.symbol)
+  } catch { watched.value = false }
+}
+
+async function toggleWatch() {
+  try {
+    if (watched.value) await api.delWatch(props.symbol)
+    else await api.addWatch(props.symbol)
+    watched.value = !watched.value
+  } catch (e: any) { errMsg.value = e.message || '自选操作失败' }
+}
 
 async function refreshQuote() {
   try {
@@ -72,11 +88,13 @@ const chartStyles = {
 
 watch(() => props.symbol, () => {
   refreshQuote()
+  loadWatchState()
   nextTickDraw()
 })
 
 onMounted(async () => {
   refreshQuote()
+  loadWatchState()
   await nextTickDraw()
 })
 
@@ -93,6 +111,7 @@ onUnmounted(() => {
     <div class="panel" style="margin-top:8px" v-if="quote">
       <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
         <h2>{{ quote.name }} <span class="dim" style="font-size:13px">{{ quote.symbol }}</span></h2>
+        <button class="watch-button" :class="{ active: watched }" @click="toggleWatch">{{ watched ? '已加入自选' : '加入自选' }}</button>
         <span :class="pctClass(quote.change_pct)" style="font-size:28px;font-weight:700">{{ fmt(quote.price) }}</span>
         <span :class="pctClass(quote.change_pct)" style="font-size:16px">
           {{ fmt(quote.change_amount) }} ({{ fmtPct(quote.change_pct) }})
@@ -156,6 +175,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.watch-button { padding:5px 9px; border:1px solid var(--border); background:transparent; color:var(--text-dim); }.watch-button.active { border-color:#d6a12c; color:#e9c16c; }
 .chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
 .sync-actions { display:flex; gap:8px; }.sync-msg { margin:-3px 0 10px; color:var(--text-dim); font-size:12px; }
 @media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; } }

@@ -27,7 +27,7 @@ onUnmounted(() => clearInterval(timer))
       <router-link to="/" class="logo">go-stock</router-link>
       <span v-if="sync" class="dim sync-info">
         <template v-if="sync.backfill_running">
-          回填中 {{ sync.backfill.done }}/{{ sync.backfill.total }}
+          完整 {{ sync.backfill.complete }}/{{ sync.backfill.total }} · 部分 {{ sync.backfill.partial }} · 空 {{ sync.backfill.empty }}
         </template>
         <template v-else-if="sync.backfill.latest_date">
           数据截至 {{ sync.backfill.latest_date }}

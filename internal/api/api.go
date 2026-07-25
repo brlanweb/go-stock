@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hoax/go-stock/internal/analysis"
 	"github.com/hoax/go-stock/internal/model"
 	"github.com/hoax/go-stock/internal/provider"
 	"github.com/hoax/go-stock/internal/store"
@@ -18,9 +19,10 @@ import (
 
 // Server API 依赖集合。
 type Server struct {
-	St     *store.Store
-	Svc    *provider.Service
-	Engine *gsync.Engine
+	St       *store.Store
+	Svc      *provider.Service
+	Engine   *gsync.Engine
+	Analysis *analysis.Service
 }
 
 // Register 注册全部 REST 路由。
@@ -35,6 +37,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/security/{code}", s.handleSecurity)
 	mux.HandleFunc("GET /api/v1/indicator/{code}", s.handleIndicator)
 	mux.HandleFunc("GET /api/v1/market/heatmap", s.handleMarketHeatmap)
+	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
+	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 
 	mux.HandleFunc("GET /api/v1/watchlist", s.handleWatchlistGet)
 	mux.HandleFunc("POST /api/v1/watchlist/{code}", s.handleWatchlistAdd)
@@ -228,6 +232,32 @@ func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 		"notice":   notice,
 		"groups":   groups,
 	})
+}
+
+func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	items, err := s.St.LatestRecommendations(ctx)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
+func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request) {
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.Analysis.RunDaily(ctx); err != nil {
+			slog.Error("AI 推荐执行失败", "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {

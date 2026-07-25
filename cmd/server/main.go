@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hoax/go-stock/internal/analysis"
 	"github.com/hoax/go-stock/internal/api"
 	"github.com/hoax/go-stock/internal/config"
 	"github.com/hoax/go-stock/internal/mcpserver"
@@ -46,13 +47,15 @@ func main() {
 	defer rootCancel()
 	engine := gsync.NewEngine(st, mgr, cfg.BackfillWorkers)
 	engine.StartDailyScheduler(rootCtx)
+	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt})
+	analysisService.StartScheduler(rootCtx)
 	if err := engine.StartBackfill(rootCtx); err != nil {
 		slog.Warn("启动历史缺失检查失败", "err", err)
 	}
 
 	// 路由
 	mux := http.NewServeMux()
-	apiServer := &api.Server{St: st, Svc: svc, Engine: engine}
+	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService}
 	apiServer.Register(mux)
 
 	// MCP Streamable HTTP（/mcp）

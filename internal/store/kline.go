@@ -136,6 +136,64 @@ func (s *Store) QueryKlines(ctx context.Context, symbol, period, adjust string, 
 	return out, rows.Err()
 }
 
+type KlineCoverageInfo struct {
+	FirstDate            string
+	LastDate             string
+	ListDate             string
+	Count                int
+	HistoryStartComplete bool
+	Complete             bool
+}
+
+// KlineCoverage 同时检查历史头部和最新日期，避免仅有最新一天时误判完整。
+func (s *Store) KlineCoverage(ctx context.Context, symbol string) (*KlineCoverageInfo, error) {
+	var first, last, list sql.NullTime
+	var count int
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT MIN(k.trade_date),MAX(k.trade_date),COUNT(k.trade_date),b.list_date
+		FROM stock_basic b LEFT JOIN kline_daily k ON k.symbol=b.symbol
+		WHERE b.symbol=? GROUP BY b.symbol,b.list_date`, symbol).Scan(&first, &last, &count, &list)
+	if err == sql.ErrNoRows {
+		return &KlineCoverageInfo{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	info := &KlineCoverageInfo{Count: count}
+	if first.Valid {
+		info.FirstDate = first.Time.Format("2006-01-02")
+	}
+	if last.Valid {
+		info.LastDate = last.Time.Format("2006-01-02")
+	}
+	if list.Valid {
+		info.ListDate = list.Time.Format("2006-01-02")
+	}
+	target := latestExpectedDateForCoverage(time.Now())
+	info.HistoryStartComplete = !list.Valid || list.Time.After(mustParseDate(target)) || (first.Valid && !first.Time.After(list.Time.AddDate(0, 0, 14)))
+	info.Complete = info.HistoryStartComplete && info.LastDate >= target
+	return info, nil
+}
+
+func latestExpectedDateForCoverage(now time.Time) string {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err == nil {
+		now = now.In(loc)
+	}
+	if now.Hour() < 16 {
+		now = now.AddDate(0, 0, -1)
+	}
+	for now.Weekday() == time.Saturday || now.Weekday() == time.Sunday {
+		now = now.AddDate(0, 0, -1)
+	}
+	return now.Format("2006-01-02")
+}
+
+func mustParseDate(value string) time.Time {
+	t, _ := time.Parse("2006-01-02", value)
+	return t
+}
+
 // LatestKlineDate 库内最新交易日（空库返回 ""）。
 func (s *Store) LatestKlineDate(ctx context.Context) (string, error) {
 	var d []byte
