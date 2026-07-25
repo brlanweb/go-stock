@@ -19,10 +19,18 @@ type Tencent struct {
 	breaker *CircuitBreaker
 }
 
-// NewTencent 腾讯接口较宽松：8 QPS + 100ms 抖动。
+// NewTencent 腾讯实时接口默认使用 8 QPS + 100ms 抖动。
 func NewTencent() *Tencent {
+	return NewTencentWithQPS(8)
+}
+
+// NewTencentWithQPS 为历史回填创建独立的保守限流实例。
+func NewTencentWithQPS(qps float64) *Tencent {
+	if qps <= 0 {
+		qps = 0.35
+	}
 	return &Tencent{
-		gate:    NewRateGate(8, 100*time.Millisecond),
+		gate:    NewRateGate(qps, 100*time.Millisecond),
 		breaker: NewCircuitBreaker(5, 60*time.Second),
 	}
 }

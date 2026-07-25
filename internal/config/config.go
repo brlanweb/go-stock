@@ -21,9 +21,11 @@ type Config struct {
 
 	MCPToken string // MCP Bearer Token，空表示不鉴权
 
-	BackfillWorkers int     // 回填并发 worker 数
-	BackfillQPS     float64 // 单源全局 QPS 上限
-	SyncSectors     bool    // 启动回填时是否同步板块成分（默认关闭，避免额外上游压力）
+	BackfillWorkers   int     // 回填并发 worker 数
+	BackfillQPS       float64 // 单源全局 QPS 上限
+	SyncSectors       bool    // 启动回填时是否同步板块成分（默认关闭，避免额外上游压力）
+	PythonCommand     string  // BaoStock/AKShare Python 解释器
+	PythonKlineScript string  // Python 历史K线桥接脚本
 
 	QuoteTTLSeconds int // 实时行情缓存 TTL
 
@@ -46,22 +48,24 @@ func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	c := &Config{
-		Addr:            getEnv("GOSTOCK_ADDR", ":8480"),
-		DBHost:          getEnv("GOSTOCK_DB_HOST", "127.0.0.1"),
-		DBPort:          getEnvInt("GOSTOCK_DB_PORT", 3306),
-		DBName:          getEnv("GOSTOCK_DB_NAME", "stock"),
-		DBUser:          getEnv("GOSTOCK_DB_USER", "stock"),
-		DBPassword:      getEnv("GOSTOCK_DB_PASSWORD", ""),
-		MCPToken:        getEnv("GOSTOCK_MCP_TOKEN", ""),
-		BackfillWorkers: getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
-		BackfillQPS:     getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
-		SyncSectors:     getEnvBool("GOSTOCK_SYNC_SECTORS", false),
-		QuoteTTLSeconds: getEnvInt("GOSTOCK_QUOTE_TTL", 3),
-		AIBaseURL:       getEnv("GOSTOCK_AI_BASE_URL", ""),
-		AIAPIKey:        getEnv("GOSTOCK_AI_API_KEY", ""),
-		AIModel:         getEnv("GOSTOCK_AI_MODEL", ""),
-		AIPrompt:        getEnv("GOSTOCK_AI_PROMPT", ""),
-		LogLevel:        getEnv("GOSTOCK_LOG_LEVEL", "info"),
+		Addr:              getEnv("GOSTOCK_ADDR", ":8480"),
+		DBHost:            getEnv("GOSTOCK_DB_HOST", "127.0.0.1"),
+		DBPort:            getEnvInt("GOSTOCK_DB_PORT", 3306),
+		DBName:            getEnv("GOSTOCK_DB_NAME", "stock"),
+		DBUser:            getEnv("GOSTOCK_DB_USER", "stock"),
+		DBPassword:        getEnv("GOSTOCK_DB_PASSWORD", ""),
+		MCPToken:          getEnv("GOSTOCK_MCP_TOKEN", ""),
+		BackfillWorkers:   getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
+		BackfillQPS:       getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
+		SyncSectors:       getEnvBool("GOSTOCK_SYNC_SECTORS", false),
+		PythonCommand:     getEnv("GOSTOCK_PYTHON_COMMAND", "python3"),
+		PythonKlineScript: getEnv("GOSTOCK_PYTHON_KLINE_SCRIPT", "python-provider/fetch_kline.py"),
+		QuoteTTLSeconds:   getEnvInt("GOSTOCK_QUOTE_TTL", 3),
+		AIBaseURL:         getEnv("GOSTOCK_AI_BASE_URL", ""),
+		AIAPIKey:          getEnv("GOSTOCK_AI_API_KEY", ""),
+		AIModel:           getEnv("GOSTOCK_AI_MODEL", ""),
+		AIPrompt:          getEnv("GOSTOCK_AI_PROMPT", ""),
+		LogLevel:          getEnv("GOSTOCK_LOG_LEVEL", "info"),
 	}
 	if c.DBPassword == "" {
 		return nil, fmt.Errorf("GOSTOCK_DB_PASSWORD 未设置（请配置 .env 或环境变量）")

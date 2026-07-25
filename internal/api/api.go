@@ -343,7 +343,15 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSyncBackfill(w http.ResponseWriter, r *http.Request) {
-	writeErr(w, http.StatusGone, "全市场历史回填已停用；请使用 POST /api/v1/sync/stock/{code}?mode=full 显式同步单只股票")
+	if s.Engine.IsRunning() {
+		writeErr(w, http.StatusConflict, "已有同步任务运行中")
+		return
+	}
+	if err := s.Engine.StartBackfill(s.Engine.BaseContext()); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, 202, map[string]string{"status": "backfill started"})
 }
 
 func (s *Server) handleSyncBackfillStop(w http.ResponseWriter, r *http.Request) {

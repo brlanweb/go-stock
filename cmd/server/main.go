@@ -45,7 +45,8 @@ func main() {
 	// 同步引擎
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
-	engine := gsync.NewEngine(st, mgr, cfg.BackfillWorkers, cfg.SyncSectors)
+	engine := gsync.NewEngine(st, mgr, cfg.BackfillWorkers, cfg.BackfillQPS, cfg.SyncSectors, cfg.PythonCommand, cfg.PythonKlineScript)
+	engine.SetBaseContext(rootCtx)
 	engine.StartDailyScheduler(rootCtx)
 	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt})
 	analysisService.StartScheduler(rootCtx)

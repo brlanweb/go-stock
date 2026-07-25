@@ -35,15 +35,15 @@ func (s *Store) InitCheckpoints(ctx context.Context, task string, symbols []stri
 	return nil
 }
 
-// ClaimPending 领取一批待处理任务并标记 running（含 failed 重试，retry<5）。
+// ClaimPending 领取一批待处理任务并标记 running。
+// failed 不在同一轮立即重领，避免不受支持的证券连续撞击上游；后续重试由显式重排策略控制。
 func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.SyncCheckpoint, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT cp.symbol, IFNULL(DATE_FORMAT(cp.last_synced_date,'%Y-%m-%d'),''), cp.retry_count
 		 FROM sync_checkpoint cp
 		 INNER JOIN stock_basic b ON b.symbol=cp.symbol
-		 WHERE cp.task=? AND b.status='listed'
-		   AND (cp.status='pending' OR (cp.status='failed' AND cp.retry_count<5) OR cp.status='running')
-		 ORDER BY cp.status='running' DESC, cp.symbol LIMIT ?`, task, n)
+		 WHERE cp.task=? AND b.status='listed' AND cp.status='pending'
+		 ORDER BY cp.symbol LIMIT ?`, task, n)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate strin
 					OR b.list_date>?
 					OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY)
 				 ) THEN 'done'
-				WHEN cp.status='failed' AND cp.retry_count>=5 THEN 'failed'
+				WHEN cp.status='failed' THEN 'failed'
 				ELSE 'pending'
 			END,
 			cp.retry_count=CASE

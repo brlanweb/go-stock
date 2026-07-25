@@ -16,10 +16,10 @@
 ## 特性
 
 - **本地市场快照**：交易日 `12:00` 保存上午快照、`16:00` 保存收盘快照；报价、指数、自选股、页面和 MCP 分析工具均读取最近一次 MySQL 快照
-- **后台采集降级**：东方财富（全字段）→ 腾讯 → 新浪，自动降级 + 熔断 + 限流抖动
+- **后台采集降级**：实时行情东方财富（全字段）→ 腾讯 → 新浪；历史K线东方财富 → BaoStock → AKShare → 腾讯，自动降级 + 熔断 + 限流抖动
 - **行情维度**：价格/涨跌/开高低昨收/量额/量比/换手/振幅/PE动/PB/总市值/流通市值/52周高低/买卖五档/数据源与时间戳元数据
 - **历史K线**：不复权原始数据 + 累积复权因子完整入库（前复权随时重算，除权无需重刷）；日线存储，周/月线 SQL 聚合
-- **受控缺失补齐**：`sync_checkpoint` 表记录进度，历史为空或落后最近交易日时低速补齐；完整证券不重复请求上游
+- **受控缺失补齐**：`sync_checkpoint` 表记录进度，历史为空或落后最近交易日时低速补齐；完整证券不重复请求上游。历史源按 `东方财富 → BaoStock → AKShare → 腾讯` 降级：BaoStock 覆盖沪深股票/ETF，AKShare（新浪源）覆盖 ETF 与北交所 `920` 代码，避免单一上游被限流时整批失败
 - **定时快照**：按 `Asia/Shanghai` 在工作日 `12:00` 采集上午快照，`16:00` 采集收盘快照并写入日K/每日指标
 - **MCP Streamable HTTP**（`/mcp`）：本地 MySQL 分析工具 + 显式单股同步工具，供 LobeHub / Claude 等 MCP 客户端调用
 - **Vue3 前端**：全屏市场终端云图，面积按总市值映射、颜色按涨跌幅映射；个股日K/周K/月K 图（klinecharts）
@@ -31,6 +31,7 @@
 
 ```bash
 cp .env.example .env   # 填写数据库密码
+pip install -r python-provider/requirements.txt   # BaoStock/AKShare 历史降级源
 cd web && npm install && npm run build && cd ..
 go build -o bin/go-stock ./cmd/server
 ./bin/go-stock
@@ -55,6 +56,8 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_BACKFILL_WORKERS | 1 | 历史补齐并发数；固定出口建议保持 1 |
 | GOSTOCK_BACKFILL_QPS | 0.35 | 单数据源历史补齐 QPS |
 | GOSTOCK_SYNC_SECTORS | false | 启动历史补齐时是否同时刷新行业/概念成分 |
+| GOSTOCK_PYTHON_COMMAND | python3 | BaoStock/AKShare 历史降级源使用的 Python 解释器 |
+| GOSTOCK_PYTHON_KLINE_SCRIPT | python-provider/fetch_kline.py | 历史K线降级桥接脚本路径 |
 | GOSTOCK_QUOTE_TTL | 3 | 交易时段行情缓存秒数 |
 | GOSTOCK_AI_BASE_URL | 空 | OpenAI 兼容 API 基础地址，如 `https://api.openai.com/v1` |
 | GOSTOCK_AI_API_KEY | 空 | 模型 API Key，仅写入本地或服务器 `.env` |

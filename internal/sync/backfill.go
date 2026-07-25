@@ -23,9 +23,12 @@ const (
 type Engine struct {
 	st          *store.Store
 	mgr         *provider.Manager
-	tencent     *provider.Tencent // K线降级源（共享限流器）
+	tencent     *provider.Tencent // K线降级源（与东财使用同一保守 QPS）
+	baostock    provider.KlineProvider
+	akshare     provider.KlineProvider
 	workers     int
 	syncSectors bool
+	baseCtx     context.Context
 
 	mu      sync.Mutex
 	running atomic.Bool
@@ -33,17 +36,34 @@ type Engine struct {
 }
 
 // NewEngine 创建同步引擎。
-func NewEngine(st *store.Store, mgr *provider.Manager, workers int, syncSectors ...bool) *Engine {
+func NewEngine(st *store.Store, mgr *provider.Manager, workers int, qps float64, syncSectors bool, pythonCommand, pythonScript string) *Engine {
 	if workers < 1 {
 		workers = 1
 	}
-	shouldSyncSectors := len(syncSectors) > 0 && syncSectors[0]
 	return &Engine{
 		st:          st,
 		mgr:         mgr,
-		tencent:     provider.NewTencent(),
+		tencent:     provider.NewTencentWithQPS(qps),
+		baostock:    provider.NewPythonKline("baostock", pythonCommand, pythonScript),
+		akshare:     provider.NewPythonKline("akshare", pythonCommand, pythonScript),
 		workers:     workers,
-		syncSectors: shouldSyncSectors,
+		syncSectors: syncSectors,
+		baseCtx:     context.Background(),
+	}
+}
+
+// BaseContext 返回后台任务应使用的根上下文，避免手动触发时被请求上下文取消。
+func (e *Engine) BaseContext() context.Context {
+	if e.baseCtx != nil {
+		return e.baseCtx
+	}
+	return context.Background()
+}
+
+// SetBaseContext 设置后台任务根上下文（服务启动时注入）。
+func (e *Engine) SetBaseContext(ctx context.Context) {
+	if ctx != nil {
+		e.baseCtx = ctx
 	}
 }
 
@@ -345,8 +365,8 @@ func latestExpectedTradeDate(now time.Time) string {
 	return now.Format("2006-01-02")
 }
 
-// fetchKlinesWithFallback 按东财、腾讯依次尝试；北交所 920 存量代码再按
-// 北交所官方映射尝试旧代码，避免因单一出口 IP 被限流或新代码无历史而空转。
+// fetchKlinesWithFallback 按东财、BaoStock、AKShare 依次尝试；腾讯保留为
+// AKShare 之后的末级兼容源。北交所 920 代码由 AKShare 直接支持，仍保留官方旧代码映射尝试。
 func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string) ([]model.Kline, error) {
 	type attempt struct {
 		name   string
@@ -356,10 +376,13 @@ func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string
 	em := e.mgr.Eastmoney()
 	attempts := []attempt{
 		{name: "eastmoney", symbol: symbol, fetch: em.DailyKlines},
+		{name: "baostock", symbol: symbol, fetch: e.baostock.DailyKlines},
+		{name: "akshare", symbol: symbol, fetch: e.akshare.DailyKlines},
 		{name: "tencent", symbol: symbol, fetch: e.tencent.DailyKlines},
 	}
 	if legacy, ok := provider.BSELegacySymbol[symbol]; ok {
 		attempts = append(attempts,
+			attempt{name: "akshare-legacy", symbol: legacy, fetch: e.akshare.DailyKlines},
 			attempt{name: "eastmoney-legacy", symbol: legacy, fetch: em.DailyKlines},
 			attempt{name: "tencent-legacy", symbol: legacy, fetch: e.tencent.DailyKlines},
 		)
