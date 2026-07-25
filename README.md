@@ -62,7 +62,8 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_AI_BASE_URL | 空 | OpenAI 兼容 API 基础地址，如 `https://api.openai.com/v1` |
 | GOSTOCK_AI_API_KEY | 空 | 模型 API Key，仅写入本地或服务器 `.env` |
 | GOSTOCK_AI_MODEL | 空 | 模型正式标识，如服务商实际提供的模型 ID |
-| GOSTOCK_AI_PROMPT | 内置提示词 | AI 趋势推荐的附加分析要求 |
+| GOSTOCK_AI_PROMPT_FILE | config/ai_prompt.md | AI 趋势推荐提示词文件路径（长提示词放文件，配置只填路径） |
+| GOSTOCK_AI_PROMPT | 空 | 可选内联短提示词；留空则用提示词文件，再空则用内嵌默认 |
 
 ### AI 推荐配置示例
 

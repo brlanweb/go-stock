@@ -30,6 +30,7 @@ WORKDIR /opt/go-stock
 COPY python-provider/requirements.txt python-provider/requirements.txt
 RUN pip install --no-cache-dir -r python-provider/requirements.txt
 COPY python-provider/fetch_kline.py python-provider/fetch_kline.py
+COPY config/ai_prompt.md config/ai_prompt.md
 ENV TZ=Asia/Shanghai
 USER gostock
 COPY --from=go-builder /go-stock /usr/local/bin/go-stock

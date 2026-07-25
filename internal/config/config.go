@@ -3,11 +3,15 @@ package config
 
 import (
 	"bufio"
+	_ "embed"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
+
+//go:embed ai_prompt.md
+var embeddedAIPrompt string
 
 // Config 全局配置。
 type Config struct {
@@ -29,10 +33,11 @@ type Config struct {
 
 	QuoteTTLSeconds int // 实时行情缓存 TTL
 
-	AIBaseURL string // OpenAI 兼容模型地址
-	AIAPIKey  string // 模型密钥
-	AIModel   string // 模型名称
-	AIPrompt  string // 股票分析提示词
+	AIBaseURL    string // OpenAI 兼容模型地址
+	AIAPIKey     string // 模型密钥
+	AIModel      string // 模型名称
+	AIPrompt     string // 股票分析提示词（可由 AIPromptFile 覆盖）
+	AIPromptFile string // 提示词文件路径（优先级高于 AIPrompt）
 
 	LogLevel string
 }
@@ -65,7 +70,19 @@ func Load() (*Config, error) {
 		AIAPIKey:          getEnv("GOSTOCK_AI_API_KEY", ""),
 		AIModel:           getEnv("GOSTOCK_AI_MODEL", ""),
 		AIPrompt:          getEnv("GOSTOCK_AI_PROMPT", ""),
+		AIPromptFile:      getEnv("GOSTOCK_AI_PROMPT_FILE", "config/ai_prompt.md"),
 		LogLevel:          getEnv("GOSTOCK_LOG_LEVEL", "info"),
+	}
+	if c.AIPromptFile != "" {
+		if data, err := os.ReadFile(c.AIPromptFile); err == nil {
+			if text := strings.TrimSpace(string(data)); text != "" {
+				c.AIPrompt = text
+			}
+		}
+	}
+	// 外部文件与内联变量都为空时，使用内嵌的默认提示词，保证部署可用。
+	if strings.TrimSpace(c.AIPrompt) == "" {
+		c.AIPrompt = strings.TrimSpace(embeddedAIPrompt)
 	}
 	if c.DBPassword == "" {
 		return nil, fmt.Errorf("GOSTOCK_DB_PASSWORD 未设置（请配置 .env 或环境变量）")

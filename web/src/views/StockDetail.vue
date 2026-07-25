@@ -1,7 +1,40 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { init, dispose, CandleType, type Chart } from 'klinecharts'
+import { init, dispose, registerIndicator, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote } from '../api'
+
+// Vegas 隧道：EMA144 / EMA169（过滤隧道）+ EMA576 / EMA676（趋势隧道）。
+const VEGAS_PERIODS = [144, 169, 576, 676]
+const VEGAS_COLORS = ['#e6a23c', '#f2c96b', '#409eff', '#7cc0ff']
+let vegasRegistered = false
+
+function registerVegas() {
+  if (vegasRegistered) return
+  registerIndicator({
+    name: 'VEGAS',
+    shortName: 'VEGAS',
+    calcParams: VEGAS_PERIODS,
+    figures: VEGAS_PERIODS.map(p => ({ key: `ema${p}`, title: `EMA${p}: `, type: 'line' })),
+    styles: {
+      lines: VEGAS_COLORS.map(color => ({ color, size: 1, smooth: false, style: LineType.Solid, dashedValue: [2, 2] }))
+    },
+    calc: (dataList: KLineData[]) => {
+      const multipliers = VEGAS_PERIODS.map(p => 2 / (p + 1))
+      const emas: number[] = new Array(VEGAS_PERIODS.length).fill(NaN)
+      return dataList.map((k, index) => {
+        const result: Record<string, number> = {}
+        VEGAS_PERIODS.forEach((p, i) => {
+          if (index === 0) emas[i] = k.close
+          else emas[i] = k.close * multipliers[i] + emas[i] * (1 - multipliers[i])
+          if (index + 1 >= p) result[`ema${p}`] = emas[i]
+        })
+        return result
+      })
+    }
+  })
+  vegasRegistered = true
+}
+
 
 const props = defineProps<{ symbol: string }>()
 
@@ -38,7 +71,7 @@ async function refreshQuote() {
 }
 
 async function drawKline(period: 'day' | 'week' | 'month') {
-  const klines = await api.kline(props.symbol, period, 'qfq', 300)
+  const klines = await api.kline(props.symbol, period, 'qfq', 700)
   if (!klChart) return
   klChart.applyNewData(klines.map(k => ({
     timestamp: new Date(k.date).getTime(),
@@ -55,9 +88,10 @@ async function switchTab(t: 'day' | 'week' | 'month') {
 async function nextTickDraw() {
   await new Promise(r => setTimeout(r))
   if (!klChart) {
+    registerVegas()
     klChart = init('kl-chart', { styles: chartStyles })
     klChart?.createIndicator('VOL')
-    klChart?.createIndicator('MA', false, { id: 'candle_pane' })
+    klChart?.createIndicator('VEGAS', true, { id: 'candle_pane' })
   }
   await drawKline(tab.value)
 }
