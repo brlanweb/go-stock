@@ -19,9 +19,13 @@ COPY --from=web-builder /app/web/dist web/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /go-stock ./cmd/server
 
 # ===== 阶段 3：运行镜像（含 Python 历史行情降级源） =====
-FROM python:3.12-alpine
-RUN apk add --no-cache ca-certificates tzdata && \
-    adduser -D -u 1000 gostock
+# 使用 Debian slim：AKShare 依赖 py_mini_racer 的预编译库需要 glibc/libstdc++，
+# Alpine(musl) 会缺少 libstdc++.so.6 导致 AKShare 无法加载。
+FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata wget libstdc++6 && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd -m -u 1000 gostock
 WORKDIR /opt/go-stock
 COPY python-provider/requirements.txt python-provider/requirements.txt
 RUN pip install --no-cache-dir -r python-provider/requirements.txt
