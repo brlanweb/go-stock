@@ -134,7 +134,7 @@ onMounted(async () => {
 
 <style scoped>
 .market-sidebar { position:relative; z-index:3; display:flex; min-height:0; flex-direction:column; gap:12px; padding:14px 8px; border-right:1px solid #354157; background:#1c2639; color:#edf1f7; overflow-y:auto; }
-.brand { padding:0 7px 12px; margin-bottom:2px; border-bottom:1px solid #354157; color:#f0f3f8; font-size:16px; font-weight:720; }
+.brand { padding:0 7px 7px; border-bottom:1px solid #354157; color:#f0f3f8; font-size:16px; font-weight:720; }
 .side-field { display:grid; grid-template-columns:48px 1fr; align-items:center; gap:8px; color:#adb7c7; font-size:13px; }.side-field select,.side-search input { width:100%; min-width:0; height:29px; border:1px solid #3c475c; border-radius:0; outline:none; background:#354055; color:#f1f4f8; font-size:13px; }.side-field select { padding:0 8px; }
 .side-search { position:relative; display:grid; gap:8px; margin-top:6px; padding-top:12px; border-top:1px solid #354157; color:#c3cbd7; font-size:13px; }.side-search input { padding:6px 8px; }
 .search-results { position:absolute; z-index:20; top:calc(100% + 3px); width:100%; max-height:260px; overflow:auto; border:1px solid #445067; background:#1d2739; box-shadow:0 12px 30px rgba(0,0,0,.4); }.search-results button { display:flex; width:100%; justify-content:space-between; gap:8px; padding:8px; border:0; border-bottom:1px solid #344056; border-radius:0; background:transparent; color:#edf2f9; text-align:left; }.search-results span { color:#9ba8bd; font-size:11px; }
