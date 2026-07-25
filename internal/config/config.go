@@ -55,6 +55,7 @@ func Load() (*Config, error) {
 		MCPToken:        getEnv("GOSTOCK_MCP_TOKEN", ""),
 		BackfillWorkers: getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
 		BackfillQPS:     getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
+		SyncSectors:     getEnvBool("GOSTOCK_SYNC_SECTORS", false),
 		QuoteTTLSeconds: getEnvInt("GOSTOCK_QUOTE_TTL", 3),
 		AIBaseURL:       getEnv("GOSTOCK_AI_BASE_URL", ""),
 		AIAPIKey:        getEnv("GOSTOCK_AI_API_KEY", ""),
@@ -119,6 +120,15 @@ func getEnvFloat(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func getEnvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

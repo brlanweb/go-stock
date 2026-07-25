@@ -52,9 +52,33 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_ADDR | :8480 | 监听地址 |
 | GOSTOCK_DB_HOST/PORT/NAME/USER/PASSWORD | - | MySQL 连接（密码必填） |
 | GOSTOCK_MCP_TOKEN | 空 | MCP Bearer 鉴权，公网部署必设 |
-| GOSTOCK_BACKFILL_WORKERS | 2 | 回填并发数 |
-| GOSTOCK_BACKFILL_QPS | 3 | 东财限流 QPS |
+| GOSTOCK_BACKFILL_WORKERS | 1 | 历史补齐并发数；固定出口建议保持 1 |
+| GOSTOCK_BACKFILL_QPS | 0.35 | 单数据源历史补齐 QPS |
+| GOSTOCK_SYNC_SECTORS | false | 启动历史补齐时是否同时刷新行业/概念成分 |
 | GOSTOCK_QUOTE_TTL | 3 | 交易时段行情缓存秒数 |
+| GOSTOCK_AI_BASE_URL | 空 | OpenAI 兼容 API 基础地址，如 `https://api.openai.com/v1` |
+| GOSTOCK_AI_API_KEY | 空 | 模型 API Key，仅写入本地或服务器 `.env` |
+| GOSTOCK_AI_MODEL | 空 | 模型正式标识，如服务商实际提供的模型 ID |
+| GOSTOCK_AI_PROMPT | 内置提示词 | AI 趋势推荐的附加分析要求 |
+
+### AI 推荐配置示例
+
+程序会在 `GOSTOCK_AI_BASE_URL` 后自动拼接 `/chat/completions`。不要把 API Key 提交到 Git 仓库，也不要在聊天中发送密钥。
+
+```env
+GOSTOCK_AI_BASE_URL=https://api.openai.com/v1
+GOSTOCK_AI_API_KEY=在服务器本地填写真实密钥
+GOSTOCK_AI_MODEL=gpt-5.6-sol
+GOSTOCK_AI_PROMPT=基于候选股最近60个交易日OHLCV，评估未来10个交易日维持上涨趋势的概率，只返回3只并说明原因。
+```
+
+修改 `.env` 后重启服务，再手动验证：
+
+```bash
+docker compose up -d --force-recreate go-stock
+curl -X POST http://127.0.0.1:8480/api/v1/recommendations/run
+curl http://127.0.0.1:8480/api/v1/recommendations
+```
 
 ## REST API
 
@@ -72,7 +96,8 @@ docker stats go-stock  # 观察内存
 | `GET/POST/DELETE /api/v1/watchlist[/{code}]` | 自选股与本地快照 |
 | `GET /api/v1/sync/status` | 回填进度 |
 | `POST /api/v1/sync/stock/{code}?mode=latest\|missing\|full` | 显式同步单只证券 |
-| `POST /api/v1/sync/backfill` | 已停用，避免无差别全市场历史回填 |
+| `POST /api/v1/sync/backfill` | 启动受控的全市场缺失历史补齐（完整证券跳过上游） |
+| `POST /api/v1/sync/backfill/stop` | 停止历史补齐并保留断点 |
 | `POST /api/v1/sync/daily` | 手动触发本地市场快照采集 |
 
 ## MCP 接入（LobeHub）
@@ -93,7 +118,7 @@ LobeHub 添加自定义 MCP 插件：
 
 - **复权设计**：`kline_daily` 存不复权 OHLCV + `adj_factor`（后复权收盘/不复权收盘）。前复权价 = 原始价 × adj_factor ÷ 最新 adj_factor。除权发生后仅需增量更新，无需重刷全量历史。
 - **快照新鲜度**：报价与指数是最近一次 `12:00` 或 `16:00` 的库内快照，不是逐秒实时行情。响应中的 `fetched_at` 为该快照采集时间。
-- **历史补齐**：后台只处理缺失或落后最近交易日的数据；需要拉取某只证券上市以来完整日K时，调用显式单股同步 `mode=full`。全市场无差别历史回填接口已停用。
+- **历史补齐**：后台只处理缺失或落后最近交易日的数据，页面每 5 秒展示完整、待处理、处理中、失败、部分和空数据数量；完整证券会跳过上游。需要拉取某只证券上市以来完整日K时，也可调用显式单股同步 `mode=full`。
 - **分钟分时**：当前没有分钟级本地采集与存储，`/api/v1/timeshare/{code}` 返回 `501`，请使用日K、周K、月K进行分析。
 
 ## 目录结构

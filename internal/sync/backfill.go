@@ -21,10 +21,11 @@ const (
 
 // Engine 同步引擎。
 type Engine struct {
-	st      *store.Store
-	mgr     *provider.Manager
-	tencent *provider.Tencent // K线降级源（共享限流器）
-	workers int
+	st          *store.Store
+	mgr         *provider.Manager
+	tencent     *provider.Tencent // K线降级源（共享限流器）
+	workers     int
+	syncSectors bool
 
 	mu      sync.Mutex
 	running atomic.Bool
@@ -32,11 +33,18 @@ type Engine struct {
 }
 
 // NewEngine 创建同步引擎。
-func NewEngine(st *store.Store, mgr *provider.Manager, workers int) *Engine {
+func NewEngine(st *store.Store, mgr *provider.Manager, workers int, syncSectors ...bool) *Engine {
 	if workers < 1 {
 		workers = 1
 	}
-	return &Engine{st: st, mgr: mgr, tencent: provider.NewTencent(), workers: workers}
+	shouldSyncSectors := len(syncSectors) > 0 && syncSectors[0]
+	return &Engine{
+		st:          st,
+		mgr:         mgr,
+		tencent:     provider.NewTencent(),
+		workers:     workers,
+		syncSectors: shouldSyncSectors,
+	}
 }
 
 // IsRunning 回填是否进行中。
@@ -212,7 +220,7 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 			return err
 		}
 		slog.Warn("证券列表刷新失败，使用既有断点继续", "err", err)
-	} else {
+	} else if e.syncSectors {
 		if err := e.SyncSectors(ctx); err != nil {
 			slog.Warn("板块成分同步失败，继续历史回填", "err", err)
 		}
