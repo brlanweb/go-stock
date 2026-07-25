@@ -23,6 +23,7 @@ type Config struct {
 
 	BackfillWorkers int     // 回填并发 worker 数
 	BackfillQPS     float64 // 单源全局 QPS 上限
+	SyncSectors     bool    // 启动回填时是否同步板块成分（默认关闭，避免额外上游压力）
 
 	QuoteTTLSeconds int // 实时行情缓存 TTL
 
@@ -52,8 +53,8 @@ func Load() (*Config, error) {
 		DBUser:          getEnv("GOSTOCK_DB_USER", "stock"),
 		DBPassword:      getEnv("GOSTOCK_DB_PASSWORD", ""),
 		MCPToken:        getEnv("GOSTOCK_MCP_TOKEN", ""),
-		BackfillWorkers: getEnvInt("GOSTOCK_BACKFILL_WORKERS", 2),
-		BackfillQPS:     getEnvFloat("GOSTOCK_BACKFILL_QPS", 3),
+		BackfillWorkers: getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
+		BackfillQPS:     getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
 		QuoteTTLSeconds: getEnvInt("GOSTOCK_QUOTE_TTL", 3),
 		AIBaseURL:       getEnv("GOSTOCK_AI_BASE_URL", ""),
 		AIAPIKey:        getEnv("GOSTOCK_AI_API_KEY", ""),
@@ -68,7 +69,7 @@ func Load() (*Config, error) {
 		c.BackfillWorkers = 1
 	}
 	if c.BackfillQPS <= 0 {
-		c.BackfillQPS = 3
+		c.BackfillQPS = 0.35
 	}
 	return c, nil
 }

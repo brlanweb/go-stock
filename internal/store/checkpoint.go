@@ -38,10 +38,12 @@ func (s *Store) InitCheckpoints(ctx context.Context, task string, symbols []stri
 // ClaimPending 领取一批待处理任务并标记 running（含 failed 重试，retry<5）。
 func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.SyncCheckpoint, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT symbol, IFNULL(DATE_FORMAT(last_synced_date,'%Y-%m-%d'),''), retry_count
-		 FROM sync_checkpoint
-		 WHERE task=? AND (status='pending' OR (status='failed' AND retry_count<5) OR status='running')
-		 ORDER BY status='running' DESC, symbol LIMIT ?`, task, n)
+		`SELECT cp.symbol, IFNULL(DATE_FORMAT(cp.last_synced_date,'%Y-%m-%d'),''), cp.retry_count
+		 FROM sync_checkpoint cp
+		 INNER JOIN stock_basic b ON b.symbol=cp.symbol
+		 WHERE cp.task=? AND b.status='listed'
+		   AND (cp.status='pending' OR (cp.status='failed' AND cp.retry_count<5) OR cp.status='running')
+		 ORDER BY cp.status='running' DESC, cp.symbol LIMIT ?`, task, n)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +82,7 @@ func (s *Store) MarkDone(ctx context.Context, task, symbol, targetDate string) e
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
+				WHEN b.status<>'listed' THEN 'done'
 				WHEN k.last_date IS NOT NULL AND k.last_date>=?
 				 AND (b.list_date IS NULL OR b.list_date>? OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
 				THEN 'done' ELSE 'pending' END,
@@ -99,10 +102,25 @@ func (s *Store) MarkFailed(ctx context.Context, task, symbol, errMsg string) err
 	return err
 }
 
-// ResetFailed 将失败断点重置为 pending 并清零重试计数（新一轮回填给予重试机会）。
+// ResetFailed 保留失败断点及 retry_count，避免每次重启把永久失败证券再次重试。
 func (s *Store) ResetFailed(ctx context.Context, task string) (int64, error) {
+	return 0, nil
+}
+
+// RequeueExhaustedMappedSymbols 只为已具备官方旧代码映射的 920 证券提供一次新策略重试机会。
+// 其他永久失败断点保持 failed，避免服务重启后重新撞击上游限流。
+func (s *Store) RequeueExhaustedMappedSymbols(ctx context.Context, task string, symbols []string) (int64, error) {
+	if len(symbols) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(symbols)), ",")
+	args := make([]interface{}, 0, len(symbols)+1)
+	args = append(args, task)
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
 	res, err := s.DB.ExecContext(ctx,
-		"UPDATE sync_checkpoint SET status='pending', retry_count=0 WHERE task=? AND status='failed'", task)
+		"UPDATE sync_checkpoint SET status='pending',retry_count=0,last_error='' WHERE task=? AND status='failed' AND symbol IN ("+placeholders+")", args...)
 	if err != nil {
 		return 0, err
 	}
@@ -140,10 +158,15 @@ func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate strin
 					OR b.list_date>?
 					OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY)
 				 ) THEN 'done'
+				WHEN cp.status='failed' AND cp.retry_count>=5 THEN 'failed'
 				ELSE 'pending'
 			END,
-			cp.retry_count=0,
-			cp.last_error=''
+			cp.retry_count=CASE
+				WHEN b.status<>'listed' THEN 0
+				WHEN cp.status='done' THEN 0
+				WHEN cp.status='failed' THEN cp.retry_count
+				ELSE cp.retry_count END,
+			cp.last_error=CASE WHEN b.status<>'listed' OR cp.status='done' THEN '' ELSE cp.last_error END
 		WHERE cp.task=?`, targetDate, targetDate, task)
 	if err != nil {
 		return 0, fmt.Errorf("reconcile checkpoints: %w", err)

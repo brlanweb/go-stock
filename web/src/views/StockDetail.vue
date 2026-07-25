@@ -91,7 +91,7 @@ const chartStyles = {
     priceMark: { last: { upColor: '#ffffff', downColor: '#111820', noChangeColor: '#7b8490' } }
   },
   indicator: {
-    bars: [{ upColor: '#ffffff', downColor: '#111820', noChangeColor: '#7b8490', borderColor: '#111820', borderSize: 1, borderStyle: 'solid', borderDashedValue: [], borderRadius: 0 }]
+    bars: [{ upColor: '#d2d8df', downColor: '#111820', noChangeColor: '#7b8490', borderColor: '#111820', borderSize: 1, borderStyle: 'solid', borderDashedValue: [], borderRadius: 0 }]
   },
   xAxis: { tickText: { color: '#56606d' }, axisLine: { color: '#bfc6cf' }, tickLine: { color: '#bfc6cf' } },
   yAxis: { tickText: { color: '#56606d' }, axisLine: { color: '#bfc6cf' }, tickLine: { color: '#bfc6cf' } }
@@ -116,7 +116,9 @@ onUnmounted(() => {
 
 <template>
   <div class="stock-detail">
-    <router-link to="/" class="back-link">← 返回市场云图</router-link>
+    <div class="detail-topbar">
+      <router-link to="/" class="back-link">← 返回市场云图</router-link>
+    </div>
 
     <!-- 报价头 -->
     <div class="panel quote-panel" v-if="quote">
@@ -186,17 +188,19 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.stock-detail { padding-top:10px; }
-.back-link { display:inline-block; margin-bottom:8px; color:#56606d; font-size:13px; }
-.stock-detail .panel { border:1px solid #cdd3db; border-radius:4px; background:#fff; color:#121820; box-shadow:none; }
+.stock-detail { display:grid; min-width:0; width:100%; min-height:calc(100vh - 42px); grid-template-rows:auto auto minmax(460px,1fr); gap:8px; padding:6px 0 8px; }
+.detail-topbar { min-height:22px; }
+.back-link { display:inline-block; color:#56606d; font-size:13px; }
+.stock-detail .panel { margin:0; padding:10px 12px; border:1px solid #cdd3db; border-radius:3px; background:#fff; color:#121820; box-shadow:none; }
 .quote-panel { margin-top:0; }
 .stock-detail .dim { color:#687280; }
 .stock-detail .up { color:#bd2e35; }.stock-detail .down { color:#0f765d; }
-.kline-chart { width:100%; height:520px; background:#f7f8fa; }
-.watch-button { padding:5px 9px; border:1px solid var(--border); background:transparent; color:var(--text-dim); }.watch-button.active { border-color:#d6a12c; color:#e9c16c; }
-.chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
-.sync-actions { display:flex; gap:8px; }.sync-msg { margin:-3px 0 10px; color:var(--text-dim); font-size:12px; }
-@media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; }.kline-chart { height:420px; } }
+.kline-chart { width:100%; height:calc(100vh - 320px); min-height:460px; background:#eef1f4; }
+.watch-button { padding:5px 9px; border:1px solid var(--border); background:transparent; color:var(--text-dim); }.watch-button.active { border-color:#d6a12c; color:#9a6a00; }
+.chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px; }
+.sync-actions { display:flex; gap:8px; }.sync-msg { margin:0 0 6px; color:#687280; font-size:12px; }
+@media (max-width:900px) { .stock-detail { min-height:auto; grid-template-rows:auto auto auto; }.stock-detail .panel { min-width:0; overflow:hidden; }.kline-chart { width:100%; height:62vh; min-height:480px; } }
+@media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; }.kline-chart { height:65vh; min-height:420px; } }
 .quote-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

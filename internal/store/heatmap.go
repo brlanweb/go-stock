@@ -21,20 +21,31 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 	if period != "1d" && period != "3d" && period != "5d" {
 		period = "1d"
 	}
-	if groupBy == "concept" {
-		return []model.HeatmapGroup{}, "概念板块数据尚未同步", nil
-	}
 	if metric == "main_net_inflow" {
 		return []model.HeatmapGroup{}, "主力资金数据尚未同步", nil
 	}
 
 	where := heatmapMarketWhere(market)
+	groupSelect := "b.industry"
+	groupJoin := ""
+	if groupBy == "concept" {
+		exists, err := s.SectorMembershipExists(ctx, "concept")
+		if err != nil {
+			return nil, "", err
+		}
+		if !exists {
+			return []model.HeatmapGroup{}, "概念板块数据尚未同步", nil
+		}
+		groupSelect = "sb.sector_name"
+		groupJoin = "INNER JOIN sector_constituent sc ON sc.symbol=b.symbol INNER JOIN sector_basic sb ON sb.sector_code=sc.sector_code AND sb.sector_type='concept'"
+	}
 	query := fmt.Sprintf(`
-		SELECT b.symbol,b.code,b.name,b.industry,b.exchange,
+		SELECT b.symbol,b.code,b.name,%s,b.exchange,
 		       k.change_pct, k.close,
 		       COALESCE(NULLIF(d.pe_ratio,0), NULLIF(ms.pe_ratio,0), 0),
 		       COALESCE(NULLIF(d.total_mv,0), NULLIF(ms.total_mv,0), 0)
 		FROM stock_basic b
+		%s
 		INNER JOIN (
 			SELECT symbol, MAX(trade_date) AS trade_date
 			FROM kline_daily
@@ -49,7 +60,7 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 			  ON latest_snap.symbol=snap.symbol AND latest_snap.snapshot_at=snap.snapshot_at
 		) ms ON ms.symbol=k.symbol
 		WHERE b.status='listed' AND b.sec_type='stock' %s
-		ORDER BY COALESCE(NULLIF(d.total_mv,0), NULLIF(ms.total_mv,0), 0) DESC, b.code`, where)
+		ORDER BY COALESCE(NULLIF(d.total_mv,0), NULLIF(ms.total_mv,0), 0) DESC, b.code`, groupSelect, groupJoin, where)
 	rows, err := s.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, "", fmt.Errorf("查询云图数据: %w", err)
@@ -63,6 +74,7 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		offset = 4
 	}
 	groups := make(map[string][]model.HeatmapItem)
+	seenItems := make(map[string]bool)
 	for rows.Next() {
 		var item model.HeatmapItem
 		var close float64
@@ -81,7 +93,11 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		if name == "" || name == "-" {
 			name = "其他"
 		}
-		groups[name] = append(groups[name], item)
+		key := name + "\x00" + item.Symbol
+		if !seenItems[key] {
+			seenItems[key] = true
+			groups[name] = append(groups[name], item)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, "", err

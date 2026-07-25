@@ -51,6 +51,24 @@ func (s *Store) upsertSecBatch(ctx context.Context, snaps []provider.SecuritySna
 	return nil
 }
 
+// MarkSecuritiesMigrated 将已切换代码的旧证券停止参与回填，历史数据仍保留。
+func (s *Store) MarkSecuritiesMigrated(ctx context.Context, symbols []string) (int64, error) {
+	if len(symbols) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(symbols)), ",")
+	args := make([]interface{}, len(symbols))
+	for i, symbol := range symbols {
+		args[i] = symbol
+	}
+	res, err := s.DB.ExecContext(ctx,
+		"UPDATE stock_basic SET status='delisted',updated_at=NOW() WHERE symbol IN ("+placeholders+")", args...)
+	if err != nil {
+		return 0, fmt.Errorf("mark migrated securities: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // ListSecurities 证券列表（可按类型过滤）。
 func (s *Store) ListSecurities(ctx context.Context, secType string) ([]model.Security, error) {
 	q := "SELECT symbol,market,code,name,sec_type,exchange,industry,IFNULL(DATE_FORMAT(list_date,'%Y-%m-%d'),''),total_share,float_share,status FROM stock_basic WHERE status='listed'"

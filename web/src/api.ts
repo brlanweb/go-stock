@@ -149,6 +149,7 @@ export const api = {
   watchlist: () => req<Quote[] | string[]>('/watchlist'),
   recommendations: (date = '') => req<Recommendation[]>(`/recommendations${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   recommendationHistory: (limit = 90) => req<string[]>(`/recommendations/history?limit=${limit}`),
+  runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),
   delWatch: (code: string) => req(`/watchlist/${code}`, { method: 'DELETE' }),
   syncStatus: () => req<SyncStatus>('/sync/status'),

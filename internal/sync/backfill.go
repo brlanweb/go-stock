@@ -54,6 +54,10 @@ func (e *Engine) SyncSecurities(ctx context.Context) (int, error) {
 	if err := e.st.UpsertSecurities(ctx, snaps); err != nil {
 		return 0, err
 	}
+	// 这些北交所旧代码已经转板到沪深市场。保留旧历史，但不再请求旧代码补到当前日。
+	if _, err := e.st.MarkSecuritiesMigrated(ctx, []string{"BJ832317", "BJ833874", "BJ833994"}); err != nil {
+		return 0, err
+	}
 	symbols := make([]string, 0, len(snaps))
 	for _, sn := range snaps {
 		symbols = append(symbols, sn.Symbol)
@@ -63,6 +67,29 @@ func (e *Engine) SyncSecurities(ctx context.Context) (int, error) {
 	}
 	slog.Info("证券列表同步完成", "count", len(snaps))
 	return len(snaps), nil
+}
+
+// SyncSectors 同步行业/概念板块及成分关系。失败不会影响证券日线任务。
+func (e *Engine) SyncSectors(ctx context.Context) error {
+	for _, sectorType := range []string{"industry", "concept"} {
+		sectors, err := e.mgr.Eastmoney().Sectors(ctx, sectorType)
+		if err != nil {
+			return err
+		}
+		constituents := make([]provider.SectorConstituent, 0)
+		for _, sector := range sectors {
+			items, err := e.mgr.Eastmoney().SectorConstituents(ctx, sector.Code)
+			if err != nil {
+				return err
+			}
+			constituents = append(constituents, items...)
+		}
+		if err := e.st.ReplaceSectors(ctx, sectorType, sectors, constituents); err != nil {
+			return err
+		}
+		slog.Info("板块成分同步完成", "type", sectorType, "sectors", len(sectors), "constituents", len(constituents))
+	}
+	return nil
 }
 
 // SyncStock 按需同步单个证券。latest 只补当前日，missing 从库内最后日期补齐，
@@ -168,6 +195,15 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 	} else if n > 0 {
 		slog.Info("重置 failed 断点重试", "count", n)
 	}
+	mappedSymbols := make([]string, 0, len(provider.BSELegacySymbol))
+	for symbol := range provider.BSELegacySymbol {
+		mappedSymbols = append(mappedSymbols, symbol)
+	}
+	if n, err := e.st.RequeueExhaustedMappedSymbols(ctx, TaskBackfill, mappedSymbols); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("北交所映射断点获得一次新策略重试", "count", n)
+	}
 
 	// 2. 刷新证券列表（幂等 upsert，新股自动加入断点）。
 	if _, err := e.SyncSecurities(ctx); err != nil {
@@ -176,6 +212,10 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 			return err
 		}
 		slog.Warn("证券列表刷新失败，使用既有断点继续", "err", err)
+	} else {
+		if err := e.SyncSectors(ctx); err != nil {
+			slog.Warn("板块成分同步失败，继续历史回填", "err", err)
+		}
 	}
 
 	// 3. 按目标交易日重新判定缺失。这样历史完整且已经更新的证券不会重复请求上游。
@@ -297,25 +337,61 @@ func latestExpectedTradeDate(now time.Time) string {
 	return now.Format("2006-01-02")
 }
 
-// fetchKlinesWithFallback 东财优先；熔断时等待冷却（保证数据完整性），
-// 个股可降级腾讯，ETF 腾讯不支持（HTTP 501）故仅东财。
+// fetchKlinesWithFallback 按东财、腾讯依次尝试；北交所 920 存量代码再按
+// 北交所官方映射尝试旧代码，避免因单一出口 IP 被限流或新代码无历史而空转。
 func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string) ([]model.Kline, error) {
+	type attempt struct {
+		name   string
+		symbol string
+		fetch  func(context.Context, string, string, string) ([]model.Kline, error)
+	}
 	em := e.mgr.Eastmoney()
-	// 熔断中：等待冷却而非跳过（回填以完整性优先）
-	for !em.Breaker().Allow() {
-		select {
-		case <-time.After(5 * time.Second):
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	attempts := []attempt{
+		{name: "eastmoney", symbol: symbol, fetch: em.DailyKlines},
+		{name: "tencent", symbol: symbol, fetch: e.tencent.DailyKlines},
+	}
+	if legacy, ok := provider.BSELegacySymbol[symbol]; ok {
+		attempts = append(attempts,
+			attempt{name: "eastmoney-legacy", symbol: legacy, fetch: em.DailyKlines},
+			attempt{name: "tencent-legacy", symbol: legacy, fetch: e.tencent.DailyKlines},
+		)
+	}
+
+	var best []model.Kline
+	var lastErr error
+	for _, candidate := range attempts {
+		isEastmoney := candidate.name == "eastmoney" || candidate.name == "eastmoney-legacy"
+		if isEastmoney && !em.Breaker().Allow() {
+			continue
+		}
+		klines, err := candidate.fetch(ctx, candidate.symbol, beg, "")
+		if err != nil {
+			lastErr = err
+			if isEastmoney {
+				em.Breaker().Failure(em.Name())
+			}
+			slog.Debug("历史K线源失败，继续降级", "source", candidate.name, "symbol", symbol, "query_symbol", candidate.symbol, "err", err)
+			continue
+		}
+		if isEastmoney {
+			em.Breaker().Success()
+		}
+		for i := range klines {
+			klines[i].Symbol = symbol
+		}
+		if len(klines) > len(best) {
+			best = klines
+		}
+		// 旧代码返回多日历史，或当前代码返回足够覆盖判断的数据时直接采用。
+		if (candidate.symbol != symbol && len(klines) > 1) || len(klines) >= 20 {
+			return klines, nil
 		}
 	}
-	klines, err := em.DailyKlines(ctx, symbol, beg, "")
-	if err == nil {
-		em.Breaker().Success()
-		return klines, nil
+	if len(best) > 0 {
+		return best, nil
 	}
-	em.Breaker().Failure(em.Name())
-	slog.Debug("东财K线失败，降级腾讯", "symbol", symbol, "err", err)
-	// 腾讯降级（共享实例限流；ETF 会 501，重试机制会再回东财）
-	return e.tencent.DailyKlines(ctx, symbol, beg, "")
+	if lastErr == nil {
+		lastErr = fmt.Errorf("所有历史K线源均不可用或处于熔断冷却")
+	}
+	return nil, lastErr
 }

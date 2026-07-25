@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hoax/go-stock/internal/model"
@@ -22,9 +23,10 @@ type Config struct {
 }
 
 type Service struct {
-	st     *store.Store
-	config Config
-	client *http.Client
+	st      *store.Store
+	config  Config
+	client  *http.Client
+	running atomic.Bool
 }
 
 func New(st *store.Store, config Config) *Service {
@@ -35,10 +37,16 @@ func (s *Service) Enabled() bool {
 	return s.config.BaseURL != "" && s.config.APIKey != "" && s.config.Model != ""
 }
 
+func (s *Service) Running() bool { return s.running.Load() }
+
 func (s *Service) RunDaily(ctx context.Context) error {
 	if !s.Enabled() {
-		return nil
+		return fmt.Errorf("AI 推荐未配置")
 	}
+	if !s.running.CompareAndSwap(false, true) {
+		return fmt.Errorf("AI 推荐任务正在执行")
+	}
+	defer s.running.Store(false)
 	candidates, err := s.st.RecommendationCandidates(ctx)
 	if err != nil {
 		return err

@@ -17,11 +17,12 @@ type Eastmoney struct {
 	breaker *CircuitBreaker
 }
 
-// NewEastmoney 保守限流：默认 3 QPS + 300ms 抖动，5 连败熔断 60s。
+// NewEastmoney 保守限流：默认由配置控制 QPS，并附加 300-1200ms 随机抖动；
+// 连续失败后冷却 10 分钟，避免固定出口 IP 在短时间内反复撞限流。
 func NewEastmoney(qps float64) *Eastmoney {
 	return &Eastmoney{
-		gate:    NewRateGate(qps, 300*time.Millisecond),
-		breaker: NewCircuitBreaker(5, 60*time.Second),
+		gate:    NewRateGate(qps, 1200*time.Millisecond),
+		breaker: NewCircuitBreaker(3, 10*time.Minute),
 	}
 }
 
@@ -134,7 +135,8 @@ func (e *Eastmoney) Quote(ctx context.Context, symbol string) (*model.Quote, err
 		}
 	}
 	if q.Price == nil {
-		return nil, fmt.Errorf("eastmoney quote 无有效价格: %s", symbol)	}
+		return nil, fmt.Errorf("eastmoney quote 无有效价格: %s", symbol)
+	}
 	return q, nil
 }
 

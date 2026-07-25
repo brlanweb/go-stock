@@ -263,6 +263,10 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置")
 		return
 	}
+	if s.Analysis.Running() {
+		writeErr(w, http.StatusConflict, "AI 推荐任务正在执行")
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
