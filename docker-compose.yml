@@ -1,0 +1,22 @@
+services:
+  go-stock:
+    build: .
+    image: go-stock:latest
+    container_name: go-stock
+    restart: unless-stopped
+    ports:
+      - "8480:8480"
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    # 内存限制：目标 <50MB，上限给 256MB 冗余
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
