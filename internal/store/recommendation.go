@@ -124,5 +124,8 @@ func (s *Store) LatestRecommendations(ctx context.Context) ([]model.StockRecomme
 		}
 		out = append(out, item)
 	}
+	if out == nil {
+		out = []model.StockRecommendation{}
+	}
 	return out, rows.Err()
 }

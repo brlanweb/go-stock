@@ -181,11 +181,14 @@ func (s *Store) SyncStatus(ctx context.Context, task string) (*model.SyncStatus,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	_ = s.DB.QueryRowContext(ctx, `SELECT
+	var complete, partial, empty sql.NullInt64
+	if err := s.DB.QueryRowContext(ctx, `SELECT
 		SUM(status='done'),
 		SUM(status<>'done' AND kline_count>0),
 		SUM(kline_count=0)
-		FROM sync_checkpoint WHERE task=?`, task).Scan(&st.Complete, &st.Partial, &st.Empty)
+		FROM sync_checkpoint WHERE task=?`, task).Scan(&complete, &partial, &empty); err == nil {
+		st.Complete, st.Partial, st.Empty = int(complete.Int64), int(partial.Int64), int(empty.Int64)
+	}
 	latest, err := s.LatestKlineDate(ctx)
 	if err == nil {
 		st.LatestDate = latest
