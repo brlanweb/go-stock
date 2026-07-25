@@ -32,7 +32,8 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 	query := fmt.Sprintf(`
 		SELECT b.symbol,b.code,b.name,b.industry,b.exchange,
 		       k.change_pct, k.close,
-		       IFNULL(d.pe_ratio,0), IFNULL(d.total_mv,0)
+		       COALESCE(NULLIF(d.pe_ratio,0), NULLIF(ms.pe_ratio,0), 0),
+		       COALESCE(NULLIF(d.total_mv,0), NULLIF(ms.total_mv,0), 0)
 		FROM stock_basic b
 		INNER JOIN (
 			SELECT symbol, MAX(trade_date) AS trade_date
@@ -41,8 +42,14 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		) latest ON latest.symbol=b.symbol
 		INNER JOIN kline_daily k ON k.symbol=latest.symbol AND k.trade_date=latest.trade_date
 		LEFT JOIN daily_indicator d ON d.symbol=k.symbol AND d.trade_date=k.trade_date
+		LEFT JOIN (
+			SELECT snap.symbol,snap.pe_ratio,snap.total_mv
+			FROM market_snapshot snap
+			INNER JOIN (SELECT symbol,MAX(snapshot_at) AS snapshot_at FROM market_snapshot GROUP BY symbol) latest_snap
+			  ON latest_snap.symbol=snap.symbol AND latest_snap.snapshot_at=snap.snapshot_at
+		) ms ON ms.symbol=k.symbol
 		WHERE b.status='listed' AND b.sec_type='stock' %s
-		ORDER BY d.total_mv DESC, b.code`, where)
+		ORDER BY COALESCE(NULLIF(d.total_mv,0), NULLIF(ms.total_mv,0), 0) DESC, b.code`, where)
 	rows, err := s.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, "", fmt.Errorf("查询云图数据: %w", err)
@@ -98,7 +105,16 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		sort.Slice(items, func(i, j int) bool { return items[i].TotalMV > items[j].TotalMV })
 		out = append(out, model.HeatmapGroup{Name: name, ChangePct: weighted / total, Items: items})
 	}
-	sort.Slice(out, func(i, j int) bool { return abs(out[i].ChangePct) > abs(out[j].ChangePct) })
+	sort.Slice(out, func(i, j int) bool {
+		var left, right float64
+		for _, item := range out[i].Items {
+			left += item.TotalMV
+		}
+		for _, item := range out[j].Items {
+			right += item.TotalMV
+		}
+		return left > right
+	})
 	return out, "", nil
 }
 
