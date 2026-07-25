@@ -10,6 +10,7 @@ interface TreeDatum {
   item?: HeatmapItem
   children?: TreeDatum[]
   weight?: number
+  sectorWeight?: number
 }
 
 const router = useRouter()
@@ -29,43 +30,79 @@ let resizeObserver: ResizeObserver | undefined
 const heatLegend = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
 
 const itemCount = computed(() => groups.value.reduce((sum, group) => sum + group.items.length, 0))
-// 个股市值占比压缩：极少数超大市值（银行、白酒龙头）会占据云图绝大部分空间，
-// 用对数映射 + 软上限（在最大值的 12% 处封顶）使头部不至于吞掉整屏。
-const MAX_STOCK_RATIO = 0.12
+// 个股市值占比压缩：极少数超大市值（银行、白酒龙头）会占据云图绝大部分空间。
+// 行业层先按总市值×强度压缩，再让每个行业下"少数大盘股"不挤压同行小盘股。
+// - MAX_STOCK_RATIO：单只股票占云图最大面积比例（按对数映射后归一）。
+// - MAX_SECTOR_RATIO：单个行业占云图最大面积比例，再叠加行业强度（涨跌幅绝对值）。
+// - SECTOR_STRENGTH_BOOST：行业强度（涨跌幅）权重倍数，用于放大强势行业。
+const MAX_STOCK_RATIO = 0.08
+const MAX_SECTOR_RATIO = 0.15
+const SECTOR_STRENGTH_BOOST = 3
+const STOCK_AREA_FLOOR = 1.0
+const SMALL_SECTOR_FILL = 0.7 // 小板块目标填充率（占自身面积的比例）
 
-function adjustedWeight(totalMV: number, allMvs: number[]) {
-  if (!allMvs.length) return 1
-  const max = Math.max(...allMvs)
-  const logMV = Math.log(Math.max(totalMV, 1) + 1)
-  const logMax = Math.log(Math.max(max, 1) + 1)
-  const minLog = Math.log(Math.min(...allMvs) + 1)
-  const ratio = (logMV - minLog) / Math.max(logMax - minLog, 0.0001)
-  // ratio ∈ [0,1]，最大股按对数归一后等于 1
-  // 再用最大个股占比上限压制：ratio=1 时缩为 MAX_STOCK_RATIO，等比扩展到 0
-  const share = ratio * MAX_STOCK_RATIO
-  return share + 1 // 基础权重 1，配合 share 让小盘股也有可见空间
+function logRange(value: number, minLog: number, maxLog: number): number {
+  if (maxLog <= minLog) return 0
+  return (Math.log(Math.max(value, 1) + 1) - minLog) / (maxLog - minLog)
+}
+
+// 单股权重：在基础值上叠加对数归一的市值比，避免大市值吞掉同板块小盘股
+function stockWeight(totalMV: number, max: number) {
+  if (!max || totalMV <= 0) return STOCK_AREA_FLOOR
+  const logMV = Math.log(totalMV + 1)
+  const logMax = Math.log(max + 1)
+  const ratio = Math.min(1, logMV / logMax)
+  return STOCK_AREA_FLOOR + ratio * MAX_STOCK_RATIO
+}
+
+// 板块权重：总市值基础 + 强度加成。强度放大强势行业，但通过板块空隙校正避免小板块被压缩成空白。
+function sectorWeight(sectorMV: number, maxSectorMV: number, sectorChangePct: number) {
+  const base = logRange(sectorMV, 1, Math.max(maxSectorMV, 1))
+  const strength = Math.min(1, Math.abs(sectorChangePct) / 3)
+  return 1 + (base + strength * SECTOR_STRENGTH_BOOST) * MAX_SECTOR_RATIO
 }
 
 const layout = computed(() => {
   if (!groups.value.length || mapWidth.value <= 0 || mapHeight.value <= 0) {
     return { sectors: [] as HierarchyRectangularNode<TreeDatum>[], stocks: [] as HierarchyRectangularNode<TreeDatum>[] }
   }
+  // 板块面积 = sqrt(总市值) × 强度调整；弱化市值线性影响，让中小板块不再被吞掉。
+  // 单股面积 = sqrt(市值) × 强度调整，与行业同级避免层级重复放大。
   const allMvs = groups.value.flatMap(g => g.items.map(i => Number(i.total_mv) || 0)).filter(v => v > 0)
+  const stockMax = allMvs.length ? Math.max(...allMvs) : 0
   const data: TreeDatum = {
     name: 'A股',
-    children: groups.value.map(group => ({
-      name: group.name,
-      children: group.items.map(item => ({ name: item.name, item, weight: adjustedWeight(Number(item.total_mv) || 0, allMvs) }))
-    }))
+    children: groups.value.map((group) => {
+      const totalMV = group.items.reduce((s, i) => s + (Number(i.total_mv) || 0), 0)
+      const strength = Math.min(1, Math.abs(Number(group.change_pct) || 0) / 3)
+      // 板块"视觉权重"：以总市值平方根为基准，加入股票数修正（保证股少也有可见空间）
+      const mvFactor = stockMax > 0 ? Math.sqrt(totalMV / stockMax) : 0.1
+      const countFactor = Math.min(0.4, group.items.length / 80)
+      const sectorWeightValue = 0.3 + mvFactor * 0.6 + countFactor + strength * 0.5
+      return {
+        name: group.name,
+        sectorWeight: sectorWeightValue,
+        children: group.items.map(item => ({ name: item.name, item, weight: stockWeight(Number(item.total_mv) || 0, stockMax) }))
+      }
+    })
   }
   const root = hierarchy(data)
-    .sum(node => node.item ? Math.max((Number(node.item.total_mv) || 0), 1) * (node.weight || 1) : 0)
+    .sum((node: TreeDatum) => {
+      if (node.item) {
+        // 单股按对数市值 + 基础权重，使小盘股也占据可见空间
+        const mv = Number(node.item.total_mv) || 0
+        const w = stockWeight(mv, stockMax)
+        return Math.max(mv, 1) * w
+      }
+      // 行业层：sectorWeight 决定面积（平方根+股票数+强度）
+      return Math.max((node.sectorWeight || 1), 0.1)
+    })
     .sort((a, b) => (b.value || 0) - (a.value || 0))
   const rectangularRoot = treemap<TreeDatum>()
     .size([mapWidth.value, mapHeight.value])
     .tile(treemapSquarify.ratio(1.2))
-    .paddingOuter(1)
-    .paddingInner(1)
+    .paddingOuter(2)
+    .paddingInner(0)
     .paddingTop(node => node.depth === 1 ? 19 : 0)
     .round(true)(root)
   return {

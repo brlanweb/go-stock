@@ -40,6 +40,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sectors", s.handleSectors)
 	mux.HandleFunc("GET /api/v1/sectors/{code}/constituents", s.handleSectorConstituents)
 	mux.HandleFunc("GET /api/v1/stock/{code}/detail", s.handleStockDetail)
+	mux.HandleFunc("POST /api/v1/agent/chat", s.handleAgentChat)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
@@ -280,6 +281,32 @@ func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, detail)
+}
+
+func (s *Server) handleAgentChat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Symbol   string `json:"symbol"`
+		Question string `json:"question"`
+		Context  string `json:"context"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败")
+		return
+	}
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置（GOSTOCK_AI_BASE_URL/API_KEY/MODEL）")
+		return
+	}
+	if body.Question == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 question")
+		return
+	}
+	reply, err := s.Analysis.ChatStock(r.Context(), body.Symbol, body.Question, body.Context)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
 }
 
 func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {

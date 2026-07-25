@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { api, type StockDetailPayload, type Kline } from '../api'
 
 const props = defineProps<{ detail: StockDetailPayload | null }>()
-const open = ref(false)
+const open = ref(true)
 const messages = ref<{ role: 'user' | 'assistant'; text: string }[]>([])
 const input = ref('')
 const sending = ref(false)
 const error = ref('')
+
+onMounted(() => { open.value = true })
 
 function fmtClose(k: Kline) { return k.close.toFixed(2) }
 function pctChange(k: Kline) {

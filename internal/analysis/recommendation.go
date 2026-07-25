@@ -39,6 +39,51 @@ func (s *Service) Enabled() bool {
 
 func (s *Service) Running() bool { return s.running.Load() }
 
+func (s *Service) ChatStock(ctx context.Context, symbol, question, ctxText string) (string, error) {
+	if !s.Enabled() {
+		return "", fmt.Errorf("AI 推荐未配置")
+	}
+	systemPrompt := "你是 go-stock 的 AI 行情助理，仅基于用户在消息中提供的本地数据库字段回答。回答用简洁中文，不要编造数据。"
+	user := "已携带本地数据库内容如下：\n" + ctxText + "\n\n用户问题：\n" + question
+	reqBody := map[string]interface{}{
+		"model":       s.config.Model,
+		"temperature": 0.2,
+		"max_tokens":  600,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": user},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+	url := strings.TrimRight(s.config.BaseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+s.config.APIKey)
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("agent request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("agent HTTP %d: %.300s", resp.StatusCode, respBody)
+	}
+	var envelope struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &envelope); err != nil || len(envelope.Choices) == 0 {
+		return "", fmt.Errorf("agent response invalid")
+	}
+	return strings.TrimSpace(envelope.Choices[0].Message.Content), nil
+}
+
 func (s *Service) RunDaily(ctx context.Context) error {
 	if !s.Enabled() {
 		return fmt.Errorf("AI 推荐未配置")

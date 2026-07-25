@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { init, dispose, registerIndicator, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload } from '../api'
@@ -48,6 +48,10 @@ const syncMsg = ref('')
 const syncing = ref(false)
 const watched = ref(false)
 const agentOpen = ref(false)
+const conceptsHover = ref(false)
+const VISIBLE_CONCEPT_COUNT = 5
+const visibleConcepts = computed(() => detail.value?.concepts.slice(0, VISIBLE_CONCEPT_COUNT) || [])
+const hiddenConcepts = computed(() => detail.value?.concepts.slice(VISIBLE_CONCEPT_COUNT) || [])
 let klChart: Chart | null = null
 
 async function loadWatchState() {
@@ -176,15 +180,12 @@ onUnmounted(() => {
 
     <!-- 报价头 -->
     <div class="panel quote-panel" v-if="quote">
-      <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
-        <h2>{{ quote.name }} <span class="dim" style="font-size:13px">{{ quote.symbol }}</span></h2>
+      <div class="quote-header">
+        <h2 class="stock-title">{{ quote.name }} <span class="dim code">{{ quote.symbol }}</span></h2>
         <button class="watch-button" :class="{ active: watched }" @click="toggleWatch">{{ watched ? '已加入自选' : '加入自选' }}</button>
-        <span :class="pctClass(quote.change_pct)" style="font-size:28px;font-weight:700">{{ fmt(quote.price) }}</span>
-        <span :class="pctClass(quote.change_pct)" style="font-size:16px">
+        <span class="price-now" :class="pctClass(quote.change_pct)">{{ fmt(quote.price) }}</span>
+        <span class="price-change" :class="pctClass(quote.change_pct)">
           {{ fmt(quote.change_amount) }} ({{ fmtPct(quote.change_pct) }})
-        </span>
-        <span class="dim" style="font-size:12px">
-          本地快照 · {{ new Date(quote.fetched_at).toLocaleString('zh-CN', { hour12: false }) }}
         </span>
       </div>
       <div class="quote-grid">
@@ -203,22 +204,38 @@ onUnmounted(() => {
         <div><span class="dim">流通市值</span> {{ fmtBig(quote.circ_mv) }}</div>
         <div><span class="dim">52周高</span> {{ fmt(quote.high_52w) }}</div>
         <div><span class="dim">52周低</span> {{ fmt(quote.low_52w) }}</div>
+        <div v-if="detail"><span class="dim">所属行业</span>
+          <button v-if="detail.industry" class="tag industry inline" @click="openSector(detail.industry_code || ('industry:' + detail.industry))">{{ detail.industry }} ›</button>
+          <span v-else class="dim">未分类</span>
+        </div>
+        <div v-if="detail" class="concepts-cell" @mouseleave="conceptsHover=false">
+          <span class="dim">所属概念</span>
+          <div class="concepts-wrap" @mouseenter="conceptsHover=true">
+            <button v-for="c in visibleConcepts" :key="c.sector_code" class="tag concept inline" @click="openSector(c.sector_code)">{{ c.sector_name }} ›</button>
+            <button v-if="detail.concepts.length > VISIBLE_CONCEPT_COUNT" class="tag concept inline more" :title="hiddenConcepts.map(c=>c.sector_name).join('、')" @mouseenter="conceptsHover=true">{{ detail.concepts.length - VISIBLE_CONCEPT_COUNT }} 个更多 ›</button>
+            <div v-if="conceptsHover && detail.concepts.length > VISIBLE_CONCEPT_COUNT" class="concepts-popup">
+              <button v-for="c in hiddenConcepts" :key="c.sector_code" class="tag concept" @click="openSector(c.sector_code)">{{ c.sector_name }} ›</button>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <!-- 五档盘口 -->
-      <div v-if="quote.asks?.length || quote.bids?.length" class="order-book">
-        <div v-for="(a, i) in (quote.asks || []).slice().reverse()" :key="'a'+i" class="ob-row">
-          <span class="dim">卖{{ (quote.asks || []).length - i }}</span>
-          <span class="up">{{ fmt(a.price) }}</span>
-          <span>{{ fmtBig(a.volume) }}</span>
+      <details class="order-book-details" v-if="quote.asks?.length || quote.bids?.length">
+        <summary>五档盘口</summary>
+        <div class="order-book">
+          <div v-for="(a, i) in (quote.asks || []).slice().reverse()" :key="'a'+i" class="ob-row">
+            <span class="dim">卖{{ (quote.asks || []).length - i }}</span>
+            <span class="up">{{ fmt(a.price) }}</span>
+            <span>{{ fmtBig(a.volume) }}</span>
+          </div>
+          <div class="ob-sep"></div>
+          <div v-for="(b, i) in quote.bids || []" :key="'b'+i" class="ob-row">
+            <span class="dim">买{{ i + 1 }}</span>
+            <span class="down">{{ fmt(b.price) }}</span>
+            <span>{{ fmtBig(b.volume) }}</span>
+          </div>
         </div>
-        <div class="ob-sep"></div>
-        <div v-for="(b, i) in quote.bids || []" :key="'b'+i" class="ob-row">
-          <span class="dim">买{{ i + 1 }}</span>
-          <span class="down">{{ fmt(b.price) }}</span>
-          <span>{{ fmtBig(b.volume) }}</span>
-        </div>
-      </div>
+      </details>
     </div>
     <div v-if="errMsg" class="panel dim">{{ errMsg }}</div>
 
@@ -240,21 +257,6 @@ onUnmounted(() => {
       <div id="kl-chart" class="kline-chart"></div>
     </div>
 
-    <div v-if="detail" class="panel tags-panel">
-      <div class="tags-row">
-        <span class="dim">所属行业</span>
-        <button v-if="detail.industry" class="tag industry" @click="openSector(detail.industry_code || ('industry:' + detail.industry))">{{ detail.industry }} ›</button>
-        <span v-else class="dim">未分类</span>
-      </div>
-      <div class="tags-row">
-        <span class="dim">所属概念</span>
-        <div class="concepts">
-          <button v-for="c in detail.concepts" :key="c.sector_code" class="tag concept" @click="openSector(c.sector_code)">{{ c.sector_name }} ›</button>
-          <span v-if="!detail.concepts.length" class="dim">暂无</span>
-        </div>
-      </div>
-    </div>
-
     <AgentPanel :detail="detail" v-if="agentOpen" />
   </div>
 </template>
@@ -268,30 +270,57 @@ onUnmounted(() => {
 .stock-detail .dim { color:#687280; }
 .stock-detail .up { color:#bd2e35; }.stock-detail .down { color:#0f765d; }
 .kline-chart { width:100%; height:calc(100vh - 320px); min-height:460px; background:#eef1f4; }
-.watch-button { padding:5px 9px; border:1px solid var(--border); background:transparent; color:var(--text-dim); }.watch-button.active { border-color:#d6a12c; color:#9a6a00; }
 .chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px; }
 .sync-actions { display:flex; gap:8px; }.sync-msg { margin:0 0 6px; color:#687280; font-size:12px; }
 @media (max-width:900px) { .stock-detail { min-height:auto; grid-template-rows:auto auto auto; }.stock-detail .panel { min-width:0; overflow:hidden; }.kline-chart { width:100%; height:62vh; min-height:480px; } }
 @media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; }.kline-chart { height:65vh; min-height:420px; } }
+.quote-header { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding-bottom:6px; border-bottom:1px dashed #cdd3db; margin-bottom:4px; }
+.stock-title { margin:0; font-size:18px; line-height:1.4; font-weight:600; display:inline-flex; align-items:baseline; gap:6px; }
+.stock-title .code { font-size:12px; font-weight:400; }
+.price-now { font-size:24px; font-weight:700; line-height:1; }
+.price-change { font-size:14px; font-weight:500; line-height:1; }
+.watch-button { padding:4px 10px; border:1px solid var(--border); background:transparent; color:var(--text-dim); font-size:12px; }
+.watch-button.active { border-color:#d6a12c; color:#9a6a00; }
 .quote-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 8px 16px;
-  margin-top: 12px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-auto-rows: 22px;
+  column-gap: 18px;
+  row-gap: 4px;
+  margin-top: 4px;
   font-size: 13px;
+  align-items: center;
 }
-.quote-grid .dim { margin-right: 6px; font-size: 12px; }
+.quote-grid > div { display:flex; align-items:center; min-width:0; min-height:20px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; gap:4px; }
+.quote-grid > div:nth-child(13) { grid-column: span 1; }
+.quote-grid > div:nth-child(14) { grid-column: span 1; }
+.quote-grid > div:nth-child(15) { grid-column: span 1; }
+.quote-grid > div:nth-child(16),
+.quote-grid > div:nth-child(17) { grid-column: span 3; flex-wrap:wrap; white-space:normal; align-items:center; min-height:22px; overflow:visible; }
+.tag.inline { padding:1px 8px; border:1px solid #c8d3df; background:#f3f6f9; color:#1c2a3a; font-size:12px; cursor:pointer; border-radius:3px; line-height:1.6; }
+.tag.inline:hover { background:#e2eaf2; }
+.tag.industry { border-color:#9ec5ff; color:#0f3d75; background:#e7f1ff; }
+.tag.concept { border-color:#d8a7d8; color:#5a1f5a; background:#faeefa; }
+.tag.more { background:#eef2f7; border-style:dashed; }
+.concepts-cell { position:relative; min-width:0; overflow:visible; }
+.concepts-wrap { display:flex; flex-wrap:wrap; gap:4px; min-width:0; flex:1; }
+.concepts-popup { position:absolute; top:100%; left:64px; z-index:5; display:flex; flex-wrap:wrap; gap:6px; max-width:560px; padding:8px 10px; border:1px solid #c8d3df; border-radius:4px; background:#fff; box-shadow:0 12px 28px rgba(15,28,48,.18); }
+.concepts-popup .tag { padding:2px 8px; border:1px solid #c8d3df; background:#f3f6f9; color:#1c2a3a; font-size:12px; cursor:pointer; border-radius:3px; }
+.concepts-popup .tag:hover { background:#e2eaf2; }
 .order-book {
-  margin-top: 12px;
+  margin-top: 6px;
   display: grid;
   grid-template-columns: 1fr;
-  max-width: 260px;
+  max-width: 240px;
   font-size: 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 12px;
 }
-.ob-row { display: flex; justify-content: space-between; padding: 2px 0; }
+.order-book-details { margin-top:6px; font-size:12px; color:#687280; }
+.order-book-details > summary { cursor:pointer; user-select:none; padding:4px 0; list-style:revert; }
+.order-book-details[open] > summary { padding-bottom:6px; }
+.ob-row { display: flex; justify-content: space-between; padding: 1px 0; }
 .ob-sep { border-top: 1px dashed var(--border); margin: 4px 0; }
 .tags-panel { display:flex; flex-direction:column; gap:8px; padding:10px 12px; }
 .tags-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -301,4 +330,10 @@ onUnmounted(() => {
 .tag.industry { border-color:#9ec5ff; color:#0f3d75; background:#e7f1ff; }
 .tag.concept { border-color:#d8a7d8; color:#5a1f5a; background:#faeefa; }
 .concepts { display:flex; flex-wrap:wrap; gap:6px; }
+.tag-inline { display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap; }
+.tag-inline .dim { font-size:12px; min-width:64px; }
+.concepts-row { position:relative; }
+.concepts-wrap { position:relative; }
+.concepts-popup { position:absolute; top:calc(100% + 4px); left:64px; z-index:5; display:flex; flex-wrap:wrap; gap:6px; max-width:520px; padding:10px 12px; border:1px solid #c8d3df; border-radius:4px; background:#fff; box-shadow:0 12px 28px rgba(15,28,48,.18); }
+.concepts-popup .tag { font-size:12px; }
 </style>
