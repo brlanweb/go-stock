@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { init, dispose, registerIndicator, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
-import { api, fmt, fmtPct, fmtBig, pctClass, type Quote } from '../api'
+import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload } from '../api'
+import AgentPanel from '../components/AgentPanel.vue'
 
 // Vegas 隧道：EMA144 / EMA169（过滤隧道）+ EMA576 / EMA676（趋势隧道）。
 const VEGAS_PERIODS = [144, 169, 576, 676]
@@ -37,13 +39,15 @@ function registerVegas() {
 
 
 const props = defineProps<{ symbol: string }>()
-
+const router = useRouter()
 const quote = ref<Quote | null>(null)
+const detail = ref<StockDetailPayload | null>(null)
 const tab = ref<'day' | 'week' | 'month'>('day')
 const errMsg = ref('')
 const syncMsg = ref('')
 const syncing = ref(false)
 const watched = ref(false)
+const agentOpen = ref(false)
 let klChart: Chart | null = null
 
 async function loadWatchState() {
@@ -58,6 +62,7 @@ async function toggleWatch() {
     if (watched.value) await api.delWatch(props.symbol)
     else await api.addWatch(props.symbol)
     watched.value = !watched.value
+    window.dispatchEvent(new CustomEvent('gostock:watchlist-changed', { detail: { symbol: props.symbol, watched: watched.value } }))
   } catch (e: any) { errMsg.value = e.message || '自选操作失败' }
 }
 
@@ -68,6 +73,19 @@ async function refreshQuote() {
   } catch (e: any) {
     errMsg.value = e.message
   }
+}
+
+async function loadDetail() {
+  try {
+    detail.value = await api.stockDetail(props.symbol)
+  } catch (e: any) {
+    // 详情接口失败不影响行情展示
+    console.warn('loadDetail', e)
+  }
+}
+
+function openSector(code: string) {
+  router.push(`/sector/${encodeURIComponent(code)}`)
 }
 
 async function drawKline(period: 'day' | 'week' | 'month') {
@@ -133,12 +151,14 @@ const chartStyles = {
 
 watch(() => props.symbol, () => {
   refreshQuote()
+  loadDetail()
   loadWatchState()
   nextTickDraw()
 })
 
 onMounted(async () => {
   refreshQuote()
+  loadDetail()
   loadWatchState()
   await nextTickDraw()
 })
@@ -213,11 +233,29 @@ onUnmounted(() => {
         <div class="sync-actions">
           <button class="ghost" :disabled="syncing" title="同步最新或缺失交易日" @click="syncHistory('missing')">同步缺失</button>
           <button :disabled="syncing" title="从上市以来重新拉取日K" @click="syncHistory('full')">历史全量</button>
+          <button class="ghost" title="AI 行情助理" @click="agentOpen = true">Agent</button>
         </div>
       </div>
       <div v-if="syncMsg" class="sync-msg">{{ syncMsg }}</div>
       <div id="kl-chart" class="kline-chart"></div>
     </div>
+
+    <div v-if="detail" class="panel tags-panel">
+      <div class="tags-row">
+        <span class="dim">所属行业</span>
+        <button v-if="detail.industry" class="tag industry" @click="openSector(detail.industry_code || ('industry:' + detail.industry))">{{ detail.industry }} ›</button>
+        <span v-else class="dim">未分类</span>
+      </div>
+      <div class="tags-row">
+        <span class="dim">所属概念</span>
+        <div class="concepts">
+          <button v-for="c in detail.concepts" :key="c.sector_code" class="tag concept" @click="openSector(c.sector_code)">{{ c.sector_name }} ›</button>
+          <span v-if="!detail.concepts.length" class="dim">暂无</span>
+        </div>
+      </div>
+    </div>
+
+    <AgentPanel :detail="detail" v-if="agentOpen" />
   </div>
 </template>
 
@@ -255,4 +293,12 @@ onUnmounted(() => {
 }
 .ob-row { display: flex; justify-content: space-between; padding: 2px 0; }
 .ob-sep { border-top: 1px dashed var(--border); margin: 4px 0; }
+.tags-panel { display:flex; flex-direction:column; gap:8px; padding:10px 12px; }
+.tags-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.tags-row .dim { min-width:64px; font-size:12px; }
+.tag { padding:3px 9px; border:1px solid #c8d3df; background:#f3f6f9; color:#1c2a3a; font-size:12px; cursor:pointer; border-radius:3px; }
+.tag:hover { background:#e2eaf2; }
+.tag.industry { border-color:#9ec5ff; color:#0f3d75; background:#e7f1ff; }
+.tag.concept { border-color:#d8a7d8; color:#5a1f5a; background:#faeefa; }
+.concepts { display:flex; flex-wrap:wrap; gap:6px; }
 </style>

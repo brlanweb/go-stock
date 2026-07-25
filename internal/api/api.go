@@ -37,6 +37,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/security/{code}", s.handleSecurity)
 	mux.HandleFunc("GET /api/v1/indicator/{code}", s.handleIndicator)
 	mux.HandleFunc("GET /api/v1/market/heatmap", s.handleMarketHeatmap)
+	mux.HandleFunc("GET /api/v1/sectors", s.handleSectors)
+	mux.HandleFunc("GET /api/v1/sectors/{code}/constituents", s.handleSectorConstituents)
+	mux.HandleFunc("GET /api/v1/stock/{code}/detail", s.handleStockDetail)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
@@ -233,6 +236,50 @@ func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 		"notice":   notice,
 		"groups":   groups,
 	})
+}
+
+func (s *Server) handleSectors(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	groupBy := r.URL.Query().Get("group_by")
+	if groupBy != "concept" {
+		groupBy = "industry"
+	}
+	list, err := s.St.ListSectors(ctx, groupBy)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"sector_type": groupBy, "sectors": list})
+}
+
+func (s *Server) handleSectorConstituents(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	code := r.PathValue("code")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.ListSectorConstituents(ctx, code, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"sector_code": code, "constituents": items})
+}
+
+func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, 400, "无法识别的代码")
+		return
+	}
+	detail, err := s.St.DetailForSymbol(ctx, symbol)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, detail)
 }
 
 func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {

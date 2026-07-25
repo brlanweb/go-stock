@@ -33,6 +33,17 @@ const recommendationMessage = ref('')
 const watchlist = ref<Quote[]>([])
 const syncStatus = ref<SyncStatus | null>(null)
 let searchTimer: number | undefined
+
+async function loadWatchlist() {
+  try {
+    const items = await api.watchlist()
+    watchlist.value = items.filter((item): item is Quote => typeof item !== 'string')
+  } catch { /* ignore */ }
+}
+
+function onWatchlistChanged() {
+  loadWatchlist()
+}
 let syncTimer: number | undefined
 
 const syncProgress = computed(() => {
@@ -106,21 +117,22 @@ async function loadSyncStatus() {
 
 onMounted(async () => {
   const [datesResult, watchResult, syncResult] = await Promise.allSettled([
-    api.recommendationHistory(), api.watchlist(), api.syncStatus()
+    api.recommendationHistory(), loadWatchlist(), api.syncStatus()
   ])
   if (datesResult.status === 'fulfilled') {
     recommendationDates.value = datesResult.value
     recommendationDate.value = datesResult.value[0] || ''
   }
   await loadRecommendations(recommendationDate.value)
-  if (watchResult.status === 'fulfilled') watchlist.value = watchResult.value.filter((item): item is Quote => typeof item !== 'string')
   if (syncResult.status === 'fulfilled') syncStatus.value = syncResult.value
   syncTimer = window.setInterval(loadSyncStatus, 5000)
+  window.addEventListener('gostock:watchlist-changed', onWatchlistChanged)
 })
 
 onUnmounted(() => {
   window.clearTimeout(searchTimer)
   window.clearInterval(syncTimer)
+  window.removeEventListener('gostock:watchlist-changed', onWatchlistChanged)
 })
 </script>
 

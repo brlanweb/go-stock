@@ -9,6 +9,7 @@ interface TreeDatum {
   name: string
   item?: HeatmapItem
   children?: TreeDatum[]
+  weight?: number
 }
 
 const router = useRouter()
@@ -28,19 +29,37 @@ let resizeObserver: ResizeObserver | undefined
 const heatLegend = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
 
 const itemCount = computed(() => groups.value.reduce((sum, group) => sum + group.items.length, 0))
+// 个股市值占比压缩：极少数超大市值（银行、白酒龙头）会占据云图绝大部分空间，
+// 用对数映射 + 软上限（在最大值的 12% 处封顶）使头部不至于吞掉整屏。
+const MAX_STOCK_RATIO = 0.12
+
+function adjustedWeight(totalMV: number, allMvs: number[]) {
+  if (!allMvs.length) return 1
+  const max = Math.max(...allMvs)
+  const logMV = Math.log(Math.max(totalMV, 1) + 1)
+  const logMax = Math.log(Math.max(max, 1) + 1)
+  const minLog = Math.log(Math.min(...allMvs) + 1)
+  const ratio = (logMV - minLog) / Math.max(logMax - minLog, 0.0001)
+  // ratio ∈ [0,1]，最大股按对数归一后等于 1
+  // 再用最大个股占比上限压制：ratio=1 时缩为 MAX_STOCK_RATIO，等比扩展到 0
+  const share = ratio * MAX_STOCK_RATIO
+  return share + 1 // 基础权重 1，配合 share 让小盘股也有可见空间
+}
+
 const layout = computed(() => {
   if (!groups.value.length || mapWidth.value <= 0 || mapHeight.value <= 0) {
     return { sectors: [] as HierarchyRectangularNode<TreeDatum>[], stocks: [] as HierarchyRectangularNode<TreeDatum>[] }
   }
+  const allMvs = groups.value.flatMap(g => g.items.map(i => Number(i.total_mv) || 0)).filter(v => v > 0)
   const data: TreeDatum = {
     name: 'A股',
     children: groups.value.map(group => ({
       name: group.name,
-      children: group.items.map(item => ({ name: item.name, item }))
+      children: group.items.map(item => ({ name: item.name, item, weight: adjustedWeight(Number(item.total_mv) || 0, allMvs) }))
     }))
   }
   const root = hierarchy(data)
-    .sum(node => node.item ? Math.max(Number(node.item.total_mv) || 0, 1) : 0)
+    .sum(node => node.item ? Math.max((Number(node.item.total_mv) || 0), 1) * (node.weight || 1) : 0)
     .sort((a, b) => (b.value || 0) - (a.value || 0))
   const rectangularRoot = treemap<TreeDatum>()
     .size([mapWidth.value, mapHeight.value])

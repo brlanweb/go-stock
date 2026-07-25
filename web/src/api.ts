@@ -120,6 +120,36 @@ export interface Recommendation {
   model: string
 }
 
+export interface SectorListItem {
+  sector_code: string
+  sector_name: string
+  sector_type: string
+  stock_count: number
+}
+
+export interface SectorConstituentItem {
+  symbol: string
+  code: string
+  name: string
+  industry: string
+  price: number
+  change_pct: number
+  is_trading: boolean
+  snapshot_at?: string
+}
+
+export interface StockDetailPayload {
+  symbol: string
+  code: string
+  name: string
+  industry: string
+  industry_code: string
+  list_date?: string
+  concepts: SectorListItem[]
+  quote?: Quote
+  klines_60: Kline[]
+}
+
 export interface HeatmapResponse {
   market: string
   group_by: string
@@ -156,6 +186,9 @@ export const api = {
   heatmap: (market = 'all', groupBy = 'industry', metric = 'change_pct', period = '1d') =>
     req<HeatmapResponse>(`/market/heatmap?market=${market}&group_by=${groupBy}&metric=${metric}&period=${period}`),
   syncStock: (code: string, mode = 'latest') => req(`/sync/stock/${code}?mode=${mode}`, { method: 'POST' }),
+  sectors: (groupBy: 'industry' | 'concept' = 'industry') => req<{ sector_type: string; sectors: SectorListItem[] }>(`/sectors?group_by=${groupBy}`),
+  sectorConstituents: (code: string, limit = 100) => req<{ sector_code: string; constituents: SectorConstituentItem[] }>(`/sectors/${encodeURIComponent(code)}/constituents?limit=${limit}`),
+  stockDetail: (code: string) => req<StockDetailPayload>(`/stock/${encodeURIComponent(code)}/detail`),
   authStatus: () => req<{ required: boolean; authenticated: boolean }>('/auth/status'),
   authLogin: (password: string) => req<{ authenticated: boolean }>('/auth/login', {
     method: 'POST',
