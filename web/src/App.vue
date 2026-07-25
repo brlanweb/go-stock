@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { api, type SyncStatus } from './api'
+
+const route = useRoute()
 
 const sync = ref<SyncStatus | null>(null)
 let timer: number | undefined
@@ -19,8 +22,8 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="container">
-    <header class="header">
+  <div :class="{ 'dashboard-shell': route.path === '/' }">
+    <header v-if="route.path !== '/'" class="header">
       <router-link to="/" class="logo">go-stock</router-link>
       <span v-if="sync" class="dim sync-info">
         <template v-if="sync.backfill_running">
@@ -36,6 +39,7 @@ onUnmounted(() => clearInterval(timer))
 </template>
 
 <style scoped>
+.dashboard-shell { width:100%; }
 .header {
   display: flex;
   align-items: center;
