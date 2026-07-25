@@ -53,6 +53,7 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_ADDR | :8480 | 监听地址 |
 | GOSTOCK_DB_HOST/PORT/NAME/USER/PASSWORD | - | MySQL 连接（密码必填） |
 | GOSTOCK_MCP_TOKEN | 空 | MCP Bearer 鉴权，公网部署必设 |
+| GOSTOCK_ACCESS_PASSWORD | 空 | 页面访问密码；设置后前端与查询接口需登录，健康检查与 MCP 不受影响 |
 | GOSTOCK_BACKFILL_WORKERS | 1 | 历史补齐并发数；固定出口建议保持 1 |
 | GOSTOCK_BACKFILL_QPS | 0.35 | 单数据源历史补齐 QPS |
 | GOSTOCK_SYNC_SECTORS | false | 启动历史补齐时是否同时刷新行业/概念成分 |

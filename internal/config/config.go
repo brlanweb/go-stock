@@ -25,6 +25,8 @@ type Config struct {
 
 	MCPToken string // MCP Bearer Token，空表示不鉴权
 
+	AccessPassword string // 页面访问密码，空表示不启用登录
+
 	BackfillWorkers   int     // 回填并发 worker 数
 	BackfillQPS       float64 // 单源全局 QPS 上限
 	SyncSectors       bool    // 启动回填时是否同步板块成分（默认关闭，避免额外上游压力）
@@ -60,6 +62,7 @@ func Load() (*Config, error) {
 		DBUser:            getEnv("GOSTOCK_DB_USER", "stock"),
 		DBPassword:        getEnv("GOSTOCK_DB_PASSWORD", ""),
 		MCPToken:          getEnv("GOSTOCK_MCP_TOKEN", ""),
+		AccessPassword:    getEnv("GOSTOCK_ACCESS_PASSWORD", ""),
 		BackfillWorkers:   getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
 		BackfillQPS:       getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
 		SyncSectors:       getEnvBool("GOSTOCK_SYNC_SECTORS", false),

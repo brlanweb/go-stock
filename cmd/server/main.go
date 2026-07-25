@@ -13,6 +13,7 @@ import (
 
 	"github.com/hoax/go-stock/internal/analysis"
 	"github.com/hoax/go-stock/internal/api"
+	"github.com/hoax/go-stock/internal/auth"
 	"github.com/hoax/go-stock/internal/config"
 	"github.com/hoax/go-stock/internal/mcpserver"
 	"github.com/hoax/go-stock/internal/provider"
@@ -59,6 +60,13 @@ func main() {
 	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService}
 	apiServer.Register(mux)
 
+	// 可选页面访问密码
+	guard := auth.New(cfg.AccessPassword)
+	guard.RegisterRoutes(mux)
+	if guard.Enabled() {
+		slog.Info("页面访问密码已启用")
+	}
+
 	// MCP Streamable HTTP（/mcp）
 	mcpHandler := mcpserver.NewHandler(mcpserver.Deps{St: st, Svc: svc, Eng: engine}, cfg.MCPToken)
 	mux.Handle("/mcp", mcpHandler)
@@ -69,7 +77,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           guard.Wrap(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

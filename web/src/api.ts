@@ -155,7 +155,13 @@ export const api = {
   syncStatus: () => req<SyncStatus>('/sync/status'),
   heatmap: (market = 'all', groupBy = 'industry', metric = 'change_pct', period = '1d') =>
     req<HeatmapResponse>(`/market/heatmap?market=${market}&group_by=${groupBy}&metric=${metric}&period=${period}`),
-  syncStock: (code: string, mode = 'latest') => req(`/sync/stock/${code}?mode=${mode}`, { method: 'POST' })
+  syncStock: (code: string, mode = 'latest') => req(`/sync/stock/${code}?mode=${mode}`, { method: 'POST' }),
+  authStatus: () => req<{ required: boolean; authenticated: boolean }>('/auth/status'),
+  authLogin: (password: string) => req<{ authenticated: boolean }>('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password })
+  })
 }
 
 // 格式化工具
