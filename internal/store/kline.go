@@ -39,7 +39,7 @@ func (s *Store) upsertKlineBatch(ctx context.Context, klines []model.Kline) erro
 		sb.WriteString("(?,?,?,?,?,?,?,?,?,?,?)")
 		args = append(args, k.Symbol, k.Date, k.Open, k.High, k.Low, k.Close, k.Volume, k.Amount, k.ChangePct, k.TurnoverRate, k.AdjFactor)
 	}
-	sb.WriteString(" ON DUPLICATE KEY UPDATE open=VALUES(open),high=VALUES(high),low=VALUES(low),close=VALUES(close),volume=VALUES(volume),amount=VALUES(amount),change_pct=VALUES(change_pct),turnover_rate=VALUES(turnover_rate),adj_factor=VALUES(adj_factor)")
+	sb.WriteString(" ON DUPLICATE KEY UPDATE open=VALUES(open),high=VALUES(high),low=VALUES(low),close=VALUES(close),volume=IF(VALUES(volume)>0,VALUES(volume),volume),amount=IF(VALUES(amount)>0,VALUES(amount),amount),change_pct=VALUES(change_pct),turnover_rate=IF(VALUES(turnover_rate)>0,VALUES(turnover_rate),turnover_rate),adj_factor=VALUES(adj_factor)")
 	_, err := s.DB.ExecContext(ctx, sb.String(), args...)
 	if err != nil {
 		return fmt.Errorf("upsert klines: %w", err)

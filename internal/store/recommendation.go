@@ -111,7 +111,17 @@ func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName stri
 }
 
 func (s *Store) LatestRecommendations(ctx context.Context) ([]model.StockRecommendation, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.reason,r.model_name FROM stock_recommendation r INNER JOIN stock_basic b ON b.symbol=r.symbol WHERE r.analysis_date=(SELECT MAX(analysis_date) FROM stock_recommendation) ORDER BY r.rank_no LIMIT 3`)
+	return s.RecommendationsByDate(ctx, "")
+}
+
+func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model.StockRecommendation, error) {
+	where := "r.analysis_date=(SELECT MAX(analysis_date) FROM stock_recommendation)"
+	var args []interface{}
+	if date != "" {
+		where = "r.analysis_date=?"
+		args = append(args, date)
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.reason,r.model_name FROM stock_recommendation r INNER JOIN stock_basic b ON b.symbol=r.symbol WHERE `+where+` ORDER BY r.rank_no LIMIT 3`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,4 +138,24 @@ func (s *Store) LatestRecommendations(ctx context.Context) ([]model.StockRecomme
 		out = []model.StockRecommendation{}
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) RecommendationHistory(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 || limit > 3650 {
+		limit = 90
+	}
+	rows, err := s.DB.QueryContext(ctx, fmt.Sprintf("SELECT DATE_FORMAT(analysis_date,'%%Y-%%m-%%d') FROM stock_recommendation GROUP BY analysis_date ORDER BY analysis_date DESC LIMIT %d", limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	dates := make([]string, 0)
+	for rows.Next() {
+		var date string
+		if err := rows.Scan(&date); err != nil {
+			return nil, err
+		}
+		dates = append(dates, date)
+	}
+	return dates, rows.Err()
 }

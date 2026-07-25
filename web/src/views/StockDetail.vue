@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { init, dispose, type Chart } from 'klinecharts'
+import { init, dispose, CandleType, type Chart } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote } from '../api'
 
 const props = defineProps<{ symbol: string }>()
@@ -76,14 +76,25 @@ async function syncHistory(mode: 'latest' | 'missing' | 'full') {
 }
 
 const chartStyles = {
-  grid: { horizontal: { color: '#21262d' }, vertical: { color: '#21262d' } },
+  grid: {
+    show: true,
+    horizontal: { show: true, color: '#d9dee5', size: 1, style: 'dashed', dashedValue: [2, 2] },
+    vertical: { show: true, color: '#e4e8ed', size: 1, style: 'dashed', dashedValue: [2, 2] }
+  },
   candle: {
-    bar: { upColor: '#121820', downColor: '#f3f5f7', upBorderColor: '#121820', downBorderColor: '#d7dde3', upWickColor: '#121820', downWickColor: '#d7dde3' },
-    priceMark: { last: { upColor: '#121820', downColor: '#f3f5f7' } }
+    type: CandleType.CandleUpStroke,
+    bar: {
+      upColor: '#ffffff', downColor: '#111820', noChangeColor: '#7b8490',
+      upBorderColor: '#111820', downBorderColor: '#111820', noChangeBorderColor: '#7b8490',
+      upWickColor: '#111820', downWickColor: '#111820', noChangeWickColor: '#7b8490'
+    },
+    priceMark: { last: { upColor: '#ffffff', downColor: '#111820', noChangeColor: '#7b8490' } }
   },
   indicator: {
-    bars: [{ upColor: '#121820', downColor: '#f3f5f7' }]
-  }
+    bars: [{ upColor: '#ffffff', downColor: '#111820', noChangeColor: '#7b8490', borderColor: '#111820', borderSize: 1, borderStyle: 'solid', borderDashedValue: [], borderRadius: 0 }]
+  },
+  xAxis: { tickText: { color: '#56606d' }, axisLine: { color: '#bfc6cf' }, tickLine: { color: '#bfc6cf' } },
+  yAxis: { tickText: { color: '#56606d' }, axisLine: { color: '#bfc6cf' }, tickLine: { color: '#bfc6cf' } }
 } as any
 
 watch(() => props.symbol, () => {
@@ -104,11 +115,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div>
-    <router-link to="/" class="dim" style="font-size:13px">← 返回市场云图</router-link>
+  <div class="stock-detail">
+    <router-link to="/" class="back-link">← 返回市场云图</router-link>
 
     <!-- 报价头 -->
-    <div class="panel" style="margin-top:8px" v-if="quote">
+    <div class="panel quote-panel" v-if="quote">
       <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
         <h2>{{ quote.name }} <span class="dim" style="font-size:13px">{{ quote.symbol }}</span></h2>
         <button class="watch-button" :class="{ active: watched }" @click="toggleWatch">{{ watched ? '已加入自选' : '加入自选' }}</button>
@@ -169,16 +180,23 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-if="syncMsg" class="sync-msg">{{ syncMsg }}</div>
-      <div id="kl-chart" style="height:420px"></div>
+      <div id="kl-chart" class="kline-chart"></div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.stock-detail { padding-top:10px; }
+.back-link { display:inline-block; margin-bottom:8px; color:#56606d; font-size:13px; }
+.stock-detail .panel { border:1px solid #cdd3db; border-radius:4px; background:#fff; color:#121820; box-shadow:none; }
+.quote-panel { margin-top:0; }
+.stock-detail .dim { color:#687280; }
+.stock-detail .up { color:#bd2e35; }.stock-detail .down { color:#0f765d; }
+.kline-chart { width:100%; height:520px; background:#f7f8fa; }
 .watch-button { padding:5px 9px; border:1px solid var(--border); background:transparent; color:var(--text-dim); }.watch-button.active { border-color:#d6a12c; color:#e9c16c; }
 .chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
 .sync-actions { display:flex; gap:8px; }.sync-msg { margin:-3px 0 10px; color:var(--text-dim); font-size:12px; }
-@media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; } }
+@media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; }.kline-chart { height:420px; } }
 .quote-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

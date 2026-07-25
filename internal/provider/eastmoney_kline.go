@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hoax/go-stock/internal/model"
 )
@@ -107,6 +108,14 @@ func (e *Eastmoney) fetchKlines(ctx context.Context, symbol, beg, end string, fq
 	return klines, nil
 }
 
+func eastmoneyShanghaiLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*3600)
+	}
+	return loc
+}
+
 func parseF(s string) float64 {
 	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return f
@@ -197,7 +206,7 @@ func (e *Eastmoney) fetchClist(ctx context.Context, fs string, secType model.Sec
 		if err := e.gate.Wait(ctx); err != nil {
 			return out, err
 		}
-		fields := "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f38,f39,f26,f100"
+		fields := "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f38,f39,f26,f100,f124"
 		var body []byte
 		var err error
 		for _, host := range clistHosts {
@@ -267,6 +276,10 @@ func (e *Eastmoney) fetchClist(ctx context.Context, fs string, secType model.Sec
 				PBRatio:      f("f23").Or(0),
 				TotalShare:   f("f38").Or(0),
 				FloatShare:   f("f39").Or(0),
+			}
+			// f124 是行情更新时间（Unix 秒），用于区分采集日期与实际交易日。
+			if updated := f("f124"); updated.Valid && updated.Value > 0 {
+				snap.TradeDate = time.Unix(int64(updated.Value), 0).In(eastmoneyShanghaiLocation()).Format("2006-01-02")
 			}
 			// f26 上市日期 YYYYMMDD
 			if d := f("f26"); d.Valid && d.Value > 19000000 {

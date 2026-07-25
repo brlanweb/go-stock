@@ -38,6 +38,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/indicator/{code}", s.handleIndicator)
 	mux.HandleFunc("GET /api/v1/market/heatmap", s.handleMarketHeatmap)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
+	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 
 	mux.HandleFunc("GET /api/v1/watchlist", s.handleWatchlistGet)
@@ -237,12 +238,24 @@ func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	items, err := s.St.LatestRecommendations(ctx)
+	items, err := s.St.RecommendationsByDate(ctx, r.URL.Query().Get("date"))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, items)
+}
+
+func (s *Server) handleRecommendationHistory(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	dates, err := s.St.RecommendationHistory(ctx, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, dates)
 }
 
 func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request) {
@@ -358,5 +371,6 @@ func (s *Server) handleSyncDaily(w http.ResponseWriter, r *http.Request) {
 			slog.Error("手动每日同步失败", "err", err)
 		}
 	}()
-	writeJSON(w, 202, map[string]string{"status": "daily sync started"})
+	writeJSON(w,
+		202, map[string]string{"status": "daily sync started"})
 }

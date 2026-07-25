@@ -130,11 +130,8 @@ func (s *Service) StartScheduler(ctx context.Context) {
 	go func() {
 		for {
 			now := time.Now().In(shanghai())
-			next := time.Date(now.Year(), now.Month(), now.Day(), 18, 0, 0, 0, now.Location())
+			next := time.Date(now.Year(), now.Month(), now.Day(), 5, 0, 0, 0, now.Location())
 			if !next.After(now) {
-				next = next.AddDate(0, 0, 1)
-			}
-			for next.Weekday() == time.Saturday || next.Weekday() == time.Sunday {
 				next = next.AddDate(0, 0, 1)
 			}
 			select {

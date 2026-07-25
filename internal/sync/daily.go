@@ -127,6 +127,12 @@ func (e *Engine) RunDailySync(ctx context.Context) error {
 
 func (e *Engine) persistCloseSession(ctx context.Context, capturedAt time.Time, snaps []provider.SecuritySnapshot) error {
 	today := capturedAt.Format("2006-01-02")
+	tradeDate := snapshotTradeDate(snaps)
+	if tradeDate == "" || tradeDate != today {
+		slog.Info("快照不属于当前交易日，仅保留市场快照", "captured_date", today, "trade_date", tradeDate)
+		return nil
+	}
+	today = tradeDate
 	if err := e.st.UpsertDailyIndicators(ctx, today, snaps); err != nil {
 		return err
 	}
@@ -176,6 +182,21 @@ func (e *Engine) persistCloseSession(ctx context.Context, capturedAt time.Time, 
 	}
 	slog.Info("下午收盘市场快照完成", "securities", len(snaps), "klines", len(klines), "date", today)
 	return nil
+}
+
+func snapshotTradeDate(snaps []provider.SecuritySnapshot) string {
+	counts := make(map[string]int)
+	bestDate, bestCount := "", 0
+	for _, snapshot := range snaps {
+		if snapshot.TradeDate == "" || snapshot.Price <= 0 {
+			continue
+		}
+		counts[snapshot.TradeDate]++
+		if counts[snapshot.TradeDate] > bestCount {
+			bestDate, bestCount = snapshot.TradeDate, counts[snapshot.TradeDate]
+		}
+	}
+	return bestDate
 }
 
 func (e *Engine) fillAdjFactors(ctx context.Context, klines []model.Kline) error {
