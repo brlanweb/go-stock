@@ -114,19 +114,144 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `POST /api/v1/sync/backfill/retry-failed` | 用户显式重排失败项，避免服务重启后无限自动重试 |
 | `POST /api/v1/sync/daily` | 手动触发本地市场快照采集 |
 
-## MCP 接入（LobeHub）
+## MCP 使用教程
 
-端点：`http://<host>:8480/mcp`（Streamable HTTP）
+go-stock 在 `/mcp` 提供 MCP Streamable HTTP 服务。页面登录密码和 MCP Token 是两套独立鉴权：MCP 客户端只需配置 `GOSTOCK_MCP_TOKEN` 对应的 Bearer Token，不需要先登录网页。
 
-LobeHub 添加自定义 MCP 插件：
-- 类型：Streamable HTTP
-- URL：`http://服务器IP:8480/mcp`
-- 若设置了 `GOSTOCK_MCP_TOKEN`，Header 加 `Authorization: Bearer <token>`
+### 1. 服务端配置
 
-分析工具（只读本地 MySQL）：
-`get_realtime_quote` / `get_batch_quotes` / `get_kline` / `search_stock` / `get_market_indices` / `get_watchlist` / `get_daily_indicator` / `get_market_heatmap` / `get_sync_status`
+在部署机的 `.env` 中生成并填写一个高强度随机 Token，切勿把真实值提交到 Git 仓库：
 
-写操作：`sync_stock_history`。该工具仅按用户明确指令同步单只证券，支持 `latest`、`missing`、`full` 三种模式。
+```bash
+openssl rand -hex 32
+```
+
+```env
+GOSTOCK_MCP_TOKEN=在部署机本地填写生成的Token
+```
+
+重建应用容器使配置生效：
+
+```bash
+docker compose up -d --force-recreate go-stock
+```
+
+MCP 地址按部署方式填写：
+
+- 本机：`http://127.0.0.1:8480/mcp`
+- 公网 HTTPS：`https://你的域名/mcp`
+- 局域网或直连：`http://服务器IP:8480/mcp`
+
+公网环境应使用 HTTPS，不要通过明文 HTTP 发送 Bearer Token。
+
+### 2. LobeHub 配置
+
+在 LobeHub 中创建“自定义插件 / MCP 插件”，连接方式选择 `Streamable HTTP`（部分版本显示为 `HTTP`），填写：
+
+```text
+名称：go-stock MCP
+类型：HTTP / Streamable HTTP
+URL：https://你的域名/mcp
+Header 名：Authorization
+Header 值：Bearer <GOSTOCK_MCP_TOKEN>
+```
+
+保存前先执行连接测试。正常情况下，客户端应读取到 10 个工具。然后将插件安装到目标助理，并新建一个会话测试，避免旧会话继续使用缓存的工具清单。
+
+对于需要手工维护插件 JSON 的 LobeHub Desktop 版本，MCP 连接参数必须位于运行时实际读取的 `customParams.mcp`，不能只写展示用的 `manifest.mcpParams`：
+
+```json
+{
+  "identifier": "go-stock-mcp",
+  "runtimeType": "mcp",
+  "customParams": {
+    "mcp": {
+      "type": "http",
+      "url": "https://你的域名/mcp",
+      "headers": {
+        "Authorization": "Bearer <GOSTOCK_MCP_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+推荐优先通过 LobeHub 图形界面的“测试并安装”流程创建插件。该流程会调用 `tools/list`，并自动生成模型需要的 `manifest.api` 工具 Schema。只添加 URL 但没有生成工具清单时，界面可能显示插件已启用，模型却看不到任何函数。
+
+### 3. 命令行验证
+
+以下命令中的 Token 仅从当前终端环境变量读取，避免写入 Shell 历史：
+
+```bash
+export GOSTOCK_MCP_URL='https://你的域名/mcp'
+read -s GOSTOCK_MCP_TOKEN
+export GOSTOCK_MCP_TOKEN
+```
+
+初始化连接：
+
+```bash
+curl -sS "$GOSTOCK_MCP_URL" \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $GOSTOCK_MCP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+```
+
+读取工具清单：
+
+```bash
+curl -sS "$GOSTOCK_MCP_URL" \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $GOSTOCK_MCP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+查询 `601991` 最近 30 个交易日日 K：
+
+```bash
+curl -sS "$GOSTOCK_MCP_URL" \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $GOSTOCK_MCP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_kline","arguments":{"symbol":"601991","period":"day","adjust":"qfq","limit":30}}}'
+```
+
+`arguments` 必须是 JSON 对象；`limit` 必须是数字，不能写成字符串 `"30"`。证券代码支持 `601991`、`SH601991`、`601991.SH` 等常见格式。
+
+### 4. 工具清单
+
+只读本地 MySQL/Redis 的分析工具：
+
+| 工具 | 主要参数 | 说明 |
+|---|---|---|
+| `get_realtime_quote` | `symbol` | 最近一次本地定时行情快照，并非逐秒实时行情 |
+| `get_batch_quotes` | `symbols` | 逗号分隔的代码列表，最多 100 只 |
+| `get_kline` | `symbol`、`period`、`adjust`、`limit`、`start`、`end` | 日/周/月 K 线，支持前复权和日期范围 |
+| `search_stock` | `keyword` | 按代码或名称搜索本地证券 |
+| `get_market_indices` | 无 | 最近一次本地指数快照 |
+| `get_watchlist` | 无 | 自选股及最近一次本地快照 |
+| `get_daily_indicator` | `symbol`、`limit`、`start`、`end` | PE/PB/市值/换手率等每日指标 |
+| `get_market_heatmap` | `market`、`group_by`、`metric`、`period`、`limit` | 一级行业或主要概念云图 |
+| `get_sync_status` | 无 | 历史数据补齐状态 |
+
+写操作工具：
+
+| 工具 | 主要参数 | 说明 |
+|---|---|---|
+| `sync_stock_history` | `symbol`、`mode` | 仅按用户明确指令同步单只证券；`latest` 拉最新、`missing` 补缺失、`full` 重建完整历史 |
+
+### 5. 常见问题
+
+- `401 Unauthorized`：检查 Header 是否为完整的 `Authorization: Bearer <token>`，并确认容器已使用新 `.env` 重建。
+- 插件显示已启用但模型不调用：确认插件详情中已生成工具 Schema，并新建会话。如果消息记录中的 `tools` 为空，问题在客户端工具注入，不是 go-stock 参数解析。
+- `Tool returned no result`：检查 LobeHub 插件运行参数是否包含 `customParams.mcp.type`、`customParams.mcp.url` 和认证 Header。
+- `get_kline` 参数错误：确保 `arguments` 是对象，`limit` 是数字，`period` 为 `day/week/month`，`adjust` 为 `qfq/none`。
+- 数据日期不是今天：MCP 查询的是本地快照和本地 K 线。先用 `get_sync_status` 查看数据日期，需要时再明确调用单股同步工具。
 
 ## 数据说明
 

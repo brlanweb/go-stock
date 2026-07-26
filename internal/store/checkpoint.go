@@ -43,7 +43,7 @@ func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.S
 		 FROM sync_checkpoint cp
 		 INNER JOIN stock_basic b ON b.symbol=cp.symbol
 		 WHERE cp.task=? AND cp.status='pending' AND b.sec_type='stock'
-		   AND (b.status='listed' OR (b.status<>'listed' AND b.last_trade_date IS NOT NULL))
+		   AND b.status='listed'
 		 ORDER BY cp.symbol LIMIT ?`, task, n)
 	if err != nil {
 		return nil, err
@@ -157,7 +157,7 @@ func (s *Store) CompleteInactiveCheckpoints(ctx context.Context, task, targetDat
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status='done',cp.last_error=''
-		WHERE cp.task=? AND cp.status<>'done' AND (
+		WHERE cp.task=? AND cp.status<>'done' AND b.sec_type='stock' AND (
 			b.list_date>? OR
 			(b.status<>'listed' AND (k.last_date IS NULL OR b.last_trade_date IS NULL OR k.last_date>=b.last_trade_date))
 		)`, task, targetDate)

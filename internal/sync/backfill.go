@@ -252,6 +252,11 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 	} else if n > 0 {
 		slog.Info("已识别停止交易证券", "count", n)
 	}
+	if n, err := e.st.NormalizeInactiveLastTradeDates(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已归一化非活跃证券最后交易日", "count", n)
+	}
 	if n, err := e.st.CompleteInactiveCheckpoints(ctx, TaskBackfill, targetDate); err != nil {
 		return err
 	} else if n > 0 {

@@ -95,6 +95,25 @@ func (s *Store) MarkSecuritiesWithStaleTradeDateDelisted(ctx context.Context, ta
 	return res.RowsAffected()
 }
 
+// NormalizeInactiveLastTradeDates 以本地已保存的最后一根日 K 作为非在市证券的
+// 实际覆盖终点。退市、转板旧代码不应继续追赶全市场最近交易日。
+func (s *Store) NormalizeInactiveLastTradeDates(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE stock_basic b
+		INNER JOIN (
+			SELECT symbol,MAX(trade_date) last_date
+			FROM kline_daily
+			GROUP BY symbol
+		) k ON k.symbol=b.symbol
+		SET b.last_trade_date=k.last_date,b.updated_at=NOW()
+		WHERE b.status<>'listed'
+		  AND (b.last_trade_date IS NULL OR b.last_trade_date<>k.last_date)`)
+	if err != nil {
+		return 0, fmt.Errorf("normalize inactive last trade dates: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // MarkMissingListedSecuritiesDelisted 仅在本轮列表完整时调用：未出现在当前上游清单、此前仍标为 listed 的证券
 // 转为 delisted，并保留库内最后交易日作为历史覆盖终点。
 func (s *Store) MarkMissingListedSecuritiesDelisted(ctx context.Context, currentSymbols []string) (int64, error) {
