@@ -254,7 +254,7 @@ func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 100
 	}
-	key := "heatmap:v3:" + market + ":" + groupBy + ":" + metric + ":" + period + ":" + strconv.Itoa(limit)
+	key := "heatmap:v4:" + market + ":" + groupBy + ":" + metric + ":" + period + ":" + strconv.Itoa(limit)
 	s.cachedJSON(w, r, key, func(ctx context.Context) (interface{}, error) {
 		groups, notice, err := s.St.MarketHeatmap(ctx, market, groupBy, metric, period, limit)
 		if err != nil {

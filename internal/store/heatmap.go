@@ -11,6 +11,8 @@ import (
 	"github.com/hoax/go-stock/internal/model"
 )
 
+const heatmapItemsPerGroup = 50
+
 type heatmapGroupAccumulator struct {
 	items          []model.HeatmapItem
 	weightedChange float64
@@ -156,6 +158,9 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		sort.Slice(accumulator.items, func(i, j int) bool {
 			return accumulator.items[i].TotalMV > accumulator.items[j].TotalMV
 		})
+		if len(accumulator.items) > heatmapItemsPerGroup {
+			accumulator.items = accumulator.items[:heatmapItemsPerGroup]
+		}
 		// 板块热度：板块整体涨跌强度为主，板块总成交额活跃度为辅。
 		heat := math.Abs(change)*0.65 + math.Log10(math.Max(accumulator.amount, 1))*0.35
 		ranked = append(ranked, rankedHeatmapGroup{
