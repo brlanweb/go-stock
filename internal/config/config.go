@@ -35,6 +35,11 @@ type Config struct {
 
 	QuoteTTLSeconds int // 实时行情缓存 TTL
 
+	RedisAddr       string // 可选 Redis 查询缓存地址，空表示关闭
+	RedisPassword   string
+	RedisDB         int
+	RedisTTLSeconds int
+
 	AIBaseURL    string // OpenAI 兼容模型地址
 	AIAPIKey     string // 模型密钥
 	AIModel      string // 模型名称
@@ -69,6 +74,10 @@ func Load() (*Config, error) {
 		PythonCommand:     getEnv("GOSTOCK_PYTHON_COMMAND", "python3"),
 		PythonKlineScript: getEnv("GOSTOCK_PYTHON_KLINE_SCRIPT", "python-provider/fetch_kline.py"),
 		QuoteTTLSeconds:   getEnvInt("GOSTOCK_QUOTE_TTL", 3),
+		RedisAddr:         getEnv("GOSTOCK_REDIS_ADDR", ""),
+		RedisPassword:     getEnv("GOSTOCK_REDIS_PASSWORD", ""),
+		RedisDB:           getEnvInt("GOSTOCK_REDIS_DB", 0),
+		RedisTTLSeconds:   getEnvInt("GOSTOCK_REDIS_TTL_SECONDS", 60),
 		AIBaseURL:         getEnv("GOSTOCK_AI_BASE_URL", ""),
 		AIAPIKey:          getEnv("GOSTOCK_AI_API_KEY", ""),
 		AIModel:           getEnv("GOSTOCK_AI_MODEL", ""),

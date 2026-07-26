@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -82,6 +83,75 @@ func (s *Service) ChatStock(ctx context.Context, symbol, question, ctxText strin
 		return "", fmt.Errorf("agent response invalid")
 	}
 	return strings.TrimSpace(envelope.Choices[0].Message.Content), nil
+}
+
+func (s *Service) ChatStockStream(ctx context.Context, symbol, question, ctxText string, emit func(string) error) error {
+	if !s.Enabled() {
+		return fmt.Errorf("AI 推荐未配置")
+	}
+	reqBody := map[string]interface{}{
+		"model":       s.config.Model,
+		"temperature": 0.2,
+		"max_tokens":  600,
+		"stream":      true,
+		"messages": []map[string]string{
+			{"role": "system", "content": "你是 go-stock 的 AI 行情助理，仅基于用户提供的本地数据库字段回答。回答用简洁中文，不要编造数据。"},
+			{"role": "user", "content": "已携带本地数据库内容如下：\n" + ctxText + "\n\n用户问题：\n" + question},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.config.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+s.config.APIKey)
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("agent stream request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("agent HTTP %d: %.300s", resp.StatusCode, respBody)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			return nil
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return fmt.Errorf("agent stream response invalid: %w", err)
+		}
+		if chunk.Error != nil {
+			return fmt.Errorf("agent: %s", chunk.Error.Message)
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != "" {
+				if err := emit(choice.Delta.Content); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return scanner.Err()
 }
 
 func (s *Service) RunDaily(ctx context.Context) error {

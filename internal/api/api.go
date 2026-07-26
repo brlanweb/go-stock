@@ -13,6 +13,7 @@ import (
 	"github.com/hoax/go-stock/internal/analysis"
 	"github.com/hoax/go-stock/internal/model"
 	"github.com/hoax/go-stock/internal/provider"
+	"github.com/hoax/go-stock/internal/querycache"
 	"github.com/hoax/go-stock/internal/store"
 	gsync "github.com/hoax/go-stock/internal/sync"
 )
@@ -23,6 +24,7 @@ type Server struct {
 	Svc      *provider.Service
 	Engine   *gsync.Engine
 	Analysis *analysis.Service
+	Cache    *querycache.Cache
 }
 
 // Register 注册全部 REST 路由。
@@ -41,6 +43,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sectors/{code}/constituents", s.handleSectorConstituents)
 	mux.HandleFunc("GET /api/v1/stock/{code}/detail", s.handleStockDetail)
 	mux.HandleFunc("POST /api/v1/agent/chat", s.handleAgentChat)
+	mux.HandleFunc("POST /api/v1/agent/chat/stream", s.handleAgentChatStream)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
@@ -51,6 +54,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/v1/sync/status", s.handleSyncStatus)
 	mux.HandleFunc("POST /api/v1/sync/backfill", s.handleSyncBackfill)
+	mux.HandleFunc("POST /api/v1/sync/backfill/retry-failed", s.handleSyncBackfillRetryFailed)
 	mux.HandleFunc("POST /api/v1/sync/backfill/stop", s.handleSyncBackfillStop)
 	mux.HandleFunc("POST /api/v1/sync/daily", s.handleSyncDaily)
 	mux.HandleFunc("POST /api/v1/sync/stock/{code}", s.handleSyncStock)
@@ -70,6 +74,29 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 func reqCtx(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), 30*time.Second)
+}
+
+func (s *Server) cachedJSON(w http.ResponseWriter, r *http.Request, key string, load func(context.Context) (interface{}, error)) {
+	if data, ok := s.Cache.Get(r.Context(), key); ok {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("X-Cache", "HIT")
+		_, _ = w.Write(data)
+		return
+	}
+	value, err := load(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Cache.Set(r.Context(), key, data)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Cache", "MISS")
+	_, _ = w.Write(data)
 }
 
 // ---- Handlers ----
@@ -221,66 +248,61 @@ func (s *Server) handleIndicator(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := reqCtx(r)
-	defer cancel()
 	q := r.URL.Query()
-	groups, notice, err := s.St.MarketHeatmap(ctx, q.Get("market"), q.Get("group_by"), q.Get("metric"), q.Get("period"))
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	market, groupBy, metric, period := q.Get("market"), q.Get("group_by"), q.Get("metric"), q.Get("period")
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 100
 	}
-	writeJSON(w, 200, map[string]interface{}{
-		"market":   q.Get("market"),
-		"group_by": q.Get("group_by"),
-		"metric":   q.Get("metric"),
-		"period":   q.Get("period"),
-		"notice":   notice,
-		"groups":   groups,
+	key := "heatmap:v2:" + market + ":" + groupBy + ":" + metric + ":" + period + ":" + strconv.Itoa(limit)
+	s.cachedJSON(w, r, key, func(ctx context.Context) (interface{}, error) {
+		groups, notice, err := s.St.MarketHeatmap(ctx, market, groupBy, metric, period, limit)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"market": market, "group_by": groupBy, "metric": metric,
+			"period": period, "limit": limit, "notice": notice, "groups": groups,
+		}, nil
 	})
 }
 
 func (s *Server) handleSectors(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := reqCtx(r)
-	defer cancel()
 	groupBy := r.URL.Query().Get("group_by")
 	if groupBy != "concept" {
 		groupBy = "industry"
 	}
-	list, err := s.St.ListSectors(ctx, groupBy)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]interface{}{"sector_type": groupBy, "sectors": list})
+	s.cachedJSON(w, r, "sectors:v1:"+groupBy, func(ctx context.Context) (interface{}, error) {
+		list, err := s.St.ListSectors(ctx, groupBy)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"sector_type": groupBy, "sectors": list}, nil
+	})
 }
 
 func (s *Server) handleSectorConstituents(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := reqCtx(r)
-	defer cancel()
 	code := r.PathValue("code")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := s.St.ListSectorConstituents(ctx, code, limit)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]interface{}{"sector_code": code, "constituents": items})
+	key := "sector-constituents:v1:" + code + ":" + strconv.Itoa(limit)
+	s.cachedJSON(w, r, key, func(ctx context.Context) (interface{}, error) {
+		items, err := s.St.ListSectorConstituents(ctx, code, limit)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"sector_code": code, "constituents": items}, nil
+	})
 }
 
 func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := reqCtx(r)
-	defer cancel()
 	symbol := model.NormalizeSymbol(r.PathValue("code"))
 	if symbol == "" {
 		writeErr(w, 400, "无法识别的代码")
 		return
 	}
-	detail, err := s.St.DetailForSymbol(ctx, symbol)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, detail)
+	s.cachedJSON(w, r, "stock-detail:v1:"+symbol, func(ctx context.Context) (interface{}, error) {
+		return s.St.DetailForSymbol(ctx, symbol)
+	})
 }
 
 func (s *Server) handleAgentChat(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +329,51 @@ func (s *Server) handleAgentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
+}
+
+func (s *Server) handleAgentChatStream(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Symbol   string `json:"symbol"`
+		Question string `json:"question"`
+		Context  string `json:"context"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败")
+		return
+	}
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置（GOSTOCK_AI_BASE_URL/API_KEY/MODEL）")
+		return
+	}
+	if strings.TrimSpace(body.Question) == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 question")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "当前服务不支持流式响应")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	emit := func(event string, value interface{}) error {
+		payload, _ := json.Marshal(value)
+		if _, err := w.Write([]byte("event: " + event + "\ndata: " + string(payload) + "\n\n")); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	if err := s.Analysis.ChatStockStream(r.Context(), body.Symbol, body.Question, body.Context, func(delta string) error {
+		return emit("delta", map[string]string{"text": delta})
+	}); err != nil {
+		_ = emit("error", map[string]string{"error": err.Error()})
+		return
+	}
+	_ = emit("done", map[string]bool{"done": true})
 }
 
 func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +493,29 @@ func (s *Server) handleSyncBackfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 202, map[string]string{"status": "backfill started"})
+}
+
+func (s *Server) handleSyncBackfillRetryFailed(w http.ResponseWriter, r *http.Request) {
+	if s.Engine.IsRunning() {
+		writeErr(w, http.StatusConflict, "回填任务正在运行，请停止后再重试失败项")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	count, err := s.St.RequeueFailed(ctx, gsync.TaskBackfill)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if count == 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "no failed checkpoints", "requeued": 0})
+		return
+	}
+	if err := s.Engine.StartBackfill(s.Engine.BaseContext()); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"status": "failed checkpoints requeued", "requeued": count})
 }
 
 func (s *Server) handleSyncBackfillStop(w http.ResponseWriter, r *http.Request) {

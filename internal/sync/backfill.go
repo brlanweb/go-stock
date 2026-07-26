@@ -218,20 +218,8 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 	} else if n > 0 {
 		slog.Info("重置残留 running 断点", "count", n)
 	}
-	if n, err := e.st.ResetFailed(ctx, TaskBackfill); err != nil {
-		return err
-	} else if n > 0 {
-		slog.Info("重置 failed 断点重试", "count", n)
-	}
-	mappedSymbols := make([]string, 0, len(provider.BSELegacySymbol))
-	for symbol := range provider.BSELegacySymbol {
-		mappedSymbols = append(mappedSymbols, symbol)
-	}
-	if n, err := e.st.RequeueExhaustedMappedSymbols(ctx, TaskBackfill, mappedSymbols); err != nil {
-		return err
-	} else if n > 0 {
-		slog.Info("北交所映射断点获得一次新策略重试", "count", n)
-	}
+	// failed 断点仅允许通过显式“重试失败项”接口重排，启动时不自动恢复，
+	// 包括已具备北交所旧代码映射的证券，避免每次重启重复撞击上游。
 
 	// 2. 刷新证券列表（幂等 upsert，新股自动加入断点）。
 	if _, err := e.SyncSecurities(ctx); err != nil {

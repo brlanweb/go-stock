@@ -32,6 +32,8 @@ const recommendationRunning = ref(false)
 const recommendationMessage = ref('')
 const watchlist = ref<Quote[]>([])
 const syncStatus = ref<SyncStatus | null>(null)
+const retryingFailed = ref(false)
+const retryMessage = ref('')
 let searchTimer: number | undefined
 
 async function loadWatchlist() {
@@ -111,6 +113,20 @@ async function runRecommendations() {
   }
 }
 
+async function retryFailedBackfill() {
+  retryingFailed.value = true
+  retryMessage.value = ''
+  try {
+    const result = await api.retryFailedBackfill()
+    retryMessage.value = result.requeued ? `已重排 ${result.requeued} 项` : '没有失败项'
+    await loadSyncStatus()
+  } catch (e: any) {
+    retryMessage.value = e?.message || '重试失败'
+  } finally {
+    retryingFailed.value = false
+  }
+}
+
 async function loadSyncStatus() {
   try { syncStatus.value = await api.syncStatus() } catch { /* 保留上次成功状态 */ }
 }
@@ -154,6 +170,8 @@ onUnmounted(() => {
       <span>完整 {{ syncStatus.backfill.complete }}/{{ syncStatus.backfill.total }} · {{ syncProgress.toFixed(1) }}%</span>
       <small>待处理 {{ syncStatus.backfill.pending }} · 处理中 {{ syncStatus.backfill.running }} · 失败 {{ syncStatus.backfill.failed }}</small>
       <small>部分 {{ syncStatus.backfill.partial }} · 空 {{ syncStatus.backfill.empty }}<template v-if="syncStatus.backfill.latest_date"> · 截至 {{ syncStatus.backfill.latest_date }}</template></small>
+      <button v-if="syncStatus.backfill.failed > 0 && !syncStatus.backfill_running" class="retry-failed" :disabled="retryingFailed" @click="retryFailedBackfill">{{ retryingFailed ? '重排中' : '重试失败项' }}</button>
+      <small v-if="retryMessage" class="retry-message">{{ retryMessage }}</small>
     </div>
 
     <section class="sidebar-section recommendation-panel">
@@ -173,7 +191,7 @@ onUnmounted(() => {
 .side-field { display:grid; grid-template-columns:48px 1fr; align-items:center; gap:8px; color:#adb7c7; font-size:13px; }.side-field select,.side-search input { width:100%; min-width:0; height:29px; border:1px solid #3c475c; border-radius:0; outline:none; background:#354055; color:#f1f4f8; font-size:13px; }.side-field select { padding:0 8px; }
 .side-search { position:relative; display:grid; gap:8px; margin-top:6px; padding-top:12px; border-top:1px solid #354157; color:#c3cbd7; font-size:13px; }.side-search input { padding:6px 8px; }
 .search-results { position:absolute; z-index:20; top:calc(100% + 3px); width:100%; max-height:260px; overflow:auto; border:1px solid #445067; background:#1d2739; box-shadow:0 12px 30px rgba(0,0,0,.4); }.search-results button { display:flex; width:100%; justify-content:space-between; gap:8px; padding:8px; border:0; border-bottom:1px solid #344056; border-radius:0; background:transparent; color:#edf2f9; text-align:left; }.search-results span { color:#9ba8bd; font-size:11px; }
-.side-stats { display:flex; align-items:center; justify-content:space-between; padding:8px 7px; border-top:1px solid #354157; border-bottom:1px solid #354157; color:#9da9bb; font-size:12px; }.side-stats strong { color:#e7ecf4; font-size:13px; }.coverage-status { display:grid; gap:4px; padding:7px; border-left:2px solid #68758a; background:#252f41; color:#d9e0e9; font-size:10px; }.coverage-status.active { border-left-color:#d6a12c; background:#2b2c32; }.coverage-title { display:flex; align-items:center; justify-content:space-between; font-size:11px; }.coverage-title strong { color:#aeb9ca; font-size:10px; }.coverage-status.active .coverage-title strong { color:#e9c16c; }.coverage-progress { height:4px; overflow:hidden; background:#111a28; }.coverage-progress i { display:block; height:100%; background:#4fbc91; transition:width .25s; }.coverage-status small { color:#9ba8bd; font-size:9px; }
+.side-stats { display:flex; align-items:center; justify-content:space-between; padding:8px 7px; border-top:1px solid #354157; border-bottom:1px solid #354157; color:#9da9bb; font-size:12px; }.side-stats strong { color:#e7ecf4; font-size:13px; }.coverage-status { display:grid; gap:4px; padding:7px; border-left:2px solid #68758a; background:#252f41; color:#d9e0e9; font-size:10px; }.coverage-status.active { border-left-color:#d6a12c; background:#2b2c32; }.coverage-title { display:flex; align-items:center; justify-content:space-between; font-size:11px; }.coverage-title strong { color:#aeb9ca; font-size:10px; }.coverage-status.active .coverage-title strong { color:#e9c16c; }.coverage-progress { height:4px; overflow:hidden; background:#111a28; }.coverage-progress i { display:block; height:100%; background:#4fbc91; transition:width .25s; }.coverage-status small { color:#9ba8bd; font-size:9px; }.retry-failed { margin-top:3px; padding:4px 7px; border:1px solid #8c5e34; background:#3a2e25; color:#e9c16c; font-size:10px; cursor:pointer; }.retry-failed:disabled { opacity:.6; cursor:wait; }.retry-message { color:#e9c16c!important; }
 .sidebar-section { display:grid; gap:2px; }.reco-link { cursor:pointer; }.reco-link:hover { color:#e9c16c; }.sidebar-section header { display:flex; align-items:center; justify-content:space-between; padding:2px 7px 5px; color:#e2e7ef; font-size:12px; }.recommendation-tools { display:flex; align-items:center; gap:4px; }.sidebar-section header select { max-width:84px; border:0; background:#2b364a; color:#aeb9ca; font-size:10px; }.run-analysis { padding:3px 6px!important; border:1px solid #4a5870!important; background:#2b364a!important; color:#e8edf5!important; font-size:10px!important; }.run-analysis:disabled { cursor:wait; opacity:.6; }.recommendation-message { padding:2px 7px 5px; color:#d8b967; font-size:10px; }.sidebar-section header small { color:#8390a4; font-size:10px; }.sidebar-section button { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:5px; padding:5px 7px; border:0; border-bottom:1px solid #303b50; border-radius:0; background:#222d41; color:#ecf0f6; text-align:left; }.sidebar-section button:hover { background:#2b374c; }.sidebar-section button span { min-width:0; }.sidebar-section button b,.sidebar-section button small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sidebar-section button b { font-size:11px; }.sidebar-section button small { margin-top:1px; color:#8996aa; font-size:9px; }.sidebar-section button em { flex:0 0 auto; color:#e9c16c; font-style:normal; font-size:11px; font-weight:700; }.sidebar-section button em.positive { color:#ef6a72; }.sidebar-section button em.negative { color:#28bd8b; }.sidebar-section p { padding:6px 7px; color:#738197; font-size:10px; }.side-help { display:grid; gap:7px; margin-top:auto; padding:10px 7px 4px; border-top:1px solid #354157; color:#9ba8bd; font-size:11px; line-height:1.4; }.side-help strong { color:#e2e7ef; font-size:12px; }
 @media (max-width:900px) { .market-sidebar { display:grid; min-height:auto; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; border-right:0; border-bottom:1px solid #354157; overflow:visible; }.brand,.side-help,.side-stats,.sidebar-section { display:none; }.coverage-status { grid-column:1/-1; }.side-search { margin:0; padding:0; border:0; } }
 @media (max-width:600px) { .market-sidebar { grid-template-columns:1fr 1fr; }.side-search { grid-column:1/-1; } }

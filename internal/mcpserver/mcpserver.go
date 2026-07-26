@@ -191,8 +191,9 @@ func registerTools(s *server.MCPServer, d Deps) {
 		mcp.WithString("group_by", mcp.Description("industry/concept，默认industry")),
 		mcp.WithString("metric", mcp.Description("change_pct/pe_ttm/main_net_inflow，默认change_pct")),
 		mcp.WithString("period", mcp.Description("1d/3d/5d，默认1d")),
+		mcp.WithNumber("limit", mcp.Description("按热度返回的证券总数，默认100，最大5000")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		groups, notice, err := d.St.MarketHeatmap(ctx, req.GetString("market", "all"), req.GetString("group_by", "industry"), req.GetString("metric", "change_pct"), req.GetString("period", "1d"))
+		groups, notice, err := d.St.MarketHeatmap(ctx, req.GetString("market", "all"), req.GetString("group_by", "industry"), req.GetString("metric", "change_pct"), req.GetString("period", "1d"), int(req.GetFloat("limit", 100)))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

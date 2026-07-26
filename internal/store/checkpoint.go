@@ -102,6 +102,17 @@ func (s *Store) MarkFailed(ctx context.Context, task, symbol, errMsg string) err
 	return err
 }
 
+// RequeueFailed 仅供用户显式操作，将失败断点重排为 pending。
+// retry_count 保留，便于识别长期失败证券；同一轮失败后不会自动再次领取。
+func (s *Store) RequeueFailed(ctx context.Context, task string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		"UPDATE sync_checkpoint SET status='pending',last_error='' WHERE task=? AND status='failed'", task)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ResetFailed 保留失败断点及 retry_count，避免每次重启把永久失败证券再次重试。
 func (s *Store) ResetFailed(ctx context.Context, task string) (int64, error) {
 	return 0, nil

@@ -117,7 +117,7 @@ function pollInterval() {
 
 async function refresh() {
   try {
-    const heatmap = await api.heatmap(market.value, groupBy.value, metric.value, period.value)
+    const heatmap = await api.heatmap(market.value, groupBy.value, metric.value, period.value, 100)
     groups.value = heatmap.groups
     notice.value = heatmap.notice
     error.value = ''

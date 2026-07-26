@@ -17,6 +17,7 @@ import (
 	"github.com/hoax/go-stock/internal/config"
 	"github.com/hoax/go-stock/internal/mcpserver"
 	"github.com/hoax/go-stock/internal/provider"
+	"github.com/hoax/go-stock/internal/querycache"
 	"github.com/hoax/go-stock/internal/store"
 	gsync "github.com/hoax/go-stock/internal/sync"
 	"github.com/hoax/go-stock/web"
@@ -37,6 +38,8 @@ func main() {
 	}
 	defer st.Close()
 	slog.Info("数据库就绪", "host", cfg.DBHost, "db", cfg.DBName)
+	queryCache := querycache.New(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, cfg.RedisTTLSeconds)
+	defer queryCache.Close()
 
 	// Provider + 缓存服务
 	mgr := provider.NewManager(cfg.BackfillQPS)
@@ -57,7 +60,7 @@ func main() {
 
 	// 路由
 	mux := http.NewServeMux()
-	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService}
+	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService, Cache: queryCache}
 	apiServer.Register(mux)
 
 	// 可选页面访问密码

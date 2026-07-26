@@ -183,8 +183,9 @@ export const api = {
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),
   delWatch: (code: string) => req(`/watchlist/${code}`, { method: 'DELETE' }),
   syncStatus: () => req<SyncStatus>('/sync/status'),
-  heatmap: (market = 'all', groupBy = 'industry', metric = 'change_pct', period = '1d') =>
-    req<HeatmapResponse>(`/market/heatmap?market=${market}&group_by=${groupBy}&metric=${metric}&period=${period}`),
+  retryFailedBackfill: () => req<{ status: string; requeued: number }>('/sync/backfill/retry-failed', { method: 'POST' }),
+  heatmap: (market = 'all', groupBy = 'industry', metric = 'change_pct', period = '1d', limit = 100) =>
+    req<HeatmapResponse>(`/market/heatmap?market=${market}&group_by=${groupBy}&metric=${metric}&period=${period}&limit=${limit}`),
   syncStock: (code: string, mode = 'latest') => req(`/sync/stock/${code}?mode=${mode}`, { method: 'POST' }),
   sectors: (groupBy: 'industry' | 'concept' = 'industry') => req<{ sector_type: string; sectors: SectorListItem[] }>(`/sectors?group_by=${groupBy}`),
   sectorConstituents: (code: string, limit = 100) => req<{ sector_code: string; constituents: SectorConstituentItem[] }>(`/sectors/${encodeURIComponent(code)}/constituents?limit=${limit}`),
