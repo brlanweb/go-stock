@@ -10,7 +10,6 @@ interface TreeDatum {
   item?: HeatmapItem
   children?: TreeDatum[]
   weight?: number
-  sectorWeight?: number
 }
 
 const router = useRouter()
@@ -30,16 +29,11 @@ let resizeObserver: ResizeObserver | undefined
 const heatLegend = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
 
 const itemCount = computed(() => groups.value.reduce((sum, group) => sum + group.items.length, 0))
-// 个股市值占比压缩：极少数超大市值（银行、白酒龙头）会占据云图绝大部分空间。
-// 行业层先按总市值×强度压缩，再让每个行业下"少数大盘股"不挤压同行小盘股。
-// - MAX_STOCK_RATIO：单只股票占云图最大面积比例（按对数映射后归一）。
-// - MAX_SECTOR_RATIO：单个行业占云图最大面积比例，再叠加行业强度（涨跌幅绝对值）。
-// - SECTOR_STRENGTH_BOOST：行业强度（涨跌幅）权重倍数，用于放大强势行业。
+// 两级布局分别计算板块矩形和板块内个股矩形，保证任何个股都不会跨出所属板块。
 const MAX_STOCK_RATIO = 0.08
-const MAX_SECTOR_RATIO = 0.15
-const SECTOR_STRENGTH_BOOST = 3
+const MAX_SECTOR_RATIO = 4
+const SECTOR_STRENGTH_BOOST = 0.35
 const STOCK_AREA_FLOOR = 1.0
-const SMALL_SECTOR_FILL = 0.7 // 小板块目标填充率（占自身面积的比例）
 
 function logRange(value: number, minLog: number, maxLog: number): number {
   if (maxLog <= minLog) return 0
@@ -66,49 +60,72 @@ const layout = computed(() => {
   if (!groups.value.length || mapWidth.value <= 0 || mapHeight.value <= 0) {
     return { sectors: [] as HierarchyRectangularNode<TreeDatum>[], stocks: [] as HierarchyRectangularNode<TreeDatum>[] }
   }
-  // 板块面积 = sqrt(总市值) × 强度调整；弱化市值线性影响，让中小板块不再被吞掉。
-  // 单股面积 = sqrt(市值) × 强度调整，与行业同级避免层级重复放大。
-  const allMvs = groups.value.flatMap(g => g.items.map(i => Number(i.total_mv) || 0)).filter(v => v > 0)
-  const stockMax = allMvs.length ? Math.max(...allMvs) : 0
-  const data: TreeDatum = {
+
+  const stockMVs = groups.value.flatMap(group => group.items.map(item => Number(item.total_mv) || 0)).filter(value => value > 0)
+  const stockMax = stockMVs.length ? Math.max(...stockMVs) : 0
+  const maxSectorMV = Math.max(...groups.value.map(group => group.items.reduce((sum, item) => sum + (Number(item.total_mv) || 0), 0)), 1)
+  const sectorRoot = hierarchy<TreeDatum>({
     name: 'A股',
-    children: groups.value.map((group) => {
-      const totalMV = group.items.reduce((s, i) => s + (Number(i.total_mv) || 0), 0)
-      const strength = Math.min(1, Math.abs(Number(group.change_pct) || 0) / 3)
-      // 板块"视觉权重"：以总市值平方根为基准，加入股票数修正（保证股少也有可见空间）
-      const mvFactor = stockMax > 0 ? Math.sqrt(totalMV / stockMax) : 0.1
-      const countFactor = Math.min(0.4, group.items.length / 80)
-      const sectorWeightValue = 0.3 + mvFactor * 0.6 + countFactor + strength * 0.5
+    children: groups.value.map(group => {
+      const totalMV = group.items.reduce((sum, item) => sum + (Number(item.total_mv) || 0), 0)
       return {
         name: group.name,
-        sectorWeight: sectorWeightValue,
-        children: group.items.map(item => ({ name: item.name, item, weight: stockWeight(Number(item.total_mv) || 0, stockMax) }))
+        weight: sectorWeight(totalMV, maxSectorMV, Number(group.change_pct) || 0)
       }
     })
-  }
-  const root = hierarchy(data)
-    .sum((node: TreeDatum) => {
-      if (node.item) {
-        // 单股按对数市值 + 基础权重，使小盘股也占据可见空间
-        const mv = Number(node.item.total_mv) || 0
-        const w = stockWeight(mv, stockMax)
-        return Math.max(mv, 1) * w
-      }
-      // 行业层：sectorWeight 决定面积（平方根+股票数+强度）
-      return Math.max((node.sectorWeight || 1), 0.1)
-    })
+  })
+    .sum(node => node.weight || 0)
     .sort((a, b) => (b.value || 0) - (a.value || 0))
-  const rectangularRoot = treemap<TreeDatum>()
+
+  const sectorLayout = treemap<TreeDatum>()
     .size([mapWidth.value, mapHeight.value])
     .tile(treemapSquarify.ratio(1.2))
     .paddingOuter(2)
-    .paddingInner(0)
-    .paddingTop(node => node.depth === 1 ? 19 : 0)
-    .round(true)(root)
-  return {
-    sectors: rectangularRoot.children || [],
-    stocks: rectangularRoot.leaves()
+    .paddingInner(2)
+    .round(true)(sectorRoot)
+  const sectors = sectorLayout.children || []
+  const groupByName = new Map(groups.value.map(group => [group.name, group]))
+  const stocks: HierarchyRectangularNode<TreeDatum>[] = []
+
+  for (const sector of sectors) {
+    const group = groupByName.get(sector.data.name)
+    if (!group?.items.length) continue
+    const innerWidth = Math.max(0, sector.x1 - sector.x0 - 2)
+    const innerHeight = Math.max(0, sector.y1 - sector.y0 - 21)
+    if (innerWidth < 1 || innerHeight < 1) continue
+
+    const stockRoot = hierarchy<TreeDatum>({
+      name: group.name,
+      children: group.items.map(item => ({
+        name: item.name,
+        item,
+        weight: stockWeight(Number(item.total_mv) || 0, stockMax)
+      }))
+    })
+      .sum(node => {
+        if (!node.item) return 0
+        const marketCap = Math.max(Number(node.item.total_mv) || 0, 1)
+        return Math.sqrt(marketCap) * (node.weight || 1)
+      })
+      .sort((a, b) => (b.value || 0) - (a.value || 0))
+
+    const innerLayout = treemap<TreeDatum>()
+      .size([innerWidth, innerHeight])
+      .tile(treemapSquarify.ratio(1.2))
+      .paddingInner(1)
+      .round(true)(stockRoot)
+    const offsetX = sector.x0 + 1
+    const offsetY = sector.y0 + 20
+    for (const leaf of innerLayout.leaves()) {
+      leaf.x0 += offsetX
+      leaf.x1 += offsetX
+      leaf.y0 += offsetY
+      leaf.y1 += offsetY
+      stocks.push(leaf)
+    }
   }
+
+  return { sectors, stocks }
 })
 
 function pollInterval() {

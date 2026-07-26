@@ -1,7 +1,5 @@
 # go-stock
 
-# go-stock
-
 > 低内存 A 股数据底座：Go 单二进制集成 REST API、MCP Streamable HTTP、Vue 3 市场云图和 MySQL 历史数据同步。
 
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![Vue](https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs)](https://vuejs.org/) [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-4479A1?logo=mysql)](https://www.mysql.com/)
@@ -11,7 +9,8 @@
 - **查询只读本地库**：页面、REST 查询端点和 MCP 分析工具只读取 MySQL；不会因东方财富等上游瞬断在浏览器或 AI 分析时返回 `EOF`。
 - **外部数据仅后台采集**：交易日 `12:00`（上午收盘）和 `16:00`（全天收盘）按 `Asia/Shanghai` 定时采集全市场快照；手动同步和缺失补齐属于显式写操作。
 - **快照可追溯**：报价和指数响应携带 `fetched_at`，代表最近一次本地快照的采集时间，不将缓存快照伪装成实时数据。
-- **云图按市值展示**：行业云图使用总市值的对数面积映射，颜色由涨跌幅决定；桌面端按一屏终端视图展示主要行业和头部证券。
+- **云图按板块分区**：默认筛选热度靠前 100 个行业或概念、每板块最多 50 只证券；先计算板块矩形，再在板块内部按市值计算个股矩形，避免大市值个股跨板块覆盖。颜色由所选指标决定。
+- **流式个股 Agent**：详情页右侧抽屉支持流式回答、按证券保存 MySQL 对话历史，并可选择是否携带当前快照及 `0/10/30/60` 个交易日日 K；历史条数由后端校验和截取。
 
 ## 特性
 
@@ -97,7 +96,9 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/indices` | 最近一次本地指数快照 |
 | `GET /api/v1/security/{code}` | 基础信息 |
 | `GET /api/v1/indicator/{code}` | 每日指标历史 |
-| `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d` | 本地日K与指标生成的行业云图 |
+| `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d&limit=100` | 本地日K与指标生成的行业/概念云图；默认前 100 个热度板块，每板块最多 50 只 |
+| `POST /api/v1/agent/chat/stream` | 个股 Agent SSE 流式对话；`history_days` 仅支持 `0/10/30/60`，`include_stock` 控制是否携带个股快照 |
+| `GET/DELETE /api/v1/agent/chat/history/{code}` | 查询或清除当前证券保存在 MySQL 的 Agent 对话历史 |
 | `GET/POST/DELETE /api/v1/watchlist[/{code}]` | 自选股与本地快照 |
 | `GET /api/v1/sync/status` | 回填进度 |
 | `POST /api/v1/sync/stock/{code}?mode=latest\|missing\|full` | 显式同步单只证券 |

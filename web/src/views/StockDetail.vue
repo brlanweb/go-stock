@@ -257,7 +257,7 @@ onUnmounted(() => {
       <div id="kl-chart" class="kline-chart"></div>
     </div>
 
-    <AgentPanel :detail="detail" v-if="agentOpen" />
+    <AgentPanel :detail="detail" v-if="agentOpen" @close="agentOpen = false" />
   </div>
 </template>
 
@@ -334,6 +334,6 @@ onUnmounted(() => {
 .tag-inline .dim { font-size:12px; min-width:64px; }
 .concepts-row { position:relative; }
 .concepts-wrap { position:relative; }
-.concepts-popup { position:absolute; top:calc(100% + 4px); left:64px; z-index:5; display:flex; flex-wrap:wrap; gap:6px; max-width:520px; padding:10px 12px; border:1px solid #c8d3df; border-radius:4px; background:#fff; box-shadow:0 12px 28px rgba(15,28,48,.18); }
+.concepts-popup { position:absolute; top:100%; left:64px; z-index:5; display:flex; flex-wrap:wrap; gap:6px; max-width:520px; padding:12px 12px 10px; border:1px solid #c8d3df; background:#fff; box-shadow:0 12px 28px rgba(15,28,48,.18); }
 .concepts-popup .tag { font-size:12px; }
 </style>

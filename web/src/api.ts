@@ -138,6 +138,14 @@ export interface SectorConstituentItem {
   snapshot_at?: string
 }
 
+export interface AgentChatMessage {
+  id: number
+  symbol: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
 export interface StockDetailPayload {
   symbol: string
   code: string
@@ -191,6 +199,8 @@ export const api = {
   sectors: (groupBy: 'industry' | 'concept' = 'industry') => req<{ sector_type: string; sectors: SectorListItem[] }>(`/sectors?group_by=${groupBy}`),
   sectorConstituents: (code: string, limit = 100) => req<{ sector_code: string; constituents: SectorConstituentItem[] }>(`/sectors/${encodeURIComponent(code)}/constituents?limit=${limit}`),
   stockDetail: (code: string) => req<StockDetailPayload>(`/stock/${encodeURIComponent(code)}/detail`),
+  agentHistory: (code: string) => req<AgentChatMessage[]>(`/agent/chat/history/${encodeURIComponent(code)}`),
+  clearAgentHistory: (code: string) => req<{ cleared: string }>(`/agent/chat/history/${encodeURIComponent(code)}`, { method: 'DELETE' }),
   authStatus: () => req<{ required: boolean; authenticated: boolean }>('/auth/status'),
   authLogin: (password: string) => req<{ authenticated: boolean }>('/auth/login', {
     method: 'POST',

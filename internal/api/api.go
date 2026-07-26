@@ -44,6 +44,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/stock/{code}/detail", s.handleStockDetail)
 	mux.HandleFunc("POST /api/v1/agent/chat", s.handleAgentChat)
 	mux.HandleFunc("POST /api/v1/agent/chat/stream", s.handleAgentChatStream)
+	mux.HandleFunc("GET /api/v1/agent/chat/history/{code}", s.handleAgentChatHistory)
+	mux.HandleFunc("DELETE /api/v1/agent/chat/history/{code}", s.handleAgentChatClear)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
@@ -331,11 +333,16 @@ func (s *Server) handleAgentChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
 }
 
+func validAgentHistoryDays(days int) bool {
+	return days == 0 || days == 10 || days == 30 || days == 60
+}
+
 func (s *Server) handleAgentChatStream(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Symbol   string `json:"symbol"`
-		Question string `json:"question"`
-		Context  string `json:"context"`
+		Symbol       string `json:"symbol"`
+		Question     string `json:"question"`
+		IncludeStock *bool  `json:"include_stock"`
+		HistoryDays  int    `json:"history_days"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败")
@@ -347,6 +354,30 @@ func (s *Server) handleAgentChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(body.Question) == "" {
 		writeErr(w, http.StatusBadRequest, "缺少 question")
+		return
+	}
+	symbol := model.NormalizeSymbol(body.Symbol)
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	if !validAgentHistoryDays(body.HistoryDays) {
+		writeErr(w, http.StatusBadRequest, "history_days 仅支持 0、10、30 或 60")
+		return
+	}
+	includeStock := body.IncludeStock == nil || *body.IncludeStock
+	ctxText, err := s.agentContext(r.Context(), symbol, includeStock, body.HistoryDays)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	history, err := s.St.AgentChatMessages(r.Context(), symbol)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.St.AppendAgentChatMessage(r.Context(), symbol, "user", body.Question); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -367,13 +398,79 @@ func (s *Server) handleAgentChatStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return nil
 	}
-	if err := s.Analysis.ChatStockStream(r.Context(), body.Symbol, body.Question, body.Context, func(delta string) error {
+	var assistantReply strings.Builder
+	if err := s.Analysis.ChatStockStream(r.Context(), symbol, body.Question, ctxText, history, func(delta string) error {
+		assistantReply.WriteString(delta)
 		return emit("delta", map[string]string{"text": delta})
 	}); err != nil {
 		_ = emit("error", map[string]string{"error": err.Error()})
 		return
 	}
+	if err := s.St.AppendAgentChatMessage(context.Background(), symbol, "assistant", assistantReply.String()); err != nil {
+		slog.Error("保存 Agent 回复失败", "symbol", symbol, "err", err)
+	}
 	_ = emit("done", map[string]bool{"done": true})
+}
+
+func (s *Server) agentContext(ctx context.Context, symbol string, includeStock bool, historyDays int) (string, error) {
+	detail, err := s.St.DetailForSymbol(ctx, symbol)
+	if err != nil {
+		return "", err
+	}
+	payload := make(map[string]interface{}, 2)
+	if includeStock {
+		payload["stock"] = map[string]interface{}{
+			"symbol": detail.Symbol, "code": detail.Code, "name": detail.Name,
+			"industry": detail.Industry, "concepts": detail.Concepts,
+			"list_date": detail.ListDate, "latest_snapshot": detail.Quote,
+		}
+	}
+	if historyDays > 0 {
+		klines := detail.Klines60
+		if len(klines) > historyDays {
+			klines = klines[len(klines)-historyDays:]
+		}
+		payload["daily_klines_qfq"] = klines
+	}
+	if len(payload) == 0 {
+		return "用户未选择携带本地数据上下文。", nil
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (s *Server) handleAgentChatHistory(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	messages, err := s.St.AgentChatMessages(ctx, symbol)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, messages)
+}
+
+func (s *Server) handleAgentChatClear(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	if err := s.St.ClearAgentChatMessages(ctx, symbol); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"cleared": symbol})
 }
 
 func (s *Server) handleRecommendations(w http.ResponseWriter, r *http.Request) {

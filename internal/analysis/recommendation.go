@@ -85,19 +85,23 @@ func (s *Service) ChatStock(ctx context.Context, symbol, question, ctxText strin
 	return strings.TrimSpace(envelope.Choices[0].Message.Content), nil
 }
 
-func (s *Service) ChatStockStream(ctx context.Context, symbol, question, ctxText string, emit func(string) error) error {
+func (s *Service) ChatStockStream(ctx context.Context, symbol, question, ctxText string, history []store.AgentChatMessage, emit func(string) error) error {
 	if !s.Enabled() {
 		return fmt.Errorf("AI 推荐未配置")
 	}
+	messages := []map[string]string{{"role": "system", "content": "你是 go-stock 的 AI 行情助理，仅基于用户提供的本地数据库字段回答。回答用简洁中文，不要编造数据。"}}
+	for _, message := range history {
+		if (message.Role == "user" || message.Role == "assistant") && strings.TrimSpace(message.Content) != "" {
+			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+		}
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": "本轮携带的本地数据库上下文如下：\n" + ctxText + "\n\n用户问题：\n" + question})
 	reqBody := map[string]interface{}{
 		"model":       s.config.Model,
 		"temperature": 0.2,
 		"max_tokens":  600,
 		"stream":      true,
-		"messages": []map[string]string{
-			{"role": "system", "content": "你是 go-stock 的 AI 行情助理，仅基于用户提供的本地数据库字段回答。回答用简洁中文，不要编造数据。"},
-			{"role": "user", "content": "已携带本地数据库内容如下：\n" + ctxText + "\n\n用户问题：\n" + question},
-		},
+		"messages":    messages,
 	}
 	body, _ := json.Marshal(reqBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.config.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
