@@ -42,7 +42,7 @@ func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.S
 		`SELECT cp.symbol, IFNULL(DATE_FORMAT(cp.last_synced_date,'%Y-%m-%d'),''), cp.retry_count
 		 FROM sync_checkpoint cp
 		 INNER JOIN stock_basic b ON b.symbol=cp.symbol
-		 WHERE cp.task=? AND cp.status='pending'
+		 WHERE cp.task=? AND cp.status='pending' AND b.sec_type='stock'
 		   AND (b.status='listed' OR (b.status<>'listed' AND b.last_trade_date IS NOT NULL))
 		 ORDER BY cp.symbol LIMIT ?`, task, n)
 	if err != nil {

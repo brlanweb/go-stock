@@ -89,7 +89,10 @@ func (e *Engine) SyncSecurities(ctx context.Context) (int, error) {
 	}
 	symbols := make([]string, 0, len(snaps))
 	for _, sn := range snaps {
-		symbols = append(symbols, sn.Symbol)
+		// ETF 仍保留在基础信息、快照和查询接口中，但不建立自动历史回填断点。
+		if sn.SecType == model.SecStock {
+			symbols = append(symbols, sn.Symbol)
+		}
 	}
 	if len(symbols) >= 7000 {
 		if count, err := e.st.MarkMissingListedSecuritiesDelisted(ctx, symbols); err != nil {
