@@ -29,7 +29,45 @@ type Deps struct {
 func NewHandler(d Deps, token string) http.Handler {
 	s := server.NewMCPServer("go-stock", "1.0.0",
 		server.WithToolCapabilities(false),
-		server.WithInstructions("A股本地数据分析服务：报价、指数和自选股均读取最近一次定时入库快照；K线、行业云图、搜索、每日指标和同步状态均查询 MySQL。响应中的 fetched_at 表示快照采集时间。symbol 支持 600519 / SH600519 / 000001.SZ。sync_stock_history 是唯一显式写操作，仅在用户要求同步单只证券时调用。"),
+		server.WithInstructions(strings.TrimSpace(`
+A股本地数据分析服务，所有工具的 arguments 必须是 JSON 对象，工具命名遵循 mark3labs/mcp-go v0.x 约定。
+
+参数类型约定：
+- symbol / keyword / period / adjust / start / end / market / group_by / metric / mode：字符串。
+- limit：数字（number），默认 250。
+- symbols：逗号分隔的字符串，如 "600519,000001,510300"。
+
+工具调用模板（直接复制即可）：
+1. 最近 30 日 K 线：
+   {"name":"get_kline","arguments":{"symbol":"601991","period":"day","adjust":"qfq","limit":30}}
+2. 单只行情快照：
+   {"name":"get_realtime_quote","arguments":{"symbol":"601991"}}
+3. 批量快照：
+   {"name":"get_batch_quotes","arguments":{"symbols":"600519,000001,510300"}}
+4. 搜索：
+   {"name":"search_stock","arguments":{"keyword":"茅台"}}
+5. 大盘指数：
+   {"name":"get_market_indices","arguments":{}}
+6. 每日指标：
+   {"name":"get_daily_indicator","arguments":{"symbol":"601991","limit":30}}
+7. 行业云图：
+   {"name":"get_market_heatmap","arguments":{"market":"all","group_by":"industry","metric":"change_pct","period":"1d","limit":31}}
+8. 同步状态：
+   {"name":"get_sync_status","arguments":{}}
+9. 显式同步单只股票：
+   {"name":"sync_stock_history","arguments":{"symbol":"601991","mode":"latest"}}
+10. 自选股：
+    {"name":"get_watchlist","arguments":{}}
+
+数据语义：
+- 报价、指数和自选股均读取最近一次定时入库快照，fetched_at 表示快照采集时间，不是逐秒盘中实时。
+- K 线、行业云图、搜索、每日指标和同步状态均查询本地 MySQL。
+- symbol 支持 600519 / SH600519 / 000001.SZ 等多种写法。
+- sync_stock_history 是唯一显式写操作，仅在用户要求同步单只证券时调用。
+
+返回与错误处理：
+- 工具成功调用返回 result.content；输入参数错误或上游失败会以 result.isError 形式返回，请原样告知用户，不要描述为“接口加载异常”。
+- 当 arguments 不合法时，请重新按上述模板拼装并重试，不要把字符串 "limit=30" 整段塞到 period 等其他字段。`)),
 	)
 	registerTools(s, d)
 
@@ -64,8 +102,8 @@ func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 func registerTools(s *server.MCPServer, d Deps) {
 	// 1. get_realtime_quote
 	s.AddTool(mcp.NewTool("get_realtime_quote",
-		mcp.WithDescription("获取单只A股/ETF最近一次本地定时行情快照（含采集时间；不访问外部行情源）"),
-		mcp.WithString("symbol", mcp.Required(), mcp.Description("股票代码，如 600519 / SH600519 / 000001.SZ")),
+		mcp.WithDescription("获取单只A股/ETF最近一次本地定时行情快照（含采集时间 fetched_at；不访问外部行情源）。arguments 必须是 JSON 对象，symbol 必填。调用模板：{\"name\":\"get_realtime_quote\",\"arguments\":{\"symbol\":\"601991\"}}"),
+		mcp.WithString("symbol", mcp.Required(), mcp.Description("股票代码，必填，支持 600519 / SH600519 / 000001.SZ")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		symbol := model.NormalizeSymbol(req.GetString("symbol", ""))
 		if symbol == "" {
@@ -102,21 +140,33 @@ func registerTools(s *server.MCPServer, d Deps) {
 
 	// 3. get_kline
 	s.AddTool(mcp.NewTool("get_kline",
-		mcp.WithDescription("获取历史K线（库内数据：日/周/月线，支持前复权qfq与不复权none）"),
-		mcp.WithString("symbol", mcp.Required(), mcp.Description("股票代码")),
-		mcp.WithString("period", mcp.Description("day/week/month，默认day")),
-		mcp.WithString("adjust", mcp.Description("qfq前复权/none不复权，默认qfq")),
-		mcp.WithNumber("limit", mcp.Description("返回根数，默认250，最大5000")),
-		mcp.WithString("start", mcp.Description("开始日期 YYYY-MM-DD，可选")),
-		mcp.WithString("end", mcp.Description("结束日期 YYYY-MM-DD，可选")),
+		mcp.WithDescription("获取历史K线（库内数据：日/周/月线，支持前复权 qfq 与不复权 none）。arguments 必须是 JSON 对象，symbol 必填，period 默认 day，adjust 默认 qfq，limit 是 number 默认 250（最大 5000）。调用模板：{\"name\":\"get_kline\",\"arguments\":{\"symbol\":\"601991\",\"period\":\"day\",\"adjust\":\"qfq\",\"limit\":30}}"),
+		mcp.WithString("symbol", mcp.Required(), mcp.Description("股票代码，必填，支持 600519 / SH600519 / 000001.SZ")),
+		mcp.WithString("period", mcp.Description("day/week/month，字符串，默认 day")),
+		mcp.WithString("adjust", mcp.Description("qfq 前复权 / none 不复权，字符串，默认 qfq")),
+		mcp.WithNumber("limit", mcp.Description("返回根数，number 类型，默认 250，最大 5000")),
+		mcp.WithString("start", mcp.Description("开始日期 YYYY-MM-DD，字符串，可选")),
+		mcp.WithString("end", mcp.Description("结束日期 YYYY-MM-DD，字符串，可选")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		symbol := model.NormalizeSymbol(req.GetString("symbol", ""))
 		if symbol == "" {
 			return mcp.NewToolResultError("无法识别的代码"), nil
 		}
 		period := req.GetString("period", "day")
+		if period != "day" && period != "week" && period != "month" {
+			return mcp.NewToolResultError("period 仅支持 day/week/month"), nil
+		}
 		adjust := req.GetString("adjust", "qfq")
+		if adjust != "qfq" && adjust != "none" {
+			return mcp.NewToolResultError("adjust 仅支持 qfq/none"), nil
+		}
 		limit := int(req.GetFloat("limit", 250))
+		if limit <= 0 {
+			limit = 250
+		}
+		if limit > 5000 {
+			limit = 5000
+		}
 		klines, err := d.St.QueryKlines(ctx, symbol, period, adjust, req.GetString("start", ""), req.GetString("end", ""), limit)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
