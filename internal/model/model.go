@@ -175,13 +175,22 @@ type HeatmapItem struct {
 	PeriodChange  float64  `json:"period_change"`
 	PERatio       float64  `json:"pe_ratio"`
 	TotalMV       float64  `json:"total_mv"`
+	CircMV        float64  `json:"circ_mv"`
 	MainNetInflow *float64 `json:"main_net_inflow,omitempty"`
 }
 
 // HeatmapGroup 按行业或概念分组的云图数据。
 type HeatmapGroup struct {
 	Name          string        `json:"name"`
+	SectorCode    string        `json:"sector_code"`
+	SectorType    string        `json:"sector_type"`
 	ChangePct     float64       `json:"change_pct"`
+	Heat          float64       `json:"heat"`        // 归一化热度 0~100
+	AreaWeight    float64       `json:"area_weight"` // 板块市值面积权重
+	StockCount    int           `json:"stock_count"` // 板块实际成分数量
+	TotalMV       float64       `json:"total_mv"`    // 板块总市值
+	CircMV        float64       `json:"circ_mv"`     // 板块流通市值
+	Amount        float64       `json:"amount"`      // 板块成交额
 	MainNetInflow *float64      `json:"main_net_inflow,omitempty"`
 	Items         []HeatmapItem `json:"items"`
 }

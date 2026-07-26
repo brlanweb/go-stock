@@ -54,8 +54,12 @@ func main() {
 	engine.StartDailyScheduler(rootCtx)
 	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt})
 	analysisService.StartScheduler(rootCtx)
-	if err := engine.StartBackfill(rootCtx); err != nil {
-		slog.Warn("启动历史缺失检查失败", "err", err)
+	if os.Getenv("GOSTOCK_AUTO_BACKFILL") != "false" {
+		if err := engine.StartBackfill(rootCtx); err != nil {
+			slog.Warn("启动历史缺失检查失败", "err", err)
+		}
+	} else {
+		slog.Info("启动自动历史回填已禁用")
 	}
 
 	// 路由

@@ -98,12 +98,21 @@ export interface HeatmapItem {
   period_change: number
   pe_ratio: number
   total_mv: number
+  circ_mv: number
   main_net_inflow?: number
 }
 
 export interface HeatmapGroup {
   name: string
+  sector_code: string
+  sector_type: 'industry' | 'concept'
   change_pct: number
+  heat: number
+  area_weight: number
+  stock_count: number
+  total_mv: number
+  circ_mv: number
+  amount: number
   main_net_inflow?: number
   items: HeatmapItem[]
 }
@@ -158,6 +167,48 @@ export interface StockDetailPayload {
   klines_60: Kline[]
 }
 
+export interface IndicatorDefinition {
+  id: string
+  display_name: string
+  description: string
+  category: string
+  kind: 'indicator' | 'strategy'
+  capability: 'executable' | 'experimental' | 'context_required'
+  source: string
+  enabled: boolean
+  default_params: Record<string, any>
+  current_params: Record<string, any>
+  sort_order: number
+}
+
+export interface BacktestSignal {
+  date: string
+  action: 'buy' | 'sell'
+  price: number
+  reason: string
+}
+
+export interface BacktestResult {
+  run_id: number
+  symbol: string
+  indicator_id: string
+  period: string
+  start: string
+  end: string
+  initial_cash: number
+  final_equity: number
+  total_return: number
+  annual_return: number
+  max_drawdown: number
+  sharpe_ratio: number
+  win_rate: number
+  profit_loss_ratio: number
+  profit_factor: number
+  trade_count: number
+  signals: BacktestSignal[]
+  params: Record<string, any>
+}
+
 export interface HeatmapResponse {
   market: string
   group_by: string
@@ -199,6 +250,16 @@ export const api = {
   sectors: (groupBy: 'industry' | 'concept' = 'industry') => req<{ sector_type: string; sectors: SectorListItem[] }>(`/sectors?group_by=${groupBy}`),
   sectorConstituents: (code: string, limit = 100) => req<{ sector_code: string; constituents: SectorConstituentItem[] }>(`/sectors/${encodeURIComponent(code)}/constituents?limit=${limit}`),
   stockDetail: (code: string) => req<StockDetailPayload>(`/stock/${encodeURIComponent(code)}/detail`),
+  indicators: () => req<IndicatorDefinition[]>('/indicators'),
+  indicator: (id: string) => req<IndicatorDefinition>(`/indicators/${encodeURIComponent(id)}`),
+  updateIndicator: (id: string, enabled: boolean, params: Record<string, any>) => req<IndicatorDefinition>(`/indicators/${encodeURIComponent(id)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, params })
+  }),
+  resetIndicator: (id: string) => req<IndicatorDefinition>(`/indicators/${encodeURIComponent(id)}/reset`, { method: 'POST' }),
+  backtest: (payload: { symbol: string; indicator_id: string; period: string; initial_cash: number; params?: Record<string, any> }) => req<BacktestResult>('/backtest', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }),
+  backtestHistory: (code: string, limit = 20) => req<BacktestResult[]>(`/backtest/history/${encodeURIComponent(code)}?limit=${limit}`),
   agentHistory: (code: string) => req<AgentChatMessage[]>(`/agent/chat/history/${encodeURIComponent(code)}`),
   clearAgentHistory: (code: string) => req<{ cleared: string }>(`/agent/chat/history/${encodeURIComponent(code)}`, { method: 'DELETE' }),
   authStatus: () => req<{ required: boolean; authenticated: boolean }>('/auth/status'),

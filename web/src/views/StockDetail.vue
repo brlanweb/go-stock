@@ -1,14 +1,36 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { init, dispose, registerIndicator, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
-import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload } from '../api'
+import { init, dispose, registerIndicator, registerOverlay, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
+import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload, type IndicatorDefinition, type BacktestResult } from '../api'
 import AgentPanel from '../components/AgentPanel.vue'
 
 // Vegas 隧道：EMA144 / EMA169（过滤隧道）+ EMA576 / EMA676（趋势隧道）。
 const VEGAS_PERIODS = [144, 169, 576, 676]
 const VEGAS_COLORS = ['#e6a23c', '#f2c96b', '#409eff', '#7cc0ff']
 let vegasRegistered = false
+let tradeOverlayRegistered = false
+
+function registerTradeOverlay() {
+  if (tradeOverlayRegistered) return
+  registerOverlay({
+    name: 'tradeSignal',
+    totalStep: 2,
+    lock: true,
+    needDefaultPointFigure: false,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const point = coordinates[0]
+      if (!point) return []
+      const data = overlay.extendData as { action: string; reason: string }
+      const buy = data.action === 'buy'
+      return [
+        { type: 'circle', attrs: { x: point.x, y: point.y, r: 9 }, styles: { color: buy ? '#bd2e35' : '#0f1720', borderColor: '#ffffff', borderSize: 1 } },
+        { type: 'text', attrs: { x: point.x, y: point.y, text: buy ? 'B' : 'S', align: 'center', baseline: 'middle' }, styles: { color: '#ffffff', size: 10, weight: 'bold' } }
+      ]
+    }
+  })
+  tradeOverlayRegistered = true
+}
 
 function registerVegas() {
   if (vegasRegistered) return
@@ -49,6 +71,15 @@ const syncing = ref(false)
 const watched = ref(false)
 const agentOpen = ref(false)
 const conceptsHover = ref(false)
+const indicators = ref<IndicatorDefinition[]>([])
+const selectedStrategy = ref('ma_golden_cross')
+const backtesting = ref(false)
+const backtestResult = ref<BacktestResult | null>(null)
+const backtestError = ref('')
+const hasBacktestSignals = computed(() => (backtestResult.value?.signals?.length || 0) > 0)
+let currentKlines: Awaited<ReturnType<typeof api.kline>> = []
+const executableStrategies = computed(() => indicators.value.filter(item => item.kind === 'strategy' && item.capability === 'executable' && item.enabled))
+const selectedDefinition = computed(() => indicators.value.find(item => item.id === selectedStrategy.value))
 const VISIBLE_CONCEPT_COUNT = 5
 const visibleConcepts = computed(() => detail.value?.concepts.slice(0, VISIBLE_CONCEPT_COUNT) || [])
 const hiddenConcepts = computed(() => detail.value?.concepts.slice(VISIBLE_CONCEPT_COUNT) || [])
@@ -94,12 +125,51 @@ function openSector(code: string) {
 
 async function drawKline(period: 'day' | 'week' | 'month') {
   const klines = await api.kline(props.symbol, period, 'qfq', 700)
+  currentKlines = klines
   if (!klChart) return
   klChart.applyNewData(klines.map(k => ({
     timestamp: new Date(k.date).getTime(),
     open: k.open, high: k.high, low: k.low, close: k.close,
     volume: k.volume, turnover: k.amount
   })))
+  if (backtestResult.value) drawBacktestSignals(backtestResult.value)
+}
+
+async function loadIndicators() {
+  try {
+    indicators.value = await api.indicators()
+    if (!executableStrategies.value.some(item => item.id === selectedStrategy.value) && executableStrategies.value[0]) selectedStrategy.value = executableStrategies.value[0].id
+  } catch (e: any) { backtestError.value = e.message || '指标目录加载失败' }
+}
+
+function drawBacktestSignals(result: BacktestResult) {
+  if (!klChart) return
+  klChart.removeOverlay({ groupId: 'backtest-signals' })
+  ;(result.signals || []).forEach(signal => {
+    klChart?.createOverlay({
+      name: 'tradeSignal', groupId: 'backtest-signals', lock: true,
+      points: [{ timestamp: new Date(signal.date).getTime(), value: signal.price }],
+      extendData: signal
+    }, 'candle_pane')
+  })
+}
+
+function clearBacktestResult() {
+  backtestResult.value = null
+  klChart?.removeOverlay({ groupId: 'backtest-signals' })
+}
+
+async function runBacktest() {
+  if (tab.value !== 'day') tab.value = 'day'
+  backtesting.value = true
+  backtestError.value = ''
+  try {
+    const definition = selectedDefinition.value
+    backtestResult.value = await api.backtest({ symbol: props.symbol, indicator_id: selectedStrategy.value, period: 'day', initial_cash: 100000, params: definition?.current_params })
+    await drawKline('day')
+  } catch (e: any) {
+    backtestError.value = e.message || '回测失败'
+  } finally { backtesting.value = false }
 }
 
 async function switchTab(t: 'day' | 'week' | 'month') {
@@ -111,6 +181,7 @@ async function nextTickDraw() {
   await new Promise(r => setTimeout(r))
   if (!klChart) {
     registerVegas()
+    registerTradeOverlay()
     klChart = init('kl-chart', { styles: chartStyles })
     klChart?.createIndicator('VOL')
     klChart?.createIndicator('VEGAS', true, { id: 'candle_pane' })
@@ -129,6 +200,12 @@ async function syncHistory(mode: 'latest' | 'missing' | 'full') {
   } finally {
     syncing.value = false
   }
+}
+
+async function rebuildFullHistory() {
+  const confirmed = window.confirm('将重新请求该证券上市以来的全部日 K，耗时较长且可能触发数据源限流。确认继续吗？')
+  if (!confirmed) return
+  await syncHistory('full')
 }
 
 const chartStyles = {
@@ -154,6 +231,9 @@ const chartStyles = {
 } as any
 
 watch(() => props.symbol, () => {
+  backtestResult.value = null
+  backtestError.value = ''
+  klChart?.removeOverlay({ groupId: 'backtest-signals' })
   refreshQuote()
   loadDetail()
   loadWatchState()
@@ -164,6 +244,7 @@ onMounted(async () => {
   refreshQuote()
   loadDetail()
   loadWatchState()
+  await loadIndicators()
   await nextTickDraw()
 })
 
@@ -248,13 +329,42 @@ onUnmounted(() => {
           <button :class="{ ghost: tab !== 'month' }" @click="switchTab('month')">月K</button>
         </div>
         <div class="sync-actions">
-          <button class="ghost" :disabled="syncing" title="同步最新或缺失交易日" @click="syncHistory('missing')">同步缺失</button>
-          <button :disabled="syncing" title="从上市以来重新拉取日K" @click="syncHistory('full')">历史全量</button>
+          <label class="strategy-select"><span>回测策略</span><select v-model="selectedStrategy"><option v-for="item in executableStrategies" :key="item.id" :value="item.id">{{ item.display_name }}</option></select></label>
+          <button :disabled="backtesting || !selectedStrategy" title="按 A 股 T+1、交易费用和下一日执行规则回测" @click="runBacktest">{{ backtesting ? '回测中' : '回测' }}</button>
+          <button class="ghost" title="管理指标参数" @click="router.push('/indicators')">指标</button>
+          <div class="data-sync-group">
+            <button class="update-data" :disabled="syncing" title="仅补充数据库最后交易日之后的数据" @click="syncHistory('missing')">{{ syncing ? '更新中' : '更新数据' }}</button>
+            <details class="advanced-sync">
+              <summary title="更多数据维护操作">⋯</summary>
+              <div class="advanced-sync-menu">
+                <strong>高级数据维护</strong>
+                <span>仅在历史起点、复权或成交额明显异常时使用。</span>
+                <button :disabled="syncing" @click="rebuildFullHistory">重建全部历史</button>
+              </div>
+            </details>
+          </div>
           <button class="ghost" title="AI 行情助理" @click="agentOpen = true">Agent</button>
         </div>
       </div>
       <div v-if="syncMsg" class="sync-msg">{{ syncMsg }}</div>
-      <div id="kl-chart" class="kline-chart"></div>
+      <div v-if="backtestError" class="backtest-error">{{ backtestError }}</div>
+      <div class="chart-stage">
+        <div id="kl-chart" class="kline-chart"></div>
+        <section v-if="backtestResult" class="backtest-summary" title="回测采用下一交易日开盘执行、T+1、100股整手、佣金/印花税/过户费与滑点">
+          <header><strong>{{ selectedDefinition?.display_name }}</strong><button title="关闭回测结果" @click="clearBacktestResult">×</button></header>
+          <div><span>总收益</span><b :class="backtestResult.total_return >= 0 ? 'positive' : 'negative'">{{ (backtestResult.total_return * 100).toFixed(2) }}%</b></div>
+          <div><span>年化</span><b>{{ (backtestResult.annual_return * 100).toFixed(2) }}%</b></div>
+          <div><span>最大回撤</span><b>{{ (backtestResult.max_drawdown * 100).toFixed(2) }}%</b></div>
+          <div><span>胜率</span><b>{{ (backtestResult.win_rate * 100).toFixed(1) }}%</b></div>
+          <div><span>交易次数</span><b>{{ backtestResult.trade_count }}</b></div>
+          <div><span>盈亏比</span><b>{{ backtestResult.profit_loss_ratio.toFixed(2) }}</b></div>
+          <div><span>Sharpe</span><b>{{ backtestResult.sharpe_ratio.toFixed(2) }}</b></div>
+          <small>{{ hasBacktestSignals ? 'B/S 标记可悬停查看日期、执行价与原因' : '当前区间没有触发该策略的买卖信号' }}</small>
+        </section>
+        <div v-if="hasBacktestSignals" class="signal-list">
+          <span v-for="signal in (backtestResult?.signals || []).slice(-8)" :key="signal.date + signal.action" :class="signal.action">{{ signal.date }} {{ signal.action === 'buy' ? '买入' : '卖出' }} {{ signal.price.toFixed(2) }}<i>{{ signal.reason }}</i></span>
+        </div>
+      </div>
     </div>
 
     <AgentPanel :detail="detail" v-if="agentOpen" @close="agentOpen = false" />
@@ -271,7 +381,11 @@ onUnmounted(() => {
 .stock-detail .up { color:#bd2e35; }.stock-detail .down { color:#0f765d; }
 .kline-chart { width:100%; height:calc(100vh - 320px); min-height:460px; background:#eef1f4; }
 .chart-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px; }
-.sync-actions { display:flex; gap:8px; }.sync-msg { margin:0 0 6px; color:#687280; font-size:12px; }
+.sync-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.sync-msg { margin:0 0 6px; color:#687280; font-size:12px; }
+.strategy-select { display:flex; height:30px; align-items:center; gap:5px; color:#687280; font-size:11px; }.strategy-select select { height:30px; max-width:150px; border:1px solid #bfc6cf; background:#fff; color:#121820; padding:0 6px; }
+.data-sync-group { position:relative; display:flex; align-items:stretch; }.update-data { border-radius:3px 0 0 3px; }.advanced-sync { position:relative; }.advanced-sync summary { display:flex; width:28px; height:100%; min-height:30px; align-items:center; justify-content:center; border-left:1px solid rgba(255,255,255,.35); border-radius:0 3px 3px 0; background:#58a6ff; color:#fff; cursor:pointer; list-style:none; }.advanced-sync summary::-webkit-details-marker { display:none; }.advanced-sync-menu { position:absolute; z-index:8; top:calc(100% + 4px); right:0; display:grid; width:250px; gap:7px; padding:10px; border:1px solid #bfc6cf; background:#fff; box-shadow:0 10px 25px rgba(20,31,44,.18); color:#25303d; }.advanced-sync-menu strong { font-size:12px; }.advanced-sync-menu span { color:#687280; font-size:10px; line-height:1.45; }.advanced-sync-menu button { justify-self:start; border:1px solid #9b5555; background:#fff; color:#8e2e35; }
+.chart-stage { position:relative; min-width:0; }.backtest-error { margin:0 0 6px; color:#a72832; font-size:12px; }.backtest-summary { position:absolute; z-index:4; top:10px; right:62px; display:grid; width:210px; grid-template-columns:1fr 1fr; gap:5px 10px; padding:10px; border:1px solid #aeb7c2; background:rgba(255,255,255,.94); color:#25303d; box-shadow:0 8px 22px rgba(20,31,44,.14); font-size:11px; }.backtest-summary header { display:flex; grid-column:1/-1; align-items:center; justify-content:space-between; padding-bottom:4px; border-bottom:1px solid #d8dde3; }.backtest-summary header button { width:20px; height:20px; padding:0; background:#e5e9ee; color:#25303d; }.backtest-summary div { display:flex; justify-content:space-between; gap:4px; }.backtest-summary span,.backtest-summary small { color:#687280; }.backtest-summary small { grid-column:1/-1; padding-top:3px; }.backtest-summary .positive { color:#bd2e35; }.backtest-summary .negative { color:#0f765d; }.signal-list { position:absolute; z-index:4; right:62px; bottom:24px; display:none; width:330px; max-height:180px; overflow:auto; border:1px solid #aeb7c2; background:#fff; box-shadow:0 8px 22px rgba(20,31,44,.16); }.chart-stage:hover .signal-list { display:grid; }.signal-list span { display:grid; grid-template-columns:1fr auto; gap:5px; padding:5px 7px; border-bottom:1px solid #e2e6eb; font-size:10px; }.signal-list span.buy { color:#bd2e35; }.signal-list span.sell { color:#0f1720; }.signal-list i { grid-column:1/-1; color:#687280; font-style:normal; }
+@media (max-width:900px) { .backtest-summary { right:12px; }.signal-list { right:12px; } }
 @media (max-width:900px) { .stock-detail { min-height:auto; grid-template-rows:auto auto auto; }.stock-detail .panel { min-width:0; overflow:hidden; }.kline-chart { width:100%; height:62vh; min-height:480px; } }
 @media (max-width:600px) { .chart-toolbar { align-items:flex-start; flex-direction:column; }.kline-chart { height:65vh; min-height:420px; } }
 .quote-header { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding-bottom:6px; border-bottom:1px dashed #cdd3db; margin-bottom:4px; }

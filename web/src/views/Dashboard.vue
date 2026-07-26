@@ -8,6 +8,7 @@ import MarketSidebar from '../components/MarketSidebar.vue'
 interface TreeDatum {
   name: string
   item?: HeatmapItem
+  group?: HeatmapGroup
   children?: TreeDatum[]
   weight?: number
 }
@@ -28,32 +29,17 @@ let resizeObserver: ResizeObserver | undefined
 
 const heatLegend = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
 
-const itemCount = computed(() => groups.value.reduce((sum, group) => sum + group.items.length, 0))
-// 两级布局分别计算板块矩形和板块内个股矩形，保证任何个股都不会跨出所属板块。
-const MAX_STOCK_RATIO = 0.08
-const MAX_SECTOR_RATIO = 4
-const SECTOR_STRENGTH_BOOST = 0.35
-const STOCK_AREA_FLOOR = 1.0
-
-function logRange(value: number, minLog: number, maxLog: number): number {
-  if (maxLog <= minLog) return 0
-  return (Math.log(Math.max(value, 1) + 1) - minLog) / (maxLog - minLog)
+const itemCount = computed(() => groups.value.reduce((sum, group) => sum + (Number(group.stock_count) || group.items.length), 0))
+const groupByNameForView = computed(() => new Map(groups.value.map(group => [group.name, group])))
+// 板块内部严格按流通市值分配面积，和常见市场云图口径一致。
+function stockWeight(circMV: number, totalMV: number) {
+  return Math.max(circMV || totalMV, 1)
 }
 
-// 单股权重：在基础值上叠加对数归一的市值比，避免大市值吞掉同板块小盘股
-function stockWeight(totalMV: number, max: number) {
-  if (!max || totalMV <= 0) return STOCK_AREA_FLOOR
-  const logMV = Math.log(totalMV + 1)
-  const logMax = Math.log(max + 1)
-  const ratio = Math.min(1, logMV / logMax)
-  return STOCK_AREA_FLOOR + ratio * MAX_STOCK_RATIO
-}
-
-// 板块权重：总市值基础 + 强度加成。强度放大强势行业，但通过板块空隙校正避免小板块被压缩成空白。
-function sectorWeight(sectorMV: number, maxSectorMV: number, sectorChangePct: number) {
-  const base = logRange(sectorMV, 1, Math.max(maxSectorMV, 1))
-  const strength = Math.min(1, Math.abs(sectorChangePct) / 3)
-  return 1 + (base + strength * SECTOR_STRENGTH_BOOST) * MAX_SECTOR_RATIO
+// 板块权重由后端统一计算，行业与概念使用同一热度口径。
+function sectorWeight(group: HeatmapGroup) {
+  const weight = Number(group.area_weight)
+  return Number.isFinite(weight) && weight > 0 ? weight : 100
 }
 
 const layout = computed(() => {
@@ -61,71 +47,37 @@ const layout = computed(() => {
     return { sectors: [] as HierarchyRectangularNode<TreeDatum>[], stocks: [] as HierarchyRectangularNode<TreeDatum>[] }
   }
 
-  const stockMVs = groups.value.flatMap(group => group.items.map(item => Number(item.total_mv) || 0)).filter(value => value > 0)
-  const stockMax = stockMVs.length ? Math.max(...stockMVs) : 0
-  const maxSectorMV = Math.max(...groups.value.map(group => group.items.reduce((sum, item) => sum + (Number(item.total_mv) || 0), 0)), 1)
-  const sectorRoot = hierarchy<TreeDatum>({
+  const root = hierarchy<TreeDatum>({
     name: 'A股',
-    children: groups.value.map(group => {
-      const totalMV = group.items.reduce((sum, item) => sum + (Number(item.total_mv) || 0), 0)
-      return {
-        name: group.name,
-        weight: sectorWeight(totalMV, maxSectorMV, Number(group.change_pct) || 0)
-      }
-    })
+    children: groups.value.map(group => ({
+      name: group.name,
+      group,
+      children: group.items.map(item => ({
+        name: item.name,
+        item,
+        weight: sectorWeight(group) * stockWeight(Number(item.circ_mv) || 0, Number(item.total_mv) || 0) /
+          Math.max(group.items.reduce((sum, current) => sum + stockWeight(Number(current.circ_mv) || 0, Number(current.total_mv) || 0), 0), 1)
+      }))
+    }))
   })
     .sum(node => node.weight || 0)
     .sort((a, b) => (b.value || 0) - (a.value || 0))
 
-  const sectorLayout = treemap<TreeDatum>()
+  // 叶子权重先按板块面积归一，再按板块内部流通市值占比分配。
+  // D3 单棵嵌套树同时决定板块和个股坐标，避免两次布局产生偏移。
+
+  const result = treemap<TreeDatum>()
     .size([mapWidth.value, mapHeight.value])
-    .tile(treemapSquarify.ratio(1.2))
+    .tile(treemapSquarify.ratio(1.15))
     .paddingOuter(2)
     .paddingInner(2)
-    .round(true)(sectorRoot)
-  const sectors = sectorLayout.children || []
-  const groupByName = new Map(groups.value.map(group => [group.name, group]))
-  const stocks: HierarchyRectangularNode<TreeDatum>[] = []
+    .paddingTop(node => node.depth === 1 ? 20 : 0)
+    .round(true)(root)
 
-  for (const sector of sectors) {
-    const group = groupByName.get(sector.data.name)
-    if (!group?.items.length) continue
-    const innerWidth = Math.max(0, sector.x1 - sector.x0 - 2)
-    const innerHeight = Math.max(0, sector.y1 - sector.y0 - 21)
-    if (innerWidth < 1 || innerHeight < 1) continue
-
-    const stockRoot = hierarchy<TreeDatum>({
-      name: group.name,
-      children: group.items.map(item => ({
-        name: item.name,
-        item,
-        weight: stockWeight(Number(item.total_mv) || 0, stockMax)
-      }))
-    })
-      .sum(node => {
-        if (!node.item) return 0
-        const marketCap = Math.max(Number(node.item.total_mv) || 0, 1)
-        return Math.sqrt(marketCap) * (node.weight || 1)
-      })
-      .sort((a, b) => (b.value || 0) - (a.value || 0))
-
-    const innerLayout = treemap<TreeDatum>()
-      .size([innerWidth, innerHeight])
-      .tile(treemapSquarify.ratio(1.2))
-      .paddingInner(1)
-      .round(true)(stockRoot)
-    const offsetX = sector.x0 + 1
-    const offsetY = sector.y0 + 20
-    for (const leaf of innerLayout.leaves()) {
-      leaf.x0 += offsetX
-      leaf.x1 += offsetX
-      leaf.y0 += offsetY
-      leaf.y1 += offsetY
-      stocks.push(leaf)
-    }
+  return {
+    sectors: result.children || [],
+    stocks: result.leaves().filter(node => !!node.data.item)
   }
-
-  return { sectors, stocks }
 })
 
 function pollInterval() {
@@ -134,7 +86,8 @@ function pollInterval() {
 
 async function refresh() {
   try {
-    const heatmap = await api.heatmap(market.value, groupBy.value, metric.value, period.value, 100)
+    const limit = groupBy.value === 'industry' ? 31 : 32
+    const heatmap = await api.heatmap(market.value, groupBy.value, metric.value, period.value, limit)
     groups.value = heatmap.groups
     notice.value = heatmap.notice
     error.value = ''
@@ -205,6 +158,13 @@ function openStock(symbol: string) {
   router.push(`/stock/${symbol}`)
 }
 
+function openSector(name: string) {
+  const group = groupByNameForView.value.get(name)
+  if (!group) return
+  const code = group.sector_code || (group.sector_type === 'industry' ? `industry:${group.name}` : '')
+  if (code) router.push(`/sector/${encodeURIComponent(code)}`)
+}
+
 onMounted(async () => {
   await nextTick()
   if (mapHost.value) {
@@ -232,12 +192,12 @@ onUnmounted(() => {
     <section class="heatmap-canvas">
       <header class="canvas-header">
         <div class="canvas-title"><span class="live-dot"></span><strong>大盘云图</strong></div>
-        <div class="legend"><span>注：面积代表流通市值大小，红绿色深浅代表涨跌幅大小</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
+        <div class="legend"><span>板块面积以成分市值为主，概念兼顾活跃度；个股面积代表市值，颜色代表涨跌幅</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
       </header>
       <section v-if="notice || error" class="market-notice" :class="{ error }">{{ error || notice }}</section>
       <section ref="mapHost" class="treemap-stage" :class="{ empty: !layout.stocks.length }">
         <template v-if="layout.stocks.length">
-          <div v-for="sector in layout.sectors" :key="sector.data.name" class="sector-frame" :style="rectStyle(sector)"><span>{{ sector.data.name }}</span></div>
+          <div v-for="sector in layout.sectors" :key="sector.data.name" class="sector-frame" :style="rectStyle(sector)"><button type="button" class="sector-title" :title="`查看${sector.data.name}板块全部 ${groupByNameForView.get(sector.data.name)?.stock_count || 0} 只成分股`" @click="openSector(sector.data.name)"><span>{{ sector.data.name }}</span><i v-if="groupByNameForView.get(sector.data.name) && (sector.x1 - sector.x0) >= 150">{{ fmtBig(groupByNameForView.get(sector.data.name)!.total_mv) }}</i></button></div>
           <button v-for="node in layout.stocks" :key="node.data.item!.symbol" class="stock-tile" :class="tileSize(node)" :style="stockStyle(node)" :title="`${node.data.item!.name} ${node.data.item!.code} ${tileValue(node.data.item!)}`" @click="openStock(node.data.item!.symbol)">
             <b v-if="showName(node)">{{ node.data.item!.name }}</b><em v-if="showValue(node)">{{ tileValue(node.data.item!) }}</em><small v-if="showCode(node)">{{ node.data.item!.code }}</small>
           </button>
@@ -253,8 +213,8 @@ onUnmounted(() => {
 .heatmap-canvas { display:grid; min-width:0; min-height:0; grid-template-rows:35px minmax(0,1fr); overflow:hidden; }.canvas-header { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:16px; padding:0 8px; border-bottom:1px solid #354157; background:#182234; }.canvas-title { display:flex; align-items:center; gap:7px; white-space:nowrap; }.canvas-title strong { font-size:14px; }.live-dot { width:7px; height:7px; background:#00a56f; box-shadow:0 0 0 3px rgba(0,165,111,.14); }
 .legend { display:flex; min-width:0; align-items:center; justify-content:flex-end; gap:2px; color:#aeb8c9; font-size:12px; white-space:nowrap; }.legend>span { margin-right:8px; overflow:hidden; text-overflow:ellipsis; }.legend i { min-width:43px; padding:4px 5px; color:#fff; font-style:normal; text-align:center; }
 .market-notice { position:absolute; z-index:30; top:40px; left:220px; padding:8px 11px; border-left:3px solid #d6a12c; background:#342d1d; color:#e9c986; font-size:12px; }.market-notice.error { border-color:#db4b57; background:#3a2329; color:#ffb1b8; }
-.treemap-stage { position:relative; min-width:0; min-height:0; margin:7px 8px 8px; overflow:hidden; background:#151f31; }.treemap-stage.empty { display:grid; place-items:center; }.sector-frame { position:absolute; z-index:1; overflow:hidden; border:1px solid #43516a; pointer-events:none; }.sector-frame>span { display:block; height:18px; overflow:hidden; padding:1px 4px; background:#1b2638; color:#d5dce7; font-size:11px; line-height:17px; text-overflow:ellipsis; white-space:nowrap; }
-.stock-tile { position:absolute; z-index:2; display:flex; min-width:0; min-height:0; flex-direction:column; align-items:center; justify-content:center; overflow:hidden; padding:1px 2px; border:0; border-radius:0; outline:1px solid rgba(17,27,42,.72); color:#fff; text-align:center; text-shadow:0 1px 1px rgba(0,0,0,.48); transition:filter .1s, outline-color .1s; }.stock-tile:hover { z-index:4; filter:brightness(1.22); outline:2px solid #ffd400; opacity:1; }.stock-tile b,.stock-tile em,.stock-tile small { display:block; max-width:100%; overflow:hidden; font-style:normal; line-height:1.12; text-overflow:ellipsis; white-space:nowrap; }.stock-tile b { font-size:9px; }.stock-tile em { margin-top:1px; font-size:9px; font-weight:700; }.stock-tile small { margin-top:2px; opacity:.82; font-size:8px; }.stock-tile.md b { font-size:11px; }.stock-tile.md em { font-size:10px; }.stock-tile.lg b { font-size:14px; }.stock-tile.lg em { margin-top:3px; font-size:13px; }.stock-tile.xl b { font-size:20px; }.stock-tile.xl em { margin-top:5px; font-size:18px; }.stock-tile.xl small { font-size:10px; }.loading { color:#aeb8c9; font-size:13px; }
+.treemap-stage { position:relative; min-width:0; min-height:0; margin:7px 8px 8px; overflow:hidden; background:#151f31; }.treemap-stage.empty { display:grid; place-items:center; }.sector-frame { position:absolute; z-index:5; overflow:hidden; border:1px solid #43516a; pointer-events:none; }.sector-title { position:absolute; z-index:1; top:0; right:0; left:0; display:flex; width:100%; height:19px; min-width:0; align-items:center; gap:4px; overflow:hidden; padding:1px 4px; border:0; border-radius:0; background:#1b2638; color:#d5dce7; cursor:pointer; font-size:11px; line-height:17px; text-align:left; pointer-events:auto; }.sector-title:hover { color:#ffd400; }.sector-title span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sector-title i { flex:0 1 auto; min-width:0; overflow:hidden; color:#8794a8; font-size:8px; font-style:normal; text-overflow:ellipsis; white-space:nowrap; }
+.stock-tile { position:absolute; z-index:4; display:flex; min-width:0; min-height:0; flex-direction:column; align-items:center; justify-content:center; overflow:hidden; padding:1px 2px; border:0; border-radius:0; outline:1px solid rgba(17,27,42,.72); color:#fff; text-align:center; text-shadow:0 1px 1px rgba(0,0,0,.48); transition:filter .1s, outline-color .1s; }.stock-tile:hover { z-index:4; filter:brightness(1.22); outline:2px solid #ffd400; opacity:1; }.stock-tile b,.stock-tile em,.stock-tile small { display:block; max-width:100%; overflow:hidden; font-style:normal; line-height:1.12; text-overflow:ellipsis; white-space:nowrap; }.stock-tile b { font-size:9px; }.stock-tile em { margin-top:1px; font-size:9px; font-weight:700; }.stock-tile small { margin-top:2px; opacity:.82; font-size:8px; }.stock-tile.md b { font-size:11px; }.stock-tile.md em { font-size:10px; }.stock-tile.lg b { font-size:14px; }.stock-tile.lg em { margin-top:3px; font-size:13px; }.stock-tile.xl b { font-size:20px; }.stock-tile.xl em { margin-top:5px; font-size:18px; }.stock-tile.xl small { font-size:10px; }.loading { color:#aeb8c9; font-size:13px; }
 @media (max-width:900px) { .heatmap-workspace { grid-template-columns:1fr; height:auto; min-height:100vh; overflow:visible; }.heatmap-canvas { grid-template-rows:35px 70vh; }.legend>span { display:none; }.treemap-stage { min-height:0; } }
 @media (max-width:600px) { .legend { display:none; }.heatmap-canvas { grid-template-rows:35px 72vh; }.market-notice { left:8px; right:8px; }.stock-tile.xl b { font-size:15px; }.stock-tile.xl em { font-size:14px; } }
 </style>

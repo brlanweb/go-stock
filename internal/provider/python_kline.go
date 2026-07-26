@@ -42,22 +42,30 @@ func (p *PythonKline) DailyKlines(ctx context.Context, symbol, beg, end string) 
 	requestCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(requestCtx, p.python, p.scriptPath, p.name, symbol, beg, end)
-	stdout, err := cmd.Output()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if requestCtx.Err() != nil {
 		return nil, fmt.Errorf("%s kline: %w", p.name, requestCtx.Err())
 	}
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("%s kline: %s", p.name, strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return nil, fmt.Errorf("%s kline: %w", p.name, err)
-	}
 	var response pythonKlineResponse
-	if err := json.Unmarshal(stdout, &response); err != nil {
-		return nil, fmt.Errorf("%s kline response: %w", p.name, err)
-	}
-	if response.Error != "" {
-		return nil, fmt.Errorf("%s kline: %s", p.name, response.Error)
+	if decodeErr := json.Unmarshal([]byte(stdout.String()), &response); decodeErr == nil {
+		if response.Error != "" {
+			return nil, fmt.Errorf("%s kline: %s", p.name, response.Error)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s kline exited: %w", p.name, err)
+		}
+	} else {
+		if err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail == "" {
+				detail = strings.TrimSpace(stdout.String())
+			}
+			return nil, fmt.Errorf("%s kline: %s", p.name, detail)
+		}
+		return nil, fmt.Errorf("%s kline response: %w", p.name, decodeErr)
 	}
 	for i := range response.Klines {
 		response.Klines[i].Symbol = symbol

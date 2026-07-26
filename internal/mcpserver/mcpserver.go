@@ -27,7 +27,7 @@ type Deps struct {
 // NewHandler 构建挂载于 /mcp 的 http.Handler（无状态模式，便于 LobeHub 直连）。
 // token 非空时启用 Bearer 鉴权。
 func NewHandler(d Deps, token string) http.Handler {
-	s := server.NewMCPServer("go-stock", "1.1.0",
+	s := server.NewMCPServer("go-stock", "1.0.0",
 		server.WithToolCapabilities(false),
 		server.WithInstructions("A股本地数据分析服务：报价、指数和自选股均读取最近一次定时入库快照；K线、行业云图、搜索、每日指标和同步状态均查询 MySQL。响应中的 fetched_at 表示快照采集时间。symbol 支持 600519 / SH600519 / 000001.SZ。sync_stock_history 是唯一显式写操作，仅在用户要求同步单只证券时调用。"),
 	)
@@ -191,7 +191,7 @@ func registerTools(s *server.MCPServer, d Deps) {
 		mcp.WithString("group_by", mcp.Description("industry/concept，默认industry")),
 		mcp.WithString("metric", mcp.Description("change_pct/pe_ttm/main_net_inflow，默认change_pct")),
 		mcp.WithString("period", mcp.Description("1d/3d/5d，默认1d")),
-		mcp.WithNumber("limit", mcp.Description("按热度返回的板块数量，默认100，最大500；每个板块最多返回市值前50只成分股")),
+		mcp.WithNumber("limit", mcp.Description("返回板块数量；行业专业口径建议31，概念默认32，最大500；每个板块最多返回流通市值前50只成分股")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		groups, notice, err := d.St.MarketHeatmap(ctx, req.GetString("market", "all"), req.GetString("group_by", "industry"), req.GetString("metric", "change_pct"), req.GetString("period", "1d"), int(req.GetFloat("limit", 100)))
 		if err != nil {

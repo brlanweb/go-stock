@@ -63,5 +63,6 @@ type SecuritySnapshot struct {
 	FloatShare   float64
 	ListDate     string // YYYY-MM-DD，可能为空
 	TradeDate    string // 上游行情所属交易日 YYYY-MM-DD，可能为空
+	Status       string // listed/delisted；列表源未明确时为空
 	Industry     string
 }

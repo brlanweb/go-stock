@@ -42,7 +42,8 @@ func (s *Store) ClaimPending(ctx context.Context, task string, n int) ([]model.S
 		`SELECT cp.symbol, IFNULL(DATE_FORMAT(cp.last_synced_date,'%Y-%m-%d'),''), cp.retry_count
 		 FROM sync_checkpoint cp
 		 INNER JOIN stock_basic b ON b.symbol=cp.symbol
-		 WHERE cp.task=? AND b.status='listed' AND cp.status='pending'
+		 WHERE cp.task=? AND cp.status='pending'
+		   AND (b.status='listed' OR (b.status<>'listed' AND b.last_trade_date IS NOT NULL))
 		 ORDER BY cp.symbol LIMIT ?`, task, n)
 	if err != nil {
 		return nil, err
@@ -82,9 +83,13 @@ func (s *Store) MarkDone(ctx context.Context, task, symbol, targetDate string) e
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
-				WHEN b.status<>'listed' THEN 'done'
-				WHEN k.last_date IS NOT NULL AND k.last_date>=?
-				 AND (b.list_date IS NULL OR b.list_date>? OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
+				WHEN b.list_date>? THEN 'done'
+				WHEN b.status<>'listed' AND k.last_date IS NULL THEN 'done'
+				WHEN k.last_date IS NOT NULL
+				 AND k.last_date>=CASE
+					WHEN b.status<>'listed' AND b.last_trade_date IS NOT NULL THEN b.last_trade_date
+					ELSE ? END
+				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
 				THEN 'done' ELSE 'pending' END,
 			cp.last_error=''
 		WHERE cp.symbol=? AND cp.task=?`, symbol, targetDate, targetDate, symbol, task)
@@ -138,6 +143,30 @@ func (s *Store) RequeueExhaustedMappedSymbols(ctx context.Context, task string, 
 	return res.RowsAffected()
 }
 
+// CompleteInactiveCheckpoints 将不应再请求 Provider 的证券断点直接收敛：未来上市证券、
+// 已退市且没有历史的证券，以及明确迁移/退市且历史已到最后交易日的证券。
+func (s *Store) CompleteInactiveCheckpoints(ctx context.Context, task, targetDate string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE sync_checkpoint cp
+		INNER JOIN stock_basic b ON b.symbol=cp.symbol
+		LEFT JOIN (
+			SELECT symbol,MIN(trade_date) first_date,MAX(trade_date) last_date,COUNT(*) kline_count
+			FROM kline_daily GROUP BY symbol
+		) k ON k.symbol=cp.symbol
+		SET cp.first_synced_date=k.first_date,
+			cp.last_synced_date=k.last_date,
+			cp.kline_count=IFNULL(k.kline_count,0),
+			cp.status='done',cp.last_error=''
+		WHERE cp.task=? AND cp.status<>'done' AND (
+			b.list_date>? OR
+			(b.status<>'listed' AND (k.last_date IS NULL OR b.last_trade_date IS NULL OR k.last_date>=b.last_trade_date))
+		)`, task, targetDate)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ResetRunning 启动时将残留 running 重置为 pending（断点续传）。
 func (s *Store) ResetRunning(ctx context.Context, task string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
@@ -163,22 +192,25 @@ func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate strin
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
-				WHEN k.last_date IS NOT NULL AND k.last_date>=?
-				 AND (
-					b.list_date IS NULL
-					OR b.list_date>?
-					OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY)
-				 ) THEN 'done'
+				WHEN b.list_date>? THEN 'done'
+				WHEN b.status<>'listed' AND k.last_date IS NULL THEN 'done'
+				WHEN k.last_date IS NOT NULL
+				 AND k.last_date>=CASE
+					WHEN b.status<>'listed' AND b.last_trade_date IS NOT NULL THEN b.last_trade_date
+					ELSE ? END
+				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
+				THEN 'done'
 				WHEN cp.status='failed' THEN 'failed'
 				ELSE 'pending'
 			END,
 			cp.retry_count=CASE
-				WHEN b.status<>'listed' THEN 0
-				WHEN cp.status='done' THEN 0
+				WHEN b.list_date>? OR (b.status<>'listed' AND k.last_date IS NULL) THEN 0
 				WHEN cp.status='failed' THEN cp.retry_count
-				ELSE cp.retry_count END,
-			cp.last_error=CASE WHEN b.status<>'listed' OR cp.status='done' THEN '' ELSE cp.last_error END
-		WHERE cp.task=?`, targetDate, targetDate, task)
+				ELSE 0 END,
+			cp.last_error=CASE
+				WHEN b.list_date>? OR (b.status<>'listed' AND k.last_date IS NULL) THEN ''
+				ELSE cp.last_error END
+		WHERE cp.task=?`, targetDate, targetDate, targetDate, targetDate, task)
 	if err != nil {
 		return 0, fmt.Errorf("reconcile checkpoints: %w", err)
 	}

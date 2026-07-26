@@ -2,6 +2,8 @@
 
 > 低内存 A 股数据底座：Go 单二进制集成 REST API、MCP Streamable HTTP、Vue 3 市场云图和 MySQL 历史数据同步。
 
+**当前稳定版本：v1.0.0**
+
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![Vue](https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs)](https://vuejs.org/) [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-4479A1?logo=mysql)](https://www.mysql.com/)
 
 ## 设计边界
@@ -9,8 +11,9 @@
 - **查询只读本地库**：页面、REST 查询端点和 MCP 分析工具只读取 MySQL；不会因东方财富等上游瞬断在浏览器或 AI 分析时返回 `EOF`。
 - **外部数据仅后台采集**：交易日 `12:00`（上午收盘）和 `16:00`（全天收盘）按 `Asia/Shanghai` 定时采集全市场快照；手动同步和缺失补齐属于显式写操作。
 - **快照可追溯**：报价和指数响应携带 `fetched_at`，代表最近一次本地快照的采集时间，不将缓存快照伪装成实时数据。
-- **云图按板块分区**：默认筛选热度靠前 100 个行业或概念、每板块最多 50 只证券；先计算板块矩形，再在板块内部按市值计算个股矩形，避免大市值个股跨板块覆盖。颜色由所选指标决定。
+- **云图按专业板块分区**：行业固定使用东方财富 31 个一级行业；概念从真实概念成分中选取主要板块。板块及板块内个股均以流通市值分配面积，涨跌幅仅决定红绿色；每板块最多展示流通市值前 50 只证券。
 - **流式个股 Agent**：详情页右侧抽屉支持流式回答、按证券保存 MySQL 对话历史，并可选择是否携带当前快照及 `0/10/30/60` 个交易日日 K；历史条数由后端校验和截取。
+- **指标管理与确定性回测**：内置传统技术指标和参考策略目录，支持 7 个纯 K 线策略按 A 股 T+1、交易成本和下一交易日执行语义回测，并在详情图标注买卖点。
 
 ## 特性
 
@@ -21,7 +24,7 @@
 - **受控缺失补齐**：`sync_checkpoint` 表记录进度，历史为空或落后最近交易日时低速补齐；完整证券不重复请求上游。历史源按 `东方财富 → BaoStock → AKShare → 腾讯` 降级：BaoStock 覆盖沪深股票/ETF，AKShare（新浪源）覆盖 ETF 与北交所 `920` 代码，避免单一上游被限流时整批失败
 - **定时快照**：按 `Asia/Shanghai` 在工作日 `12:00` 采集上午快照，`16:00` 采集收盘快照并写入日K/每日指标
 - **MCP Streamable HTTP**（`/mcp`）：本地 MySQL 分析工具 + 显式单股同步工具，供 LobeHub / Claude 等 MCP 客户端调用
-- **Vue3 前端**：全屏市场终端云图，面积按总市值映射、颜色按涨跌幅映射；个股日K/周K/月K 图（klinecharts）
+- **Vue3 前端**：全屏市场终端云图，一级行业和主要概念按流通市值映射面积、颜色按涨跌幅映射；个股日K/周K/月K 图、指标管理和策略回测
 - **低内存**：进程常驻约 20~40MB；扩展预留 US/CRYPTO market 字段与 Provider 接口
 
 ## 快速开始
@@ -96,7 +99,11 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/indices` | 最近一次本地指数快照 |
 | `GET /api/v1/security/{code}` | 基础信息 |
 | `GET /api/v1/indicator/{code}` | 每日指标历史 |
-| `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d&limit=100` | 本地日K与指标生成的行业/概念云图；默认前 100 个热度板块，每板块最多 50 只 |
+| `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d&limit=31` | 本地日K与指标生成的一级行业/主要概念云图；板块和个股面积按流通市值，每板块最多 50 只 |
+| `GET/PUT /api/v1/indicators[/{id}]` | 指标与策略目录、启停及参数管理 |
+| `POST /api/v1/indicators/{id}/reset` | 恢复指标默认参数 |
+| `POST /api/v1/backtest` | 使用本地日 K 执行确定性 A 股策略回测 |
+| `GET /api/v1/backtest/history/{code}` | 查询证券历史回测记录 |
 | `POST /api/v1/agent/chat/stream` | 个股 Agent SSE 流式对话；`history_days` 仅支持 `0/10/30/60`，`include_stock` 控制是否携带个股快照 |
 | `GET/DELETE /api/v1/agent/chat/history/{code}` | 查询或清除当前证券保存在 MySQL 的 Agent 对话历史 |
 | `GET/POST/DELETE /api/v1/watchlist[/{code}]` | 自选股与本地快照 |
@@ -104,6 +111,7 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `POST /api/v1/sync/stock/{code}?mode=latest\|missing\|full` | 显式同步单只证券 |
 | `POST /api/v1/sync/backfill` | 启动受控的全市场缺失历史补齐（完整证券跳过上游） |
 | `POST /api/v1/sync/backfill/stop` | 停止历史补齐并保留断点 |
+| `POST /api/v1/sync/backfill/retry-failed` | 用户显式重排失败项，避免服务重启后无限自动重试 |
 | `POST /api/v1/sync/daily` | 手动触发本地市场快照采集 |
 
 ## MCP 接入（LobeHub）
@@ -135,6 +143,8 @@ internal/
   config/            环境变量配置
   model/             统一数据结构 + symbol 规范化
   provider/          东财/腾讯/新浪数据源 + 熔断降级管理器
+  backtest/          A 股交易规则、策略信号和绩效计算
+  indicator/         技术指标与策略目录
   store/             MySQL 访问 + embed 迁移
   sync/              历史回填（断点续传）+ 每日增量调度
   api/               REST handlers

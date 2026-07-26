@@ -30,20 +30,27 @@ func (s *Store) upsertSecBatch(ctx context.Context, snaps []provider.SecuritySna
 		return nil
 	}
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO stock_basic (symbol,market,code,name,sec_type,exchange,industry,list_date,total_share,float_share,status) VALUES ")
-	args := make([]interface{}, 0, len(snaps)*11)
+	sb.WriteString("INSERT INTO stock_basic (symbol,market,code,name,sec_type,exchange,industry,list_date,last_trade_date,total_share,float_share,status) VALUES ")
+	args := make([]interface{}, 0, len(snaps)*12)
 	for i, sn := range snaps {
 		if i > 0 {
 			sb.WriteString(",")
 		}
-		sb.WriteString("(?,?,?,?,?,?,?,?,?,?,?)")
-		var listDate interface{}
+		sb.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?)")
+		var listDate, lastTradeDate interface{}
 		if sn.ListDate != "" {
 			listDate = sn.ListDate
 		}
-		args = append(args, sn.Symbol, "cn", sn.Code, sn.Name, string(sn.SecType), sn.Exchange, sn.Industry, listDate, sn.TotalShare, sn.FloatShare, "listed")
+		if sn.TradeDate != "" && (sn.Volume > 0 || sn.Amount > 0) {
+			lastTradeDate = sn.TradeDate
+		}
+		status := sn.Status
+		if status == "" {
+			status = "listed"
+		}
+		args = append(args, sn.Symbol, "cn", sn.Code, sn.Name, string(sn.SecType), sn.Exchange, sn.Industry, listDate, lastTradeDate, sn.TotalShare, sn.FloatShare, status)
 	}
-	sb.WriteString(" ON DUPLICATE KEY UPDATE name=VALUES(name),industry=VALUES(industry),list_date=COALESESCE_PLACEHOLDER,total_share=VALUES(total_share),float_share=VALUES(float_share),updated_at=NOW()")
+	sb.WriteString(" ON DUPLICATE KEY UPDATE name=VALUES(name),industry=VALUES(industry),list_date=COALESESCE_PLACEHOLDER,last_trade_date=COALESCE(VALUES(last_trade_date),last_trade_date),total_share=VALUES(total_share),float_share=VALUES(float_share),status=VALUES(status),updated_at=NOW()")
 	q := strings.Replace(sb.String(), "COALESESCE_PLACEHOLDER", "COALESCE(VALUES(list_date), list_date)", 1)
 	if _, err := s.DB.ExecContext(ctx, q, args...); err != nil {
 		return fmt.Errorf("upsert securities: %w", err)
@@ -62,11 +69,85 @@ func (s *Store) MarkSecuritiesMigrated(ctx context.Context, symbols []string) (i
 		args[i] = symbol
 	}
 	res, err := s.DB.ExecContext(ctx,
-		"UPDATE stock_basic SET status='delisted',updated_at=NOW() WHERE symbol IN ("+placeholders+")", args...)
+		`UPDATE stock_basic b
+		 LEFT JOIN (SELECT symbol,MAX(trade_date) last_date FROM kline_daily GROUP BY symbol) k ON k.symbol=b.symbol
+		 SET b.status='delisted',b.last_trade_date=COALESCE(k.last_date,b.last_trade_date),b.updated_at=NOW()
+		 WHERE b.symbol IN (`+placeholders+")", args...)
 	if err != nil {
 		return 0, fmt.Errorf("mark migrated securities: %w", err)
 	}
 	return res.RowsAffected()
+}
+
+// MarkSecuritiesWithStaleTradeDateDelisted 将上游明确给出旧交易日期、且本地已有历史达到该日期的
+// 股票标记为退市。使用 180 天阈值避免把短期停牌证券误判为退市；ETF 不使用此规则。
+func (s *Store) MarkSecuritiesWithStaleTradeDateDelisted(ctx context.Context, targetDate string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE stock_basic b
+		INNER JOIN (SELECT symbol,MAX(trade_date) last_date FROM kline_daily GROUP BY symbol) k ON k.symbol=b.symbol
+		SET b.status='delisted',b.last_trade_date=k.last_date,b.updated_at=NOW()
+		WHERE b.status='listed' AND b.sec_type='stock'
+		  AND k.last_date<DATE_SUB(?, INTERVAL 180 DAY)
+		  AND (b.last_trade_date IS NULL OR b.last_trade_date<DATE_SUB(?, INTERVAL 180 DAY))`, targetDate, targetDate)
+	if err != nil {
+		return 0, fmt.Errorf("mark stale securities delisted: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// MarkMissingListedSecuritiesDelisted 仅在本轮列表完整时调用：未出现在当前上游清单、此前仍标为 listed 的证券
+// 转为 delisted，并保留库内最后交易日作为历史覆盖终点。
+func (s *Store) MarkMissingListedSecuritiesDelisted(ctx context.Context, currentSymbols []string) (int64, error) {
+	if len(currentSymbols) == 0 {
+		return 0, nil
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TEMPORARY TABLE current_security_symbols (
+		symbol VARCHAR(24) NOT NULL PRIMARY KEY
+	) ENGINE=MEMORY DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`); err != nil {
+		return 0, err
+	}
+	const batch = 500
+	for start := 0; start < len(currentSymbols); start += batch {
+		end := start + batch
+		if end > len(currentSymbols) {
+			end = len(currentSymbols)
+		}
+		var query strings.Builder
+		query.WriteString("INSERT IGNORE INTO current_security_symbols(symbol) VALUES ")
+		args := make([]interface{}, 0, end-start)
+		for i, symbol := range currentSymbols[start:end] {
+			if i > 0 {
+				query.WriteByte(',')
+			}
+			query.WriteString("(?)")
+			args = append(args, symbol)
+		}
+		if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
+			return 0, err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE stock_basic b
+		LEFT JOIN current_security_symbols current ON current.symbol=b.symbol
+		LEFT JOIN (SELECT symbol,MAX(trade_date) last_date FROM kline_daily GROUP BY symbol) k ON k.symbol=b.symbol
+		SET b.status='delisted',b.last_trade_date=COALESCE(k.last_date,b.last_trade_date),b.updated_at=NOW()
+		WHERE b.market='cn' AND b.status='listed' AND current.symbol IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ListSecurities 证券列表（可按类型过滤）。

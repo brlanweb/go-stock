@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,6 +91,13 @@ func (e *Engine) SyncSecurities(ctx context.Context) (int, error) {
 	for _, sn := range snaps {
 		symbols = append(symbols, sn.Symbol)
 	}
+	if len(symbols) >= 7000 {
+		if count, err := e.st.MarkMissingListedSecuritiesDelisted(ctx, symbols); err != nil {
+			return 0, err
+		} else if count > 0 {
+			slog.Info("已更新退市证券状态", "count", count)
+		}
+	}
 	if err := e.st.InitCheckpoints(ctx, TaskBackfill, symbols); err != nil {
 		return 0, err
 	}
@@ -161,7 +169,7 @@ func (e *Engine) syncStock(ctx context.Context, symbol, mode string) error {
 			beg = time.Now().Format("20060102")
 		}
 	}
-	klines, err := e.fetchKlinesWithFallback(ctx, symbol, beg)
+	klines, err := e.fetchKlinesWithFallback(ctx, symbol, beg, nil)
 	if err != nil {
 		return err
 	}
@@ -236,6 +244,16 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 
 	// 3. 按目标交易日重新判定缺失。这样历史完整且已经更新的证券不会重复请求上游。
 	targetDate := latestExpectedTradeDate(time.Now())
+	if n, err := e.st.MarkSecuritiesWithStaleTradeDateDelisted(ctx, targetDate); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已识别停止交易证券", "count", n)
+	}
+	if n, err := e.st.CompleteInactiveCheckpoints(ctx, TaskBackfill, targetDate); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已收敛非活跃证券断点", "count", n)
+	}
 	if n, err := e.st.ReconcileCheckpoints(ctx, TaskBackfill, targetDate); err != nil {
 		return err
 	} else {
@@ -315,7 +333,7 @@ func (e *Engine) backfillOne(ctx context.Context, cp model.SyncCheckpoint) error
 		}
 		beg = t.AddDate(0, 0, 1).Format("20060102")
 	}
-	klines, err := e.fetchKlinesWithFallback(ctx, cp.Symbol, beg)
+	klines, err := e.fetchKlinesWithFallback(ctx, cp.Symbol, beg, coverage)
 	if err != nil {
 		return err
 	}
@@ -355,7 +373,7 @@ func latestExpectedTradeDate(now time.Time) string {
 
 // fetchKlinesWithFallback 按东财、BaoStock、AKShare 依次尝试；腾讯保留为
 // AKShare 之后的末级兼容源。北交所 920 代码由 AKShare 直接支持，仍保留官方旧代码映射尝试。
-func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string) ([]model.Kline, error) {
+func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string, coverage *store.KlineCoverageInfo) ([]model.Kline, error) {
 	type attempt struct {
 		name   string
 		symbol string
@@ -398,19 +416,92 @@ func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string
 		for i := range klines {
 			klines[i].Symbol = symbol
 		}
-		if len(klines) > len(best) {
-			best = klines
-		}
-		// 旧代码返回多日历史，或当前代码返回足够覆盖判断的数据时直接采用。
-		if (candidate.symbol != symbol && len(klines) > 1) || len(klines) >= 20 {
-			return klines, nil
+		best = mergeKlines(best, klines)
+		if fetchedCoverageComplete(best, coverage, beg, latestExpectedTradeDate(time.Now())) {
+			return best, nil
 		}
 	}
 	if len(best) > 0 {
-		return best, nil
+		first, last := klineDateRange(best)
+		return nil, fmt.Errorf("历史数据源均未达到覆盖要求 first=%s last=%s count=%d", first, last, len(best))
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("所有历史K线源均不可用或处于熔断冷却")
 	}
 	return nil, lastErr
+}
+
+// fetchedCoverageComplete 判断本轮数据是否足以补齐证券历史。不能使用返回条数
+// 判断成功，否则东财对 ETF 返回最近一小段数据时会阻止完整来源继续执行。
+func fetchedCoverageComplete(klines []model.Kline, coverage *store.KlineCoverageInfo, beg, marketTarget string) bool {
+	if len(klines) == 0 {
+		return false
+	}
+	first, last := klineDateRange(klines)
+	if first == "" || last == "" {
+		return false
+	}
+	target := marketTarget
+	if coverage != nil {
+		if coverage.Status != "listed" && coverage.LastTradeDate != "" {
+			target = coverage.LastTradeDate
+		}
+		if coverage.ListDate != "" && coverage.ListDate > marketTarget {
+			return true
+		}
+	}
+	if last < target {
+		return false
+	}
+	// 增量补尾时库内头部已验证，本轮结果无需再次包含上市日。
+	if beg != "" && beg != "0" && coverage != nil && coverage.HistoryStartComplete {
+		return true
+	}
+	if coverage == nil || coverage.ListDate == "" {
+		return true
+	}
+	listDate, err := time.Parse("2006-01-02", coverage.ListDate)
+	if err != nil {
+		return false
+	}
+	return first <= listDate.AddDate(0, 0, 14).Format("2006-01-02")
+}
+
+func klineDateRange(klines []model.Kline) (string, string) {
+	var first, last string
+	for _, k := range klines {
+		date := k.Date
+		if len(date) > 10 {
+			date = date[:10]
+		}
+		if date == "" {
+			continue
+		}
+		if first == "" || date < first {
+			first = date
+		}
+		if last == "" || date > last {
+			last = date
+		}
+	}
+	return first, last
+}
+
+// mergeKlines 合并各来源的覆盖区间；先返回的数据源优先，后续来源仅补缺失日期。
+func mergeKlines(base, extra []model.Kline) []model.Kline {
+	byDate := make(map[string]model.Kline, len(base)+len(extra))
+	for _, k := range base {
+		byDate[k.Date] = k
+	}
+	for _, k := range extra {
+		if _, exists := byDate[k.Date]; !exists {
+			byDate[k.Date] = k
+		}
+	}
+	out := make([]model.Kline, 0, len(byDate))
+	for _, k := range byDate {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out
 }

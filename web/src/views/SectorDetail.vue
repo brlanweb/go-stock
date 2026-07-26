@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type SectorListItem, type SectorConstituentItem } from '../api'
 import MarketSidebar from '../components/MarketSidebar.vue'
@@ -12,15 +12,21 @@ const loading = ref(false)
 const message = ref('')
 const groupBy = ref<'industry' | 'concept'>('industry')
 
-async function load() {
-  // code 既可能是 sector_code，也可能是 "industry:银行" 形式（来自个股详情页的占位）。
-  if (props.code.startsWith('industry:')) {
-    sectors.value = { type: 'industry', name: decodeURIComponent(props.code.slice('industry:'.length)), code: props.code }
-    loadConstituents()
-    return
+async function resolveSector(code: string): Promise<{ type: 'industry' | 'concept'; name: string; code: string }> {
+  if (code.startsWith('industry:')) {
+    return { type: 'industry', name: decodeURIComponent(code.slice('industry:'.length)), code }
   }
-  sectors.value = { type: 'concept', name: props.code, code: props.code }
-  loadConstituents()
+  for (const type of ['industry', 'concept'] as const) {
+    const list = await api.sectors(type)
+    const match = list.sectors.find(item => item.sector_code === code)
+    if (match) return { type, name: match.sector_name, code: match.sector_code }
+  }
+  return { type: 'concept', name: code, code }
+}
+
+async function load() {
+  sectors.value = await resolveSector(props.code)
+  await loadConstituents()
 }
 
 async function loadConstituents() {
@@ -48,6 +54,7 @@ function openStock(symbol: string) {
 }
 
 onMounted(load)
+watch(() => props.code, load)
 </script>
 
 <template>

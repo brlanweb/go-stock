@@ -206,7 +206,7 @@ func (e *Eastmoney) fetchClist(ctx context.Context, fs string, secType model.Sec
 		if err := e.gate.Wait(ctx); err != nil {
 			return out, err
 		}
-		fields := "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f38,f39,f26,f100,f124"
+		fields := "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f26,f38,f39,f100,f124"
 		var body []byte
 		var err error
 		for _, host := range clistHosts {
@@ -277,9 +277,16 @@ func (e *Eastmoney) fetchClist(ctx context.Context, fs string, secType model.Sec
 				TotalShare:   f("f38").Or(0),
 				FloatShare:   f("f39").Or(0),
 			}
-			// f124 是行情更新时间（Unix 秒），用于区分采集日期与实际交易日。
-			if updated := f("f124"); updated.Valid && updated.Value > 0 {
+			// f124 是行情更新时间（Unix 秒），只有存在有效成交量或成交额时才代表最后交易日。
+			// 已退市证券的列表快照可能保留旧收盘价，不能把它当作当前交易状态。
+			if updated := f("f124"); updated.Valid && updated.Value > 0 && (snap.Volume > 0 || snap.Amount > 0) {
 				snap.TradeDate = time.Unix(int64(updated.Value), 0).In(eastmoneyShanghaiLocation()).Format("2006-01-02")
+			}
+			// 没有当日成交且行情时间为空的股票不应继续按在市证券回填到当前日。
+			if secType == model.SecStock && snap.TradeDate == "" && snap.Volume == 0 && snap.Amount == 0 {
+				snap.Status = "delisted"
+			} else {
+				snap.Status = "listed"
 			}
 			// f26 上市日期 YYYYMMDD
 			if d := f("f26"); d.Valid && d.Value > 19000000 {

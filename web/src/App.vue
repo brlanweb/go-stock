@@ -68,7 +68,8 @@ onUnmounted(() => clearInterval(timer))
   </div>
   <template v-else-if="authChecked">
     <RouterView v-slot="{ Component, route }">
-      <component v-if="!route.path.startsWith('/stock/')" :is="Component" />
+      <component v-if="!route.path.startsWith('/stock/') && route.path !== '/indicators'" :is="Component" />
+      <component v-else-if="route.path === '/indicators'" :is="Component" />
       <div v-else class="detail-shell">
         <MarketSidebar :controls="false" />
         <main class="detail-content">

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/hoax/go-stock/internal/analysis"
+	"github.com/hoax/go-stock/internal/backtest"
+	"github.com/hoax/go-stock/internal/indicator"
 	"github.com/hoax/go-stock/internal/model"
 	"github.com/hoax/go-stock/internal/provider"
 	"github.com/hoax/go-stock/internal/querycache"
@@ -38,6 +40,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/indices", s.handleIndices)
 	mux.HandleFunc("GET /api/v1/security/{code}", s.handleSecurity)
 	mux.HandleFunc("GET /api/v1/indicator/{code}", s.handleIndicator)
+	mux.HandleFunc("GET /api/v1/indicators", s.handleIndicators)
+	mux.HandleFunc("GET /api/v1/indicators/{id}", s.handleIndicatorDefinition)
+	mux.HandleFunc("PUT /api/v1/indicators/{id}", s.handleIndicatorUpdate)
+	mux.HandleFunc("POST /api/v1/indicators/{id}/reset", s.handleIndicatorReset)
+	mux.HandleFunc("POST /api/v1/backtest", s.handleBacktest)
+	mux.HandleFunc("GET /api/v1/backtest/history/{code}", s.handleBacktestHistory)
 	mux.HandleFunc("GET /api/v1/market/heatmap", s.handleMarketHeatmap)
 	mux.HandleFunc("GET /api/v1/sectors", s.handleSectors)
 	mux.HandleFunc("GET /api/v1/sectors/{code}/constituents", s.handleSectorConstituents)
@@ -249,6 +257,125 @@ func (s *Server) handleIndicator(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, list)
 }
 
+func (s *Server) handleIndicators(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	items, err := s.St.ListIndicators(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleIndicatorDefinition(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	item, err := s.St.GetIndicator(ctx, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if item == nil {
+		writeErr(w, http.StatusNotFound, "指标不存在")
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleIndicatorUpdate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool           `json:"enabled"`
+		Params  map[string]any `json:"params"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	if err := s.St.UpdateIndicator(ctx, r.PathValue("id"), body.Enabled, body.Params); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	item, _ := s.St.GetIndicator(ctx, r.PathValue("id"))
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleIndicatorReset(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	if err := s.St.ResetIndicator(ctx, r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	item, _ := s.St.GetIndicator(ctx, r.PathValue("id"))
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
+	var req backtest.Request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败")
+		return
+	}
+	req.Symbol = model.NormalizeSymbol(req.Symbol)
+	if req.Symbol == "" || req.IndicatorID == "" {
+		writeErr(w, http.StatusBadRequest, "缺少有效 symbol 或 indicator_id")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	definition, err := s.St.GetIndicator(ctx, req.IndicatorID)
+	if err != nil || definition == nil {
+		writeErr(w, http.StatusNotFound, "指标不存在")
+		return
+	}
+	if !definition.Enabled {
+		writeErr(w, http.StatusConflict, "指标已停用")
+		return
+	}
+	if definition.Kind != "strategy" || definition.Capability != indicator.Executable {
+		writeErr(w, http.StatusUnprocessableEntity, "该条目不支持纯K线确定性回测")
+		return
+	}
+	if len(req.Params) == 0 {
+		req.Params = definition.CurrentParams
+	}
+	klines, err := s.St.QueryKlines(ctx, req.Symbol, req.Period, "qfq", req.Start, req.End, 1500)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result, err := backtest.Run(req, klines)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err := s.St.SaveBacktest(ctx, result); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleBacktestHistory(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	items, err := s.St.BacktestHistory(ctx, symbol, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
 func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	market, groupBy, metric, period := q.Get("market"), q.Get("group_by"), q.Get("metric"), q.Get("period")
@@ -256,7 +383,7 @@ func (s *Server) handleMarketHeatmap(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 100
 	}
-	key := "heatmap:v4:" + market + ":" + groupBy + ":" + metric + ":" + period + ":" + strconv.Itoa(limit)
+	key := "heatmap:v13:" + market + ":" + groupBy + ":" + metric + ":" + period + ":" + strconv.Itoa(limit)
 	s.cachedJSON(w, r, key, func(ctx context.Context) (interface{}, error) {
 		groups, notice, err := s.St.MarketHeatmap(ctx, market, groupBy, metric, period, limit)
 		if err != nil {
