@@ -11,14 +11,20 @@ import (
 	"github.com/hoax/go-stock/internal/model"
 )
 
-type heatmapCandidate struct {
-	item  model.HeatmapItem
-	group string
-	score float64
+type heatmapGroupAccumulator struct {
+	items          []model.HeatmapItem
+	weightedChange float64
+	marketValue    float64
+	amount         float64
 }
 
-// MarketHeatmap 从本地日 K 和市场快照生成云图。limit 限制最终证券总数；
-// 3/5 日收益通过一次批量查询计算，避免逐证券查询。
+type rankedHeatmapGroup struct {
+	group model.HeatmapGroup
+	heat  float64
+}
+
+// MarketHeatmap 从本地日 K 和市场快照生成云图。limit 表示最多返回的行业/概念
+// 板块数量；入选板块保留其全部成分股，不限制全市场证券总数。
 func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, period string, limit int) ([]model.HeatmapGroup, string, error) {
 	if groupBy != "industry" && groupBy != "concept" {
 		groupBy = "industry"
@@ -32,8 +38,8 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 5000 {
-		limit = 5000
+	if limit > 500 {
+		limit = 500
 	}
 	if metric == "main_net_inflow" {
 		return []model.HeatmapGroup{}, "主力资金数据尚未同步", nil
@@ -91,8 +97,8 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 		}
 	}
 
+	groups := make(map[string]*heatmapGroupAccumulator)
 	seen := make(map[string]bool)
-	candidates := make([]heatmapCandidate, 0, 6000)
 	for rows.Next() {
 		var item model.HeatmapItem
 		var close, amount float64
@@ -114,46 +120,62 @@ func (s *Store) MarketHeatmap(ctx context.Context, market, groupBy, metric, peri
 			continue
 		}
 		seen[key] = true
-		// 热度兼顾价格波动和成交活跃度；对成交额取对数，避免超大盘股垄断结果。
-		score := math.Abs(item.PeriodChange)*0.65 + math.Log10(math.Max(amount, 1))*0.35
-		candidates = append(candidates, heatmapCandidate{item: item, group: name, score: score})
+		group := groups[name]
+		if group == nil {
+			group = &heatmapGroupAccumulator{}
+			groups[name] = group
+		}
+		weight := math.Max(item.TotalMV, 1)
+		group.items = append(group.items, item)
+		group.weightedChange += item.PeriodChange * weight
+		group.marketValue += weight
+		group.amount += math.Max(amount, 0)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, "", err
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].score == candidates[j].score {
-			return candidates[i].item.TotalMV > candidates[j].item.TotalMV
+	ranked := make([]rankedHeatmapGroup, 0, len(groups))
+	for name, accumulator := range groups {
+		change := 0.0
+		if accumulator.marketValue > 0 {
+			change = accumulator.weightedChange / accumulator.marketValue
 		}
-		return candidates[i].score > candidates[j].score
-	})
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
-	}
-
-	grouped := make(map[string][]model.HeatmapItem)
-	groupScore := make(map[string]float64)
-	for _, candidate := range candidates {
-		grouped[candidate.group] = append(grouped[candidate.group], candidate.item)
-		groupScore[candidate.group] += candidate.score
-	}
-	out := make([]model.HeatmapGroup, 0, len(grouped))
-	for name, items := range grouped {
-		var weighted, total float64
-		for _, item := range items {
-			weight := math.Max(item.TotalMV, 1)
-			value := item.PeriodChange
-			if metric == "pe_ttm" {
-				value = item.PERatio
+		groupValue := change
+		if metric == "pe_ttm" {
+			var weightedPE, total float64
+			for _, item := range accumulator.items {
+				weight := math.Max(item.TotalMV, 1)
+				weightedPE += item.PERatio * weight
+				total += weight
 			}
-			weighted += value * weight
-			total += weight
+			if total > 0 {
+				groupValue = weightedPE / total
+			}
 		}
-		sort.Slice(items, func(i, j int) bool { return items[i].TotalMV > items[j].TotalMV })
-		out = append(out, model.HeatmapGroup{Name: name, ChangePct: weighted / total, Items: items})
+		sort.Slice(accumulator.items, func(i, j int) bool {
+			return accumulator.items[i].TotalMV > accumulator.items[j].TotalMV
+		})
+		// 板块热度：板块整体涨跌强度为主，板块总成交额活跃度为辅。
+		heat := math.Abs(change)*0.65 + math.Log10(math.Max(accumulator.amount, 1))*0.35
+		ranked = append(ranked, rankedHeatmapGroup{
+			group: model.HeatmapGroup{Name: name, ChangePct: groupValue, Items: accumulator.items},
+			heat:  heat,
+		})
 	}
-	sort.Slice(out, func(i, j int) bool { return groupScore[out[i].Name] > groupScore[out[j].Name] })
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].heat == ranked[j].heat {
+			return ranked[i].group.Name < ranked[j].group.Name
+		}
+		return ranked[i].heat > ranked[j].heat
+	})
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out := make([]model.HeatmapGroup, len(ranked))
+	for i := range ranked {
+		out[i] = ranked[i].group
+	}
 	return out, "", nil
 }
 

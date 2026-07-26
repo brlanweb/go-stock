@@ -155,6 +155,7 @@ export interface HeatmapResponse {
   group_by: string
   metric: string
   period: string
+  limit: number
   notice: string
   groups: HeatmapGroup[]
 }
