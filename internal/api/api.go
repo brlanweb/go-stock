@@ -632,14 +632,13 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusConflict, "AI 推荐任务正在执行")
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := s.Analysis.RunDaily(ctx); err != nil {
-			slog.Error("AI 推荐执行失败", "err", err)
-		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.Analysis.RunDaily(ctx); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "analysis completed"})
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {

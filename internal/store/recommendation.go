@@ -3,94 +3,150 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hoax/go-stock/internal/model"
 )
 
-// RecommendationCandidate 包含 AI 判断所需的 60 日行情序列。
+const (
+	recommendationSectorLimit    = 10
+	recommendationCandidateLimit = 10
+)
+
+// RecommendationCandidate 包含确定性量化评分所需的最近 60 根日 K。
 type RecommendationCandidate struct {
-	Symbol   string        `json:"symbol"`
-	Code     string        `json:"code"`
-	Name     string        `json:"name"`
-	Industry string        `json:"industry"`
-	TotalMV  float64       `json:"total_mv"`
-	Klines   []model.Kline `json:"klines"`
+	Symbol     string        `json:"symbol"`
+	Code       string        `json:"code"`
+	Name       string        `json:"name"`
+	Industry   string        `json:"industry"`
+	SectorType string        `json:"sector_type"`
+	Popularity float64       `json:"popularity"`
+	SectorHeat float64       `json:"sector_heat"`
+	Klines     []model.Kline `json:"klines"`
 }
 
-// RecommendationCandidates 先按行业近 60 日等权涨幅选出候选板块，再取其市值前十龙头。
+type recommendationSector struct {
+	Code       string
+	Type       string
+	Name       string
+	Popularity float64
+}
+
+// RecommendationCandidates 先从行业和概念中选出成交额最高的人气板块，再从
+// 这些板块按最近交易日成交额选股。股票跨板块去重后严格保留前 10 只，最后
+// 为每只股票加载最近 60 根日 K。所有排序均有稳定代码兜底。
 func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationCandidate, error) {
-	rows, err := s.DB.QueryContext(ctx, `
-		SELECT history.industry,AVG((history.last_close/history.first_close-1)*100) sector_return
-		FROM (
-			SELECT b.symbol,b.industry,
-				CAST(SUBSTRING_INDEX(GROUP_CONCAT(k.close ORDER BY k.trade_date ASC),',',1) AS DECIMAL(20,6)) first_close,
-				CAST(SUBSTRING_INDEX(GROUP_CONCAT(k.close ORDER BY k.trade_date DESC),',',1) AS DECIMAL(20,6)) last_close,
-				COUNT(*) kline_count
-			FROM stock_basic b INNER JOIN kline_daily k ON k.symbol=b.symbol
-			WHERE b.status='listed' AND b.sec_type='stock' AND b.industry<>'' AND k.trade_date>=DATE_SUB(CURDATE(),INTERVAL 100 DAY)
-			GROUP BY b.symbol,b.industry
-			HAVING kline_count>=50 AND first_close>0
-		) history
-		GROUP BY history.industry HAVING COUNT(*)>=3
-		ORDER BY sector_return DESC LIMIT 3`)
+	tradeDate, err := s.LatestKlineDate(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query recommendation sectors: %w", err)
+		return nil, err
 	}
-	var sectors []string
-	for rows.Next() {
-		var name string
-		var change float64
-		if err := rows.Scan(&name, &change); err != nil {
-			rows.Close()
+	if tradeDate == "" {
+		return []RecommendationCandidate{}, nil
+	}
+
+	sectorRows, err := s.DB.QueryContext(ctx, `
+		SELECT sb.sector_code,sb.sector_type,sb.sector_name,SUM(k.amount) popularity
+		FROM sector_basic sb
+		INNER JOIN sector_constituent sc ON sc.sector_code=sb.sector_code
+		INNER JOIN stock_basic b ON b.symbol=sc.symbol
+		INNER JOIN kline_daily k ON k.symbol=b.symbol AND k.trade_date=?
+		WHERE b.status='listed' AND b.sec_type='stock'
+		GROUP BY sb.sector_code,sb.sector_type,sb.sector_name
+		HAVING popularity>0
+		ORDER BY popularity DESC,sb.sector_type ASC,sb.sector_code ASC
+		LIMIT ?`, tradeDate, recommendationSectorLimit)
+	if err != nil {
+		return nil, fmt.Errorf("query popular recommendation sectors: %w", err)
+	}
+	var sectors []recommendationSector
+	for sectorRows.Next() {
+		var sector recommendationSector
+		if err := sectorRows.Scan(&sector.Code, &sector.Type, &sector.Name, &sector.Popularity); err != nil {
+			sectorRows.Close()
 			return nil, err
 		}
-		sectors = append(sectors, name)
+		sectors = append(sectors, sector)
 	}
-	rows.Close()
+	if err := sectorRows.Close(); err != nil {
+		return nil, err
+	}
 	if len(sectors) == 0 {
 		return []RecommendationCandidate{}, nil
 	}
 
+	sectorByCode := make(map[string]recommendationSector, len(sectors))
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(sectors)), ",")
-	args := make([]interface{}, len(sectors))
-	for i := range sectors {
-		args[i] = sectors[i]
+	args := make([]any, 0, len(sectors)+1)
+	args = append(args, tradeDate)
+	for _, sector := range sectors {
+		sectorByCode[sector.Code] = sector
+		args = append(args, sector.Code)
 	}
-	query := `SELECT b.symbol,b.code,b.name,b.industry,IFNULL(ms.total_mv,0)
-		FROM stock_basic b LEFT JOIN (
-			SELECT snap.symbol,snap.total_mv FROM market_snapshot snap
-			INNER JOIN (SELECT symbol,MAX(snapshot_at) t FROM market_snapshot GROUP BY symbol) x ON x.symbol=snap.symbol AND x.t=snap.snapshot_at
-		) ms ON ms.symbol=b.symbol
-		WHERE b.status='listed' AND b.sec_type='stock' AND b.industry IN (` + placeholders + `)
-		ORDER BY FIELD(b.industry,` + placeholders + `),ms.total_mv DESC`
-	args = append(args, args...)
-	stockRows, err := s.DB.QueryContext(ctx, query, args...)
+	stockRows, err := s.DB.QueryContext(ctx, `
+		SELECT b.symbol,b.code,b.name,sb.sector_code,k.amount
+		FROM stock_basic b
+		INNER JOIN sector_constituent sc ON sc.symbol=b.symbol
+		INNER JOIN sector_basic sb ON sb.sector_code=sc.sector_code
+		INNER JOIN kline_daily k ON k.symbol=b.symbol AND k.trade_date=?
+		WHERE b.status='listed' AND b.sec_type='stock' AND sb.sector_code IN (`+placeholders+`)
+		ORDER BY k.amount DESC,b.symbol ASC,sb.sector_code ASC`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query recommendation leaders: %w", err)
+		return nil, fmt.Errorf("query popular recommendation stocks: %w", err)
 	}
 	defer stockRows.Close()
-	counts := map[string]int{}
-	var candidates []RecommendationCandidate
+
+	// 同一股票可能同时属于多个热门行业/概念，保留人气更高的所属板块。
+	bySymbol := make(map[string]RecommendationCandidate)
+	sectorCodeBySymbol := make(map[string]string)
 	for stockRows.Next() {
 		var candidate RecommendationCandidate
-		if err := stockRows.Scan(&candidate.Symbol, &candidate.Code, &candidate.Name, &candidate.Industry, &candidate.TotalMV); err != nil {
+		var sectorCode string
+		if err := stockRows.Scan(&candidate.Symbol, &candidate.Code, &candidate.Name, &sectorCode, &candidate.Popularity); err != nil {
 			return nil, err
 		}
-		if counts[candidate.Industry] >= 10 {
-			continue
+		sector := sectorByCode[sectorCode]
+		candidate.Industry = sector.Name
+		candidate.SectorType = sector.Type
+		candidate.SectorHeat = sector.Popularity
+		current, exists := bySymbol[candidate.Symbol]
+		if !exists || candidate.SectorHeat > current.SectorHeat ||
+			(candidate.SectorHeat == current.SectorHeat && sectorCode < sectorCodeBySymbol[candidate.Symbol]) {
+			bySymbol[candidate.Symbol] = candidate
+			sectorCodeBySymbol[candidate.Symbol] = sectorCode
 		}
-		counts[candidate.Industry]++
-		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", "", 60)
+	}
+	if err := stockRows.Err(); err != nil {
+		return nil, err
+	}
+
+	pool := make([]RecommendationCandidate, 0, len(bySymbol))
+	for _, candidate := range bySymbol {
+		pool = append(pool, candidate)
+	}
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].Popularity == pool[j].Popularity {
+			return pool[i].Symbol < pool[j].Symbol
+		}
+		return pool[i].Popularity > pool[j].Popularity
+	})
+
+	candidates := make([]RecommendationCandidate, 0, recommendationCandidateLimit)
+	for _, candidate := range pool {
+		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, 60)
 		if err != nil {
 			return nil, err
 		}
-		if len(klines) >= 50 {
-			candidate.Klines = klines
-			candidates = append(candidates, candidate)
+		if len(klines) != 60 {
+			continue
+		}
+		candidate.Klines = klines
+		candidates = append(candidates, candidate)
+		if len(candidates) == recommendationCandidateLimit {
+			break
 		}
 	}
-	return candidates, stockRows.Err()
+	return candidates, nil
 }
 
 func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName string, items []model.StockRecommendation) error {
