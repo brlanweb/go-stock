@@ -130,8 +130,8 @@ let quoteTimer: number | undefined
 
 async function loadWatchState() {
   try {
-    const items = await api.watchlist()
-    watched.value = items.some(item => typeof item === 'string' ? item === props.symbol : item.symbol === props.symbol)
+    const result = await api.watchlist()
+    watched.value = result.symbols.includes(props.symbol)
   } catch { watched.value = false }
 }
 

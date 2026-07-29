@@ -40,17 +40,25 @@ func New(addr, password string, db, ttlSeconds int) *Cache {
 }
 
 func (c *Cache) Get(ctx context.Context, key string) ([]byte, bool) {
-	if c == nil || c.client == nil {
-		return nil, false
-	}
-	value, err := c.client.Get(ctx, key).Bytes()
+	value, err := c.GetStrict(ctx, key)
 	if err == nil {
 		return value, true
 	}
-	if !errors.Is(err, redis.Nil) {
+	if !errors.Is(err, redis.Nil) && !errors.Is(err, ErrUnavailable) {
 		slog.Debug("Redis 读取失败，回退 MySQL", "key", key, "err", err)
 	}
 	return nil, false
+}
+
+// ErrUnavailable 表示 Redis 未配置或客户端不可用。
+var ErrUnavailable = errors.New("Redis 不可用")
+
+// GetStrict 读取缓存并向调用方返回 Redis 错误。
+func (c *Cache) GetStrict(ctx context.Context, key string) ([]byte, error) {
+	if c == nil || c.client == nil {
+		return nil, ErrUnavailable
+	}
+	return c.client.Get(ctx, key).Bytes()
 }
 
 func (c *Cache) Set(ctx context.Context, key string, value []byte) {
@@ -63,16 +71,29 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte) {
 }
 
 func (c *Cache) SetUntil(ctx context.Context, key string, value []byte, expiresAt time.Time) {
+	if err := c.SetUntilStrict(ctx, key, value, expiresAt); err != nil {
+		slog.Debug("Redis 定时缓存写入失败", "key", key, "err", err)
+	}
+}
+
+// SetUntilStrict 原子写入单个缓存值，并向调用方返回 Redis 错误。
+func (c *Cache) SetUntilStrict(ctx context.Context, key string, value []byte, expiresAt time.Time) error {
 	if c == nil || c.client == nil {
-		return
+		return ErrUnavailable
 	}
 	ttl := time.Until(expiresAt)
 	if ttl <= 0 {
-		return
+		return errors.New("缓存过期时间必须晚于当前时间")
 	}
-	if err := c.client.Set(ctx, key, value, ttl).Err(); err != nil {
-		slog.Debug("Redis 定时缓存写入失败", "key", key, "err", err)
+	return c.client.Set(ctx, key, value, ttl).Err()
+}
+
+// DeleteStrict 删除缓存值，并向调用方返回 Redis 错误。
+func (c *Cache) DeleteStrict(ctx context.Context, key string) error {
+	if c == nil || c.client == nil {
+		return ErrUnavailable
 	}
+	return c.client.Del(ctx, key).Err()
 }
 
 func (c *Cache) Close() error {

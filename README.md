@@ -62,6 +62,7 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_PYTHON_COMMAND | python3 | BaoStock/AKShare 历史降级源使用的 Python 解释器 |
 | GOSTOCK_PYTHON_KLINE_SCRIPT | python-provider/fetch_kline.py | 历史K线降级桥接脚本路径 |
 | GOSTOCK_QUOTE_TTL | 3 | 交易时段行情缓存秒数 |
+| GOSTOCK_WATCHLIST_SYNC_SECONDS | 5 | 自选股实时行情后台同步周期；完整批次原子写入 Redis |
 | GOSTOCK_AI_BASE_URL | 空 | OpenAI 兼容 API 基础地址，如 `https://api.openai.com/v1` |
 | GOSTOCK_AI_API_KEY | 空 | 模型 API Key，仅写入本地或服务器 `.env` |
 | GOSTOCK_AI_MODEL | 空 | 模型正式标识，如服务商实际提供的模型 ID |

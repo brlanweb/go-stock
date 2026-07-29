@@ -42,13 +42,25 @@ func (s *Service) ttl() time.Duration {
 	return s.longTTL
 }
 
-// IsTradingHours 判断是否 A股连续竞价时段（工作日 9:15-11:30 / 13:00-15:05，粗粒度，不含节假日精判）。
+var marketLocation = func() *time.Location {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*60*60)
+	}
+	return location
+}()
+
+// MarketLocation 返回 A 股市场时区。
+func MarketLocation() *time.Location { return marketLocation }
+
+// IsTradingHours 判断是否 A 股连续竞价时段（工作日 09:30-11:30 / 13:00-15:00，不含节假日精判）。
 func IsTradingHours(t time.Time) bool {
+	t = t.In(marketLocation)
 	if wd := t.Weekday(); wd == time.Saturday || wd == time.Sunday {
 		return false
 	}
-	hm := t.Hour()*100 + t.Minute()
-	return (hm >= 915 && hm <= 1135) || (hm >= 1300 && hm <= 1505)
+	minute := t.Hour()*60 + t.Minute()
+	return (minute >= 9*60+30 && minute <= 11*60+30) || (minute >= 13*60 && minute <= 15*60)
 }
 
 // Quote 带缓存的单只行情。

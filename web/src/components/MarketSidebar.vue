@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmtPct, type Quote, type Recommendation, type SyncStatus } from '../api'
+import { api, fmtPct, type Quote, type Recommendation, type SyncStatus, type WatchlistResponse } from '../api'
 
 const props = withDefaults(defineProps<{
   market?: string
@@ -31,6 +31,8 @@ const recommendationDate = ref('')
 const recommendationRunning = ref(false)
 const recommendationMessage = ref('')
 const watchlist = ref<Quote[]>([])
+const watchlistStatus = ref<WatchlistResponse['status']>('unavailable')
+const watchlistSymbols = ref<string[]>([])
 const syncStatus = ref<SyncStatus | null>(null)
 const startingBackfill = ref(false)
 const retryingFailed = ref(false)
@@ -39,10 +41,22 @@ let searchTimer: number | undefined
 
 async function loadWatchlist() {
   try {
-    const items = await api.watchlist()
-    watchlist.value = items.filter((item): item is Quote => typeof item !== 'string')
-  } catch { /* ignore */ }
+    const result = await api.watchlist()
+    watchlistStatus.value = result.status
+    watchlistSymbols.value = result.symbols
+    watchlist.value = result.status === 'live' ? result.quotes : []
+  } catch {
+    watchlistStatus.value = 'unavailable'
+    watchlist.value = []
+  }
 }
+
+const watchlistMessage = computed(() => {
+  if (watchlistStatus.value === 'unavailable') return '实时行情暂不可用'
+  if (watchlistStatus.value === 'closed') return '当前为非交易时段'
+  if (watchlistStatus.value === 'empty') return '在详情页加入自选'
+  return watchlist.value.length ? '' : '实时行情暂不可用'
+})
 
 function onWatchlistChanged() {
   loadWatchlist()
@@ -202,7 +216,7 @@ onUnmounted(() => {
       <button v-for="item in recommendations" :key="item.symbol" :title="item.reason" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.sector }}</small></span><em>{{ item.probability.toFixed(0) }}%</em></button>
       <p v-if="!recommendations.length">等待每日 05:00 分析结果</p>
     </section>
-    <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlist.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="!watchlist.length">在详情页加入自选</p></section>
+    <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlistSymbols.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="watchlistMessage">{{ watchlistMessage }}</p></section>
     <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>每日 05:00 生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
   </aside>
 </template>

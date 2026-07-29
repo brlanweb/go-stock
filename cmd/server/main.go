@@ -18,6 +18,7 @@ import (
 	"github.com/hoax/go-stock/internal/mcpserver"
 	"github.com/hoax/go-stock/internal/provider"
 	"github.com/hoax/go-stock/internal/querycache"
+	"github.com/hoax/go-stock/internal/realtime"
 	"github.com/hoax/go-stock/internal/store"
 	gsync "github.com/hoax/go-stock/internal/sync"
 	"github.com/hoax/go-stock/web"
@@ -52,6 +53,8 @@ func main() {
 	engine := gsync.NewEngine(st, mgr, cfg.BackfillWorkers, cfg.BackfillQPS, cfg.SyncSectors, cfg.PythonCommand, cfg.PythonKlineScript)
 	engine.SetBaseContext(rootCtx)
 	engine.StartDailyScheduler(rootCtx)
+	watchlistSyncer := realtime.NewWatchlistSyncer(st, mgr, queryCache, time.Duration(cfg.WatchlistSyncSeconds)*time.Second)
+	watchlistSyncer.Start(rootCtx)
 	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt})
 	analysisService.StartScheduler(rootCtx)
 	if os.Getenv("GOSTOCK_AUTO_BACKFILL") != "false" {
@@ -64,7 +67,7 @@ func main() {
 
 	// 路由
 	mux := http.NewServeMux()
-	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService, Cache: queryCache}
+	apiServer := &api.Server{St: st, Svc: svc, Engine: engine, Analysis: analysisService, Cache: queryCache, Watchlist: watchlistSyncer}
 	apiServer.Register(mux)
 
 	// 可选页面访问密码

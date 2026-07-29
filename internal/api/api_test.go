@@ -1,8 +1,13 @@
 package api
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/hoax/go-stock/internal/realtime"
 )
 
 func TestValidAgentHistoryDays(t *testing.T) {
@@ -15,6 +20,24 @@ func TestValidAgentHistoryDays(t *testing.T) {
 		if validAgentHistoryDays(days) {
 			t.Fatalf("expected %d to be rejected", days)
 		}
+	}
+}
+
+func TestWatchlistUnavailableWithoutRealtimeSyncer(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/watchlist", nil)
+	response := httptest.NewRecorder()
+
+	(&Server{}).handleWatchlistGet(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	var payload realtime.WatchlistResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Status != "unavailable" || len(payload.Symbols) != 0 || len(payload.Quotes) != 0 {
+		t.Fatalf("unexpected response: %#v", payload)
 	}
 }
 

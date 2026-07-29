@@ -33,7 +33,8 @@ type Config struct {
 	PythonCommand     string  // BaoStock/AKShare Python 解释器
 	PythonKlineScript string  // Python 历史K线桥接脚本
 
-	QuoteTTLSeconds int // 实时行情缓存 TTL
+	QuoteTTLSeconds      int // 实时行情缓存 TTL
+	WatchlistSyncSeconds int // 自选股实时行情后台同步周期
 
 	RedisAddr       string // 可选 Redis 查询缓存地址，空表示关闭
 	RedisPassword   string
@@ -60,30 +61,31 @@ func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	c := &Config{
-		Addr:              getEnv("GOSTOCK_ADDR", ":8480"),
-		DBHost:            getEnv("GOSTOCK_DB_HOST", "127.0.0.1"),
-		DBPort:            getEnvInt("GOSTOCK_DB_PORT", 3306),
-		DBName:            getEnv("GOSTOCK_DB_NAME", "stock"),
-		DBUser:            getEnv("GOSTOCK_DB_USER", "stock"),
-		DBPassword:        getEnv("GOSTOCK_DB_PASSWORD", ""),
-		MCPToken:          getEnv("GOSTOCK_MCP_TOKEN", ""),
-		AccessPassword:    getEnv("GOSTOCK_ACCESS_PASSWORD", ""),
-		BackfillWorkers:   getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
-		BackfillQPS:       getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
-		SyncSectors:       getEnvBool("GOSTOCK_SYNC_SECTORS", false),
-		PythonCommand:     getEnv("GOSTOCK_PYTHON_COMMAND", "python3"),
-		PythonKlineScript: getEnv("GOSTOCK_PYTHON_KLINE_SCRIPT", "python-provider/fetch_kline.py"),
-		QuoteTTLSeconds:   getEnvInt("GOSTOCK_QUOTE_TTL", 3),
-		RedisAddr:         getEnv("GOSTOCK_REDIS_ADDR", ""),
-		RedisPassword:     getEnv("GOSTOCK_REDIS_PASSWORD", ""),
-		RedisDB:           getEnvInt("GOSTOCK_REDIS_DB", 0),
-		RedisTTLSeconds:   getEnvInt("GOSTOCK_REDIS_TTL_SECONDS", 60),
-		AIBaseURL:         getEnv("GOSTOCK_AI_BASE_URL", ""),
-		AIAPIKey:          getEnv("GOSTOCK_AI_API_KEY", ""),
-		AIModel:           getEnv("GOSTOCK_AI_MODEL", ""),
-		AIPrompt:          getEnv("GOSTOCK_AI_PROMPT", ""),
-		AIPromptFile:      getEnv("GOSTOCK_AI_PROMPT_FILE", "config/ai_prompt.md"),
-		LogLevel:          getEnv("GOSTOCK_LOG_LEVEL", "info"),
+		Addr:                 getEnv("GOSTOCK_ADDR", ":8480"),
+		DBHost:               getEnv("GOSTOCK_DB_HOST", "127.0.0.1"),
+		DBPort:               getEnvInt("GOSTOCK_DB_PORT", 3306),
+		DBName:               getEnv("GOSTOCK_DB_NAME", "stock"),
+		DBUser:               getEnv("GOSTOCK_DB_USER", "stock"),
+		DBPassword:           getEnv("GOSTOCK_DB_PASSWORD", ""),
+		MCPToken:             getEnv("GOSTOCK_MCP_TOKEN", ""),
+		AccessPassword:       getEnv("GOSTOCK_ACCESS_PASSWORD", ""),
+		BackfillWorkers:      getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
+		BackfillQPS:          getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
+		SyncSectors:          getEnvBool("GOSTOCK_SYNC_SECTORS", false),
+		PythonCommand:        getEnv("GOSTOCK_PYTHON_COMMAND", "python3"),
+		PythonKlineScript:    getEnv("GOSTOCK_PYTHON_KLINE_SCRIPT", "python-provider/fetch_kline.py"),
+		QuoteTTLSeconds:      getEnvInt("GOSTOCK_QUOTE_TTL", 3),
+		WatchlistSyncSeconds: getEnvInt("GOSTOCK_WATCHLIST_SYNC_SECONDS", 5),
+		RedisAddr:            getEnv("GOSTOCK_REDIS_ADDR", ""),
+		RedisPassword:        getEnv("GOSTOCK_REDIS_PASSWORD", ""),
+		RedisDB:              getEnvInt("GOSTOCK_REDIS_DB", 0),
+		RedisTTLSeconds:      getEnvInt("GOSTOCK_REDIS_TTL_SECONDS", 60),
+		AIBaseURL:            getEnv("GOSTOCK_AI_BASE_URL", ""),
+		AIAPIKey:             getEnv("GOSTOCK_AI_API_KEY", ""),
+		AIModel:              getEnv("GOSTOCK_AI_MODEL", ""),
+		AIPrompt:             getEnv("GOSTOCK_AI_PROMPT", ""),
+		AIPromptFile:         getEnv("GOSTOCK_AI_PROMPT_FILE", "config/ai_prompt.md"),
+		LogLevel:             getEnv("GOSTOCK_LOG_LEVEL", "info"),
 	}
 	if c.AIPromptFile != "" {
 		if data, err := os.ReadFile(c.AIPromptFile); err == nil {
@@ -104,6 +106,9 @@ func Load() (*Config, error) {
 	}
 	if c.BackfillQPS <= 0 {
 		c.BackfillQPS = 0.35
+	}
+	if c.WatchlistSyncSeconds < 1 {
+		c.WatchlistSyncSeconds = 5
 	}
 	return c, nil
 }

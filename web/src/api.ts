@@ -33,6 +33,13 @@ export interface Quote {
   asks?: { price: number; volume: number }[]
 }
 
+export interface WatchlistResponse {
+  status: 'live' | 'unavailable' | 'closed' | 'empty'
+  synced_at?: string
+  symbols: string[]
+  quotes: Quote[]
+}
+
 export interface Kline {
   symbol: string
   date: string
@@ -248,7 +255,7 @@ export const api = {
   intraday: (code: string) => req<MinuteKline[]>(`/intraday/${code}`),
   search: (q: string) => req<Security[]>(`/search?q=${encodeURIComponent(q)}`),
   indices: () => req<IndexQuote[]>('/indices'),
-  watchlist: () => req<Quote[] | string[]>('/watchlist'),
+  watchlist: () => req<WatchlistResponse>('/watchlist'),
   recommendations: (date = '') => req<Recommendation[]>(`/recommendations${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   recommendationHistory: (limit = 90) => req<string[]>(`/recommendations/history?limit=${limit}`),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),

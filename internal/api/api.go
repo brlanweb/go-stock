@@ -16,17 +16,19 @@ import (
 	"github.com/hoax/go-stock/internal/model"
 	"github.com/hoax/go-stock/internal/provider"
 	"github.com/hoax/go-stock/internal/querycache"
+	"github.com/hoax/go-stock/internal/realtime"
 	"github.com/hoax/go-stock/internal/store"
 	gsync "github.com/hoax/go-stock/internal/sync"
 )
 
 // Server API 依赖集合。
 type Server struct {
-	St       *store.Store
-	Svc      *provider.Service
-	Engine   *gsync.Engine
-	Analysis *analysis.Service
-	Cache    *querycache.Cache
+	St        *store.Store
+	Svc       *provider.Service
+	Engine    *gsync.Engine
+	Analysis  *analysis.Service
+	Cache     *querycache.Cache
+	Watchlist *realtime.WatchlistSyncer
 }
 
 // Register 注册全部 REST 路由。
@@ -712,27 +714,13 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
+	if s.Watchlist == nil {
+		writeJSON(w, http.StatusOK, realtime.WatchlistResponse{Status: "unavailable", Symbols: []string{}, Quotes: []*model.Quote{}})
+		return
+	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	symbols, err := s.St.WatchlistSymbols(ctx)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	if len(symbols) == 0 {
-		writeJSON(w, 200, []interface{}{})
-		return
-	}
-	quotes, err := s.Svc.BatchQuotes(ctx, symbols)
-	if err != nil {
-		slog.Warn("自选股实时行情获取失败，回退本地快照", "err", err)
-		quotes, err = s.St.LatestQuotes(ctx, symbols)
-	}
-	if err != nil {
-		writeJSON(w, 200, symbols)
-		return
-	}
-	writeJSON(w, 200, quotes)
+	writeJSON(w, http.StatusOK, s.Watchlist.Response(ctx))
 }
 
 func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
