@@ -36,6 +36,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/quotes", s.handleQuotes)
 	mux.HandleFunc("GET /api/v1/kline/{code}", s.handleKline)
 	mux.HandleFunc("GET /api/v1/timeshare/{code}", s.handleTimeshare)
+	mux.HandleFunc("GET /api/v1/intraday/{code}", s.handleIntraday)
 	mux.HandleFunc("GET /api/v1/search", s.handleSearch)
 	mux.HandleFunc("GET /api/v1/indices", s.handleIndices)
 	mux.HandleFunc("GET /api/v1/security/{code}", s.handleSecurity)
@@ -156,12 +157,9 @@ func (s *Server) handleQuotes(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	quotes, err := s.Svc.BatchQuotes(ctx, symbols)
+	quotes, err := s.St.LatestQuotes(ctx, symbols)
 	if err != nil {
-		quotes, err = s.St.LatestQuotes(ctx, symbols)
-	}
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "实时行情和本地快照均不可用")
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, quotes)
@@ -207,6 +205,60 @@ func (s *Server) handleTimeshare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, points)
+}
+
+func (s *Server) handleIntraday(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	now := time.Now().In(shanghaiLocation())
+	key := "intraday:v1:" + now.Format("2006-01-02") + ":" + symbol
+	cached, cachedOK := s.Cache.Get(ctx, key)
+	klines, err := s.Svc.MinuteKlines(ctx, symbol)
+	if err != nil {
+		if cachedOK {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("X-Cache", "STALE")
+			_, _ = w.Write(cached)
+			return
+		}
+		writeErr(w, http.StatusBadGateway, "实时分钟行情获取失败: "+err.Error())
+		return
+	}
+	data, err := json.Marshal(klines)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Cache.SetUntil(ctx, key, data, nextMarketOpen(now))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Cache", "MISS")
+	_, _ = w.Write(data)
+}
+
+func shanghaiLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*3600)
+	}
+	return loc
+}
+
+// nextMarketOpen 用作 Redis 分钟行情的绝对过期时间：当日数据保留到下一工作日 09:00。
+func nextMarketOpen(now time.Time) time.Time {
+	now = now.In(shanghaiLocation())
+	open := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
+	if !now.Before(open) {
+		open = open.AddDate(0, 0, 1)
+	}
+	for open.Weekday() == time.Saturday || open.Weekday() == time.Sunday {
+		open = open.AddDate(0, 0, 1)
+	}
+	return open
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -671,9 +723,12 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, []interface{}{})
 		return
 	}
-	quotes, err := s.St.LatestQuotes(ctx, symbols)
+	quotes, err := s.Svc.BatchQuotes(ctx, symbols)
 	if err != nil {
-		slog.Warn("自选股本地快照查询失败", "err", err)
+		slog.Warn("自选股实时行情获取失败，回退本地快照", "err", err)
+		quotes, err = s.St.LatestQuotes(ctx, symbols)
+	}
+	if err != nil {
 		writeJSON(w, 200, symbols)
 		return
 	}

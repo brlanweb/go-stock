@@ -94,7 +94,8 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/quote/{code}` | 最近一次本地证券快照（600519 / SH600519 / 000001.SZ 均可） |
 | `GET /api/v1/quotes?codes=600519,000001` | 最近一次本地批量快照（≤100只） |
 | `GET /api/v1/kline/{code}?period=day&adjust=qfq&limit=250` | K线（day/week/month，qfq/none） |
-| `GET /api/v1/timeshare/{code}` | 当前未启用分钟级本地快照，返回 `501` |
+| `GET /api/v1/intraday/{code}` | 当日一分钟 OHLCV 蜡烛；仅 Redis 缓存，下一工作日 09:00 过期 |
+| `GET /api/v1/timeshare/{code}` | 当日一分钟分时价格与均价；不写入 MySQL |
 | `GET /api/v1/search?q=茅台` | 仅搜索本地证券基础信息 |
 | `GET /api/v1/indices` | 最近一次本地指数快照 |
 | `GET /api/v1/security/{code}` | 基础信息 |

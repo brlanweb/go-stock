@@ -62,6 +62,19 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte) {
 	}
 }
 
+func (c *Cache) SetUntil(ctx context.Context, key string, value []byte, expiresAt time.Time) {
+	if c == nil || c.client == nil {
+		return
+	}
+	ttl := time.Until(expiresAt)
+	if ttl <= 0 {
+		return
+	}
+	if err := c.client.Set(ctx, key, value, ttl).Err(); err != nil {
+		slog.Debug("Redis 定时缓存写入失败", "key", key, "err", err)
+	}
+}
+
 func (c *Cache) Close() error {
 	if c == nil || c.client == nil {
 		return nil

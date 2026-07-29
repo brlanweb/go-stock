@@ -121,6 +121,35 @@ func parseF(s string) float64 {
 	return f
 }
 
+// MinuteKlines 拉取当日一分钟 OHLCV 蜡烛。该数据只供实时图表使用，不持久化。
+func (e *Eastmoney) MinuteKlines(ctx context.Context, symbol string) ([]model.MinuteKline, error) {
+	if err := e.gate.Wait(ctx); err != nil {
+		return nil, err
+	}
+	secid := model.SecIDForEastmoney(symbol)
+	url := fmt.Sprintf("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s&klt=1&fqt=0&beg=0&end=20500101&lmt=240&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57", secid)
+	body, err := httpGet(ctx, url, map[string]string{"Referer": "https://quote.eastmoney.com/"})
+	if err != nil {
+		return nil, fmt.Errorf("eastmoney minute kline: %w", err)
+	}
+	var resp emKlineResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("eastmoney minute kline 解析失败: %w", err)
+	}
+	out := make([]model.MinuteKline, 0, len(resp.Data.Klines))
+	for _, line := range resp.Data.Klines {
+		parts := strings.Split(line, ",")
+		if len(parts) < 7 {
+			continue
+		}
+		out = append(out, model.MinuteKline{
+			Symbol: symbol, Time: parts[0], Open: parseF(parts[1]), Close: parseF(parts[2]),
+			High: parseF(parts[3]), Low: parseF(parts[4]), Volume: int64(parseF(parts[5])) * 100, Amount: parseF(parts[6]),
+		})
+	}
+	return out, nil
+}
+
 // ---------- 分时 ----------
 
 type emTrendsResp struct {

@@ -64,7 +64,7 @@ const props = defineProps<{ symbol: string }>()
 const router = useRouter()
 const quote = ref<Quote | null>(null)
 const detail = ref<StockDetailPayload | null>(null)
-const tab = ref<'day' | 'week' | 'month'>('day')
+const tab = ref<'minute' | 'day' | 'week' | 'month'>('minute')
 const errMsg = ref('')
 const syncMsg = ref('')
 const syncing = ref(false)
@@ -130,10 +130,19 @@ function openSector(code: string) {
   router.push(`/sector/${encodeURIComponent(code)}`)
 }
 
-async function drawKline(period: 'day' | 'week' | 'month') {
+async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
+  if (!klChart) return
+  if (period === 'minute') {
+    const klines = await api.intraday(props.symbol)
+    klChart.applyNewData(klines.map(k => ({
+      timestamp: new Date(`${k.time.replace(' ', 'T')}:00+08:00`).getTime(),
+      open: k.open, high: k.high, low: k.low, close: k.close,
+      volume: k.volume, turnover: k.amount
+    })))
+    return
+  }
   const klines = await api.kline(props.symbol, period, 'qfq', 700)
   currentKlines = klines
-  if (!klChart) return
   klChart.applyNewData(klines.map(k => ({
     timestamp: new Date(k.date).getTime(),
     open: k.open, high: k.high, low: k.low, close: k.close,
@@ -179,7 +188,7 @@ async function runBacktest() {
   } finally { backtesting.value = false }
 }
 
-async function switchTab(t: 'day' | 'week' | 'month') {
+async function switchTab(t: 'minute' | 'day' | 'week' | 'month') {
   tab.value = t
   await nextTickDraw()
 }
@@ -250,7 +259,9 @@ watch(() => props.symbol, () => {
 onMounted(async () => {
   refreshQuote()
   quoteTimer = window.setInterval(() => {
-    if (document.visibilityState === "visible") refreshQuote()
+    if (document.visibilityState !== 'visible') return
+    refreshQuote()
+    if (tab.value === 'minute') drawKline('minute').catch(() => undefined)
   }, 5000)
   loadDetail()
   loadWatchState()
@@ -335,6 +346,7 @@ onUnmounted(() => {
     <div class="panel">
       <div class="chart-toolbar">
         <div style="display:flex;gap:8px">
+          <button :class="{ ghost: tab !== 'minute' }" @click="switchTab('minute')">实时</button>
           <button :class="{ ghost: tab !== 'day' }" @click="switchTab('day')">日K</button>
           <button :class="{ ghost: tab !== 'week' }" @click="switchTab('week')">周K</button>
           <button :class="{ ghost: tab !== 'month' }" @click="switchTab('month')">月K</button>

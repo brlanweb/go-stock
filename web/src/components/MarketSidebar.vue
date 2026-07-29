@@ -32,6 +32,7 @@ const recommendationRunning = ref(false)
 const recommendationMessage = ref('')
 const watchlist = ref<Quote[]>([])
 const syncStatus = ref<SyncStatus | null>(null)
+const startingBackfill = ref(false)
 const retryingFailed = ref(false)
 const retryMessage = ref('')
 let searchTimer: number | undefined
@@ -47,6 +48,7 @@ function onWatchlistChanged() {
   loadWatchlist()
 }
 let syncTimer: number | undefined
+let watchTimer: number | undefined
 
 const syncProgress = computed(() => {
   const backfill = syncStatus.value?.backfill
@@ -113,6 +115,20 @@ async function runRecommendations() {
   }
 }
 
+async function startBackfill() {
+  startingBackfill.value = true
+  retryMessage.value = ''
+  try {
+    await api.startBackfill()
+    retryMessage.value = '历史同步已继续'
+    await loadSyncStatus()
+  } catch (e: any) {
+    retryMessage.value = e?.message || '继续同步失败'
+  } finally {
+    startingBackfill.value = false
+  }
+}
+
 async function retryFailedBackfill() {
   retryingFailed.value = true
   retryMessage.value = ''
@@ -142,12 +158,16 @@ onMounted(async () => {
   await loadRecommendations(recommendationDate.value)
   if (syncResult.status === 'fulfilled') syncStatus.value = syncResult.value
   syncTimer = window.setInterval(loadSyncStatus, 5000)
+  watchTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') loadWatchlist()
+  }, 5000)
   window.addEventListener('gostock:watchlist-changed', onWatchlistChanged)
 })
 
 onUnmounted(() => {
   window.clearTimeout(searchTimer)
   window.clearInterval(syncTimer)
+  window.clearInterval(watchTimer)
   window.removeEventListener('gostock:watchlist-changed', onWatchlistChanged)
 })
 </script>
@@ -166,11 +186,12 @@ onUnmounted(() => {
     </div>
     <div v-if="securityCount" class="side-stats"><span>证券数量</span><strong>{{ securityCount }}</strong></div>
     <div v-if="syncStatus" class="coverage-status" :class="{ active: syncStatus.backfill_running }">
-      <div class="coverage-title"><span>历史数据同步</span><strong>{{ syncStatus.backfill_running ? '进行中' : '已停止' }}</strong></div>
+      <div class="coverage-title"><span>历史数据同步</span><strong>{{ syncStatus.backfill_running ? '进行中' : syncStatus.backfill.pending > 0 ? '已暂停' : '已停止' }}</strong></div>
       <div class="coverage-progress"><i :style="{ width: `${syncProgress}%` }"></i></div>
       <span>完整 {{ syncStatus.backfill.complete }}/{{ syncStatus.backfill.total }} · {{ syncProgress.toFixed(1) }}%</span>
       <small>待处理 {{ syncStatus.backfill.pending }} · 处理中 {{ syncStatus.backfill.running }} · 失败 {{ syncStatus.backfill.failed }}</small>
       <small>部分 {{ syncStatus.backfill.partial }} · 空 {{ syncStatus.backfill.empty }}<template v-if="syncStatus.backfill.latest_date"> · 截至 {{ syncStatus.backfill.latest_date }}</template></small>
+      <button v-if="syncStatus.backfill.pending > 0 && !syncStatus.backfill_running" class="retry-failed" :disabled="startingBackfill" @click="startBackfill">{{ startingBackfill ? '启动中' : '继续同步' }}</button>
       <button v-if="syncStatus.backfill.failed > 0 && !syncStatus.backfill_running" class="retry-failed" :disabled="retryingFailed" @click="retryFailedBackfill">{{ retryingFailed ? '重排中' : '重试失败项' }}</button>
       <small v-if="retryMessage" class="retry-message">{{ retryMessage }}</small>
     </div>
@@ -182,7 +203,7 @@ onUnmounted(() => {
       <p v-if="!recommendations.length">等待每日 05:00 分析结果</p>
     </section>
     <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlist.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="!watchlist.length">在详情页加入自选</p></section>
-    <div class="side-help"><strong>数据说明</strong><span>页面查询来自本地 MySQL</span><span>每日 05:00 生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
+    <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>每日 05:00 生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
   </aside>
 </template>
 

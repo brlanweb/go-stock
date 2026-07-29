@@ -106,6 +106,15 @@ func (s *Service) Indices(ctx context.Context) ([]model.IndexQuote, error) {
 	return idx, nil
 }
 
+// MinuteKlines 获取当日一分钟蜡烛。持久缓存由 API 层 Redis 负责，此处不写内存缓存。
+func (s *Service) MinuteKlines(ctx context.Context, input string) ([]model.MinuteKline, error) {
+	symbol := model.NormalizeSymbol(input)
+	if symbol == "" {
+		return nil, fmt.Errorf("无法识别的代码: %s", input)
+	}
+	return s.mgr.Eastmoney().MinuteKlines(ctx, symbol)
+}
+
 // Timeshare 带缓存的分时（TTL 同行情）。
 func (s *Service) Timeshare(ctx context.Context, input string) ([]model.TimesharePoint, error) {
 	symbol := model.NormalizeSymbol(input)

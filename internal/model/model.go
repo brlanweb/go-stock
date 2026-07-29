@@ -93,6 +93,18 @@ type PriceLevel struct {
 	Volume int64   `json:"volume"` // 股
 }
 
+// MinuteKline 是当日分钟蜡烛，仅用于 Redis 临时缓存，不写入 MySQL。
+type MinuteKline struct {
+	Symbol string  `json:"symbol"`
+	Time   string  `json:"time"` // YYYY-MM-DD HH:mm
+	Open   float64 `json:"open"`
+	High   float64 `json:"high"`
+	Low    float64 `json:"low"`
+	Close  float64 `json:"close"`
+	Volume int64   `json:"volume"` // 股
+	Amount float64 `json:"amount"` // 元
+}
+
 // Kline 日K线（kline_daily 表，存不复权原始价 + 当日复权因子）。
 type Kline struct {
 	Symbol       string  `json:"symbol"`
