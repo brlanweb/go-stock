@@ -18,8 +18,9 @@ const filtered = computed(() => items.value.filter(item => {
     (capability.value === 'all' || item.capability === capability.value)
 }))
 
-function capabilityText(value: string) {
-  return value === 'executable' ? '可回测' : value === 'experimental' ? '实验性' : '需要额外数据'
+function capabilityText(item: IndicatorDefinition) {
+  if (item.capability === 'executable') return item.kind === 'strategy' ? '可回测' : '可计算'
+  return item.capability === 'experimental' ? '实验性' : '需要额外数据'
 }
 
 async function load() { items.value = await api.indicators() }
@@ -56,13 +57,13 @@ onMounted(load)
       <div class="filters">
         <input v-model="keyword" placeholder="搜索指标、策略或说明" />
         <select v-model="kind"><option value="all">全部类型</option><option value="indicator">技术指标</option><option value="strategy">交易策略</option></select>
-        <select v-model="capability"><option value="all">全部能力</option><option value="executable">可回测</option><option value="experimental">实验性</option><option value="context_required">需要额外数据</option></select>
+        <select v-model="capability"><option value="all">全部能力</option><option value="executable">可计算 / 可回测</option><option value="experimental">实验性</option><option value="context_required">需要额外数据</option></select>
       </div>
       <div class="indicator-grid">
         <article v-for="item in filtered" :key="item.id" class="indicator-card" :class="{ disabled: !item.enabled }">
           <header><div><strong>{{ item.display_name }}</strong><code>{{ item.id }}</code></div><button class="icon-toggle" :title="item.enabled ? '停用' : '启用'" @click="toggle(item)">{{ item.enabled ? '✓' : '○' }}</button></header>
           <p>{{ item.description }}</p>
-          <footer><span>{{ item.kind === 'strategy' ? '策略' : '指标' }}</span><span :class="`cap-${item.capability}`">{{ capabilityText(item.capability) }}</span><span>{{ item.source }}</span><button @click="edit(item)">参数</button></footer>
+          <footer><span>{{ item.kind === 'strategy' ? '策略' : '指标' }}</span><span :class="`cap-${item.capability}`">{{ capabilityText(item) }}</span><span>{{ item.source }}</span><button @click="edit(item)">参数</button></footer>
         </article>
       </div>
     </main>
@@ -70,7 +71,7 @@ onMounted(load)
       <header><div><strong>{{ selected.display_name }}</strong><small>{{ selected.id }}</small></div><button title="关闭" @click="selected=null">×</button></header>
       <label><span>状态</span><input v-model="selected.enabled" type="checkbox" /></label>
       <label class="params"><span>参数 JSON</span><textarea v-model="paramsText" spellcheck="false"></textarea></label>
-      <p>{{ selected.description }}</p><small>来源：{{ selected.source }} · {{ capabilityText(selected.capability) }}</small>
+      <p>{{ selected.description }}</p><small>来源：{{ selected.source }} · {{ capabilityText(selected) }}</small>
       <div class="actions"><button class="ghost" @click="reset">恢复默认</button><button @click="save">保存</button></div>
       <em v-if="message">{{ message }}</em>
     </aside>

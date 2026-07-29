@@ -151,6 +151,100 @@ func strategySignals(id string, params map[string]any, k []model.Kline) ([]rawSi
 				add(i, "sell", "跌破MA20，多头结构失效")
 			}
 		}
+	case "ema_cross":
+		fast, slow := intParam(params, "fast", 12), intParam(params, "slow", 26)
+		f, s := ema(closes, fast), ema(closes, slow)
+		for i := slow; i < len(k); i++ {
+			if crossedUp(f, s, i) {
+				add(i, "buy", fmt.Sprintf("EMA%d 上穿 EMA%d", fast, slow))
+			} else if crossedDown(f, s, i) {
+				add(i, "sell", fmt.Sprintf("EMA%d 下穿 EMA%d", fast, slow))
+			}
+		}
+	case "macd_cross":
+		fast, slow, signalPeriod := intParam(params, "fast", 12), intParam(params, "slow", 26), intParam(params, "signal", 9)
+		fastEMA, slowEMA := ema(closes, fast), ema(closes, slow)
+		dif := make([]float64, len(k))
+		for i := range dif {
+			dif[i] = fastEMA[i] - slowEMA[i]
+		}
+		dea := ema(dif, signalPeriod)
+		for i := slow; i < len(k); i++ {
+			if crossedUp(dif, dea, i) {
+				add(i, "buy", "MACD DIF 上穿 DEA")
+			} else if crossedDown(dif, dea, i) {
+				add(i, "sell", "MACD DIF 下穿 DEA")
+			}
+		}
+	case "rsi_reversal":
+		period := intParam(params, "period", 14)
+		oversold, overbought := floatParam(params, "oversold", 30), floatParam(params, "overbought", 70)
+		values := rsi(closes, period)
+		for i := period + 1; i < len(k); i++ {
+			if values[i-1] <= oversold && values[i] > oversold {
+				add(i, "buy", fmt.Sprintf("RSI%d 从超卖区回升", period))
+			} else if values[i-1] >= overbought && values[i] < overbought {
+				add(i, "sell", fmt.Sprintf("RSI%d 从超买区回落", period))
+			}
+		}
+	case "boll_mean_reversion", "boll_breakout":
+		period := intParam(params, "period", 20)
+		multiplier := floatParam(params, "multiplier", 2)
+		middle, upper, lower := bollinger(closes, period, multiplier)
+		for i := period; i < len(k); i++ {
+			if id == "boll_mean_reversion" {
+				if closes[i-1] <= lower[i-1] && closes[i] > lower[i] {
+					add(i, "buy", "价格重新站回 BOLL 下轨")
+				} else if closes[i] >= middle[i] {
+					add(i, "sell", "价格回归 BOLL 中轨")
+				}
+			} else {
+				if closes[i-1] <= upper[i-1] && closes[i] > upper[i] {
+					add(i, "buy", "价格突破 BOLL 上轨")
+				} else if closes[i] < middle[i] {
+					add(i, "sell", "价格跌破 BOLL 中轨")
+				}
+			}
+		}
+	case "donchian_breakout":
+		entryPeriod, exitPeriod := intParam(params, "entry_period", 20), intParam(params, "exit_period", 10)
+		for i := maxInt(entryPeriod, exitPeriod); i < len(k); i++ {
+			entryHigh := rangeHigh(k, i-entryPeriod, i)
+			exitLow := rangeLow(k, i-exitPeriod, i)
+			if k[i].Close > entryHigh {
+				add(i, "buy", fmt.Sprintf("收盘突破前%d日 Donchian 上轨", entryPeriod))
+			} else if k[i].Close < exitLow {
+				add(i, "sell", fmt.Sprintf("收盘跌破前%d日 Donchian 下轨", exitPeriod))
+			}
+		}
+	case "kdj_reversal":
+		period := intParam(params, "period", 9)
+		oversold, overbought := floatParam(params, "oversold", 30), floatParam(params, "overbought", 70)
+		kv, dv := kdj(k, period)
+		for i := period; i < len(k); i++ {
+			if crossedUp(kv, dv, i) && kv[i] <= oversold {
+				add(i, "buy", "KDJ 超卖区金叉")
+			} else if crossedDown(kv, dv, i) && kv[i] >= overbought {
+				add(i, "sell", "KDJ 超买区死叉")
+			}
+		}
+	case "roc_momentum":
+		period := intParam(params, "period", 12)
+		threshold := numberParam(params, "threshold", 0)
+		roc := make([]float64, len(k))
+		for i := range roc {
+			roc[i] = math.NaN()
+			if i >= period && closes[i-period] != 0 {
+				roc[i] = (closes[i]/closes[i-period] - 1) * 100
+			}
+		}
+		for i := period + 1; i < len(k); i++ {
+			if roc[i-1] <= threshold && roc[i] > threshold {
+				add(i, "buy", fmt.Sprintf("ROC%d 上穿 %.2f", period, threshold))
+			} else if roc[i-1] >= threshold && roc[i] < threshold {
+				add(i, "sell", fmt.Sprintf("ROC%d 下穿 %.2f", period, threshold))
+			}
+		}
 	default:
 		return nil, fmt.Errorf("该指标当前不支持纯K线确定性回测")
 	}
@@ -245,6 +339,119 @@ func sma(v []float64, period int) []float64 {
 	}
 	return out
 }
+func ema(v []float64, period int) []float64 {
+	out := make([]float64, len(v))
+	if len(v) == 0 {
+		return out
+	}
+	alpha := 2 / float64(period+1)
+	out[0] = v[0]
+	for i := 1; i < len(v); i++ {
+		out[i] = alpha*v[i] + (1-alpha)*out[i-1]
+	}
+	return out
+}
+func rsi(v []float64, period int) []float64 {
+	out := make([]float64, len(v))
+	for i := range out {
+		out[i] = math.NaN()
+	}
+	if len(v) <= period {
+		return out
+	}
+	var gain, loss float64
+	for i := 1; i <= period; i++ {
+		delta := v[i] - v[i-1]
+		if delta >= 0 {
+			gain += delta
+		} else {
+			loss -= delta
+		}
+	}
+	gain /= float64(period)
+	loss /= float64(period)
+	out[period] = rsiValue(gain, loss)
+	for i := period + 1; i < len(v); i++ {
+		delta, up, down := v[i]-v[i-1], 0.0, 0.0
+		if delta >= 0 {
+			up = delta
+		} else {
+			down = -delta
+		}
+		gain = (gain*float64(period-1) + up) / float64(period)
+		loss = (loss*float64(period-1) + down) / float64(period)
+		out[i] = rsiValue(gain, loss)
+	}
+	return out
+}
+func rsiValue(gain, loss float64) float64 {
+	if loss == 0 {
+		if gain == 0 {
+			return 50
+		}
+		return 100
+	}
+	return 100 - 100/(1+gain/loss)
+}
+func bollinger(v []float64, period int, multiplier float64) ([]float64, []float64, []float64) {
+	middle := sma(v, period)
+	upper, lower := make([]float64, len(v)), make([]float64, len(v))
+	for i := range v {
+		upper[i], lower[i] = math.NaN(), math.NaN()
+		if i+1 < period {
+			continue
+		}
+		var variance float64
+		for j := i - period + 1; j <= i; j++ {
+			delta := v[j] - middle[i]
+			variance += delta * delta
+		}
+		stddev := math.Sqrt(variance / float64(period))
+		upper[i], lower[i] = middle[i]+multiplier*stddev, middle[i]-multiplier*stddev
+	}
+	return middle, upper, lower
+}
+func kdj(k []model.Kline, period int) ([]float64, []float64) {
+	kv, dv := make([]float64, len(k)), make([]float64, len(k))
+	for i := range k {
+		kv[i], dv[i] = 50, 50
+		if i+1 < period {
+			continue
+		}
+		lo, hi := rangeLow(k, i-period+1, i+1), rangeHigh(k, i-period+1, i+1)
+		rsv := 50.0
+		if hi > lo {
+			rsv = (k[i].Close - lo) / (hi - lo) * 100
+		}
+		kv[i] = kv[i-1]*2/3 + rsv/3
+		dv[i] = dv[i-1]*2/3 + kv[i]/3
+	}
+	return kv, dv
+}
+func rangeHigh(k []model.Kline, from, to int) float64 {
+	hi := k[from].High
+	for i := from + 1; i < to; i++ {
+		if k[i].High > hi {
+			hi = k[i].High
+		}
+	}
+	return hi
+}
+func rangeLow(k []model.Kline, from, to int) float64 {
+	lo := k[from].Low
+	for i := from + 1; i < to; i++ {
+		if k[i].Low < lo {
+			lo = k[i].Low
+		}
+	}
+	return lo
+}
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
 func crossedUp(a, b []float64, i int) bool {
 	return i > 0 && !math.IsNaN(a[i]) && !math.IsNaN(b[i]) && a[i-1] <= b[i-1] && a[i] > b[i]
 }
@@ -257,6 +464,15 @@ func intParam(p map[string]any, key string, d int) int {
 	}
 	if v, ok := p[key].(int); ok && v > 0 {
 		return v
+	}
+	return d
+}
+func numberParam(p map[string]any, key string, d float64) float64 {
+	if v, ok := p[key].(float64); ok && !math.IsNaN(v) && !math.IsInf(v, 0) {
+		return v
+	}
+	if v, ok := p[key].(int); ok {
+		return float64(v)
 	}
 	return d
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { init, dispose, registerIndicator, registerOverlay, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
+import { init, dispose, registerIndicator, registerOverlay, CandleType, IndicatorSeries, LineType, type Chart, type KLineData } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload, type IndicatorDefinition, type BacktestResult } from '../api'
 import AgentPanel from '../components/AgentPanel.vue'
 
@@ -9,7 +9,42 @@ import AgentPanel from '../components/AgentPanel.vue'
 const VEGAS_PERIODS = [144, 169, 576, 676]
 const VEGAS_COLORS = ['#e6a23c', '#f2c96b', '#409eff', '#7cc0ff']
 let vegasRegistered = false
+let backgroundVolumeRegistered = false
 let tradeOverlayRegistered = false
+
+function registerBackgroundVolume() {
+  if (backgroundVolumeRegistered) return
+  registerIndicator({
+    name: 'BACKGROUND_VOL',
+    shortName: '',
+    series: IndicatorSeries.Volume,
+    zLevel: -1,
+    figures: [],
+    calc: (dataList: KLineData[]) => dataList.map(k => ({ volume: k.volume || 0 })),
+    draw: ({ ctx, kLineDataList, visibleRange, bounding, barSpace, xAxis }) => {
+      const from = Math.max(0, visibleRange.from)
+      const to = Math.min(kLineDataList.length - 1, visibleRange.to)
+      let maxVolume = 0
+      for (let i = from; i <= to; i++) maxVolume = Math.max(maxVolume, kLineDataList[i]?.volume || 0)
+      if (maxVolume <= 0) return true
+
+      const areaHeight = bounding.height * 0.2
+      const bottom = bounding.height
+      const width = Math.max(1, Math.min(barSpace.bar * 0.72, 9))
+      ctx.save()
+      for (let i = from; i <= to; i++) {
+        const item = kLineDataList[i]
+        if (!item?.volume) continue
+        const height = Math.max(1, item.volume / maxVolume * areaHeight)
+        ctx.fillStyle = item.close >= item.open ? 'rgba(189,46,53,.13)' : 'rgba(17,24,32,.11)'
+        ctx.fillRect(xAxis.convertToPixel(i) - width / 2, bottom - height, width, height)
+      }
+      ctx.restore()
+      return true
+    }
+  })
+  backgroundVolumeRegistered = true
+}
 
 function registerTradeOverlay() {
   if (tradeOverlayRegistered) return
@@ -196,10 +231,11 @@ async function switchTab(t: 'minute' | 'day' | 'week' | 'month') {
 async function nextTickDraw() {
   await new Promise(r => setTimeout(r))
   if (!klChart) {
+    registerBackgroundVolume()
     registerVegas()
     registerTradeOverlay()
     klChart = init('kl-chart', { styles: chartStyles })
-    klChart?.createIndicator('VOL')
+    klChart?.createIndicator('BACKGROUND_VOL', true, { id: 'candle_pane' })
     klChart?.createIndicator({ name: 'RSI', calcParams: [14] }, false, { height: 100 })
     klChart?.createIndicator({ name: 'EMA', calcParams: [12] }, true, { id: 'candle_pane' })
     klChart?.createIndicator('VEGAS', true, { id: 'candle_pane' })

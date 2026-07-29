@@ -66,6 +66,14 @@ func Catalog() []Definition {
 		{ID: "one_yang_three_yin", DisplayName: "一阳夹三阴", Description: "五日整理后突破形态。", Category: "pattern", Capability: Executable},
 		{ID: "shrink_pullback", DisplayName: "缩量回踩", Description: "多头趋势中缩量回踩均线。", Category: "trend", Capability: Executable, DefaultParams: params("volume_ratio", 0.7)},
 		{ID: "volume_breakout", DisplayName: "放量突破", Description: "放量突破近期阻力位。", Category: "trend", Capability: Executable, DefaultParams: params("period", 20, "volume_period", 5, "volume_ratio", 2.0)},
+		{ID: "ema_cross", DisplayName: "EMA 趋势交叉", Description: "快速 EMA 上穿慢速 EMA 买入，下穿卖出。", Category: "trend", Capability: Executable, DefaultParams: params("fast", 12, "slow", 26)},
+		{ID: "macd_cross", DisplayName: "MACD 趋势交叉", Description: "DIF 与 DEA 金叉买入、死叉卖出。", Category: "momentum", Capability: Executable, DefaultParams: params("fast", 12, "slow", 26, "signal", 9)},
+		{ID: "rsi_reversal", DisplayName: "RSI 超卖反转", Description: "RSI 从超卖区回升买入，从超买区回落卖出。", Category: "reversal", Capability: Executable, DefaultParams: params("period", 14, "oversold", 30.0, "overbought", 70.0)},
+		{ID: "boll_mean_reversion", DisplayName: "BOLL 均值回归", Description: "价格跌出下轨后重新站回时买入，回归中轨卖出。", Category: "reversal", Capability: Executable, DefaultParams: params("period", 20, "multiplier", 2.0)},
+		{ID: "boll_breakout", DisplayName: "BOLL 突破", Description: "价格向上突破布林上轨买入，跌破中轨卖出。", Category: "trend", Capability: Executable, DefaultParams: params("period", 20, "multiplier", 2.0)},
+		{ID: "donchian_breakout", DisplayName: "Donchian 突破", Description: "突破前期通道高点买入，跌破通道低点卖出。", Category: "trend", Capability: Executable, DefaultParams: params("entry_period", 20, "exit_period", 10)},
+		{ID: "kdj_reversal", DisplayName: "KDJ 超卖金叉", Description: "低位 K 线上穿 D 线买入，高位死叉卖出。", Category: "reversal", Capability: Executable, DefaultParams: params("period", 9, "oversold", 30.0, "overbought", 70.0)},
+		{ID: "roc_momentum", DisplayName: "ROC 动量", Description: "价格变化率上穿阈值买入，下穿阈值卖出。", Category: "momentum", Capability: Executable, DefaultParams: params("period", 12, "threshold", 0.0)},
 		{ID: "wave_theory", DisplayName: "波浪理论", Description: "推动浪与调整浪结构。", Category: "framework", Capability: Experimental},
 	}
 	for i := range traditional {
