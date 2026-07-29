@@ -125,6 +125,7 @@ const quoteTime = computed(() => {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour12: false })
 })
 let klChart: Chart | null = null
+let chartRequestVersion = 0
 let quoteTimer: number | undefined
 
 async function loadWatchState() {
@@ -167,8 +168,11 @@ function openSector(code: string) {
 
 async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
   if (!klChart) return
+  const requestVersion = ++chartRequestVersion
+  const symbol = props.symbol
   if (period === 'minute') {
-    const klines = await api.intraday(props.symbol)
+    const klines = await api.intraday(symbol)
+    if (requestVersion !== chartRequestVersion || period !== tab.value || symbol !== props.symbol || !klChart) return
     klChart.applyNewData(klines.map(k => ({
       timestamp: new Date(`${k.time.replace(' ', 'T')}:00+08:00`).getTime(),
       open: k.open, high: k.high, low: k.low, close: k.close,
@@ -176,7 +180,8 @@ async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
     })))
     return
   }
-  const klines = await api.kline(props.symbol, period, 'qfq', 700)
+  const klines = await api.kline(symbol, period, 'qfq', 700)
+  if (requestVersion !== chartRequestVersion || period !== tab.value || symbol !== props.symbol || !klChart) return
   currentKlines = klines
   klChart.applyNewData(klines.map(k => ({
     timestamp: new Date(k.date).getTime(),
@@ -211,7 +216,10 @@ function clearBacktestResult() {
 }
 
 async function runBacktest() {
-  if (tab.value !== 'day') tab.value = 'day'
+  if (tab.value !== 'day') {
+    tab.value = 'day'
+    chartRequestVersion++
+  }
   backtesting.value = true
   backtestError.value = ''
   try {
@@ -225,6 +233,7 @@ async function runBacktest() {
 
 async function switchTab(t: 'minute' | 'day' | 'week' | 'month') {
   tab.value = t
+  chartRequestVersion++
   await nextTickDraw()
 }
 
@@ -285,6 +294,7 @@ const chartStyles = {
 } as any
 
 watch(() => props.symbol, () => {
+  chartRequestVersion++
   backtestResult.value = null
   backtestError.value = ''
   klChart?.removeOverlay({ groupId: 'backtest-signals' })
@@ -308,6 +318,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  chartRequestVersion++
   if (quoteTimer) window.clearInterval(quoteTimer)
   if (klChart) { dispose('kl-chart'); klChart = null }
 })
