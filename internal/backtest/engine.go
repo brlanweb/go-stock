@@ -24,7 +24,7 @@ type rawSignal struct {
 
 func Run(req Request, klines []model.Kline) (*Result, error) {
 	if req.InitialCash <= 0 {
-		req.InitialCash = 100000
+		req.InitialCash = 1000000
 	}
 	if req.Period == "" {
 		req.Period = "day"

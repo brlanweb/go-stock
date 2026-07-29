@@ -224,7 +224,7 @@ async function runBacktest() {
   backtestError.value = ''
   try {
     const definition = selectedDefinition.value
-    backtestResult.value = await api.backtest({ symbol: props.symbol, indicator_id: selectedStrategy.value, period: 'day', initial_cash: 100000, params: definition?.current_params })
+    backtestResult.value = await api.backtest({ symbol: props.symbol, indicator_id: selectedStrategy.value, period: 'day', initial_cash: 1000000, params: definition?.current_params })
     await drawKline('day')
   } catch (e: any) {
     backtestError.value = e.message || '回测失败'

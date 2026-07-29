@@ -33,6 +33,27 @@ func TestRunMAGoldenCrossUsesNextBar(t *testing.T) {
 	}
 }
 
+func TestRunDefaultCapitalSupportsHighPricedAshareLot(t *testing.T) {
+	klines := make([]model.Kline, 40)
+	for i := range klines {
+		price := 1500.0
+		if i >= 25 {
+			price += float64(i-24) * 30
+		}
+		klines[i] = model.Kline{Symbol: "SH600519", Date: dateAt(i), Open: price, High: price * 1.01, Low: price * 0.99, Close: price, Volume: 100000, AdjFactor: 1}
+	}
+	result, err := Run(Request{Symbol: "SH600519", IndicatorID: "ma_golden_cross", Period: "day", Params: map[string]any{"fast": 5.0, "slow": 10.0}}, klines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.InitialCash != 1000000 {
+		t.Fatalf("default initial cash = %.0f, want 1000000", result.InitialCash)
+	}
+	if result.TradeCount == 0 {
+		t.Fatal("default capital should support at least one 100-share lot")
+	}
+}
+
 func TestExecutableCatalogStrategiesAreImplemented(t *testing.T) {
 	klines := oscillatingKlines(180)
 	for _, definition := range indicator.Catalog() {
