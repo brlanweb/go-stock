@@ -83,7 +83,14 @@ const selectedDefinition = computed(() => indicators.value.find(item => item.id 
 const VISIBLE_CONCEPT_COUNT = 5
 const visibleConcepts = computed(() => detail.value?.concepts.slice(0, VISIBLE_CONCEPT_COUNT) || [])
 const hiddenConcepts = computed(() => detail.value?.concepts.slice(VISIBLE_CONCEPT_COUNT) || [])
+const quoteTime = computed(() => {
+  const value = quote.value?.provider_timestamp || quote.value?.fetched_at
+  if (!value) return ""
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour12: false })
+})
 let klChart: Chart | null = null
+let quoteTimer: number | undefined
 
 async function loadWatchState() {
   try {
@@ -242,6 +249,9 @@ watch(() => props.symbol, () => {
 
 onMounted(async () => {
   refreshQuote()
+  quoteTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") refreshQuote()
+  }, 5000)
   loadDetail()
   loadWatchState()
   await loadIndicators()
@@ -249,6 +259,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (quoteTimer) window.clearInterval(quoteTimer)
   if (klChart) { dispose('kl-chart'); klChart = null }
 })
 </script>
@@ -262,7 +273,7 @@ onUnmounted(() => {
     <!-- 报价头 -->
     <div class="panel quote-panel" v-if="quote">
       <div class="quote-header">
-        <h2 class="stock-title">{{ quote.name }} <span class="dim code">{{ quote.symbol }}</span></h2>
+        <h2 class="stock-title">{{ quote.name }} <span class="dim code">{{ quote.symbol }}</span><small v-if="quoteTime" class="quote-time">{{ quoteTime }} · {{ quote.source }}</small></h2>
         <button class="watch-button" :class="{ active: watched }" @click="toggleWatch">{{ watched ? '已加入自选' : '加入自选' }}</button>
         <span class="price-now" :class="pctClass(quote.change_pct)">{{ fmt(quote.price) }}</span>
         <span class="price-change" :class="pctClass(quote.change_pct)">
@@ -377,6 +388,7 @@ onUnmounted(() => {
 .back-link { display:inline-block; color:#56606d; font-size:13px; }
 .stock-detail .panel { margin:0; padding:10px 12px; border:1px solid #cdd3db; border-radius:3px; background:#fff; color:#121820; box-shadow:none; }
 .quote-panel { margin-top:0; }
+.quote-time { display:block; margin-top:3px; color:#687280; font-size:11px; font-weight:400; }
 .stock-detail .dim { color:#687280; }
 .stock-detail .up { color:#bd2e35; }.stock-detail .down { color:#0f765d; }
 .kline-chart { width:100%; height:calc(100vh - 320px); min-height:460px; background:#eef1f4; }

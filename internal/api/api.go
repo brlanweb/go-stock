@@ -123,9 +123,12 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	quote, err := s.St.LatestQuote(ctx, symbol)
+	quote, err := s.Svc.Quote(ctx, symbol)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "本地尚无该证券行情快照；请等待下一次定时采集或执行同步")
+		quote, err = s.St.LatestQuote(ctx, symbol)
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "实时行情和本地快照均不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, quote)
@@ -153,9 +156,12 @@ func (s *Server) handleQuotes(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	quotes, err := s.St.LatestQuotes(ctx, symbols)
+	quotes, err := s.Svc.BatchQuotes(ctx, symbols)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		quotes, err = s.St.LatestQuotes(ctx, symbols)
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "实时行情和本地快照均不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, quotes)
@@ -188,7 +194,19 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTimeshare(w http.ResponseWriter, r *http.Request) {
-	writeErr(w, http.StatusNotImplemented, "本地尚未采集分钟级分时快照；请查看日K数据")
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	points, err := s.Svc.Timeshare(ctx, symbol)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "实时分时行情获取失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, points)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
