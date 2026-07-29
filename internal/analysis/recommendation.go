@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hoax/go-stock/internal/model"
 	"github.com/hoax/go-stock/internal/store"
@@ -175,7 +175,6 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("AI 推荐任务正在执行")
 	}
 	defer s.running.Store(false)
-
 	analysisDate, err := s.st.LatestKlineDate(ctx)
 	if err != nil {
 		return err
@@ -190,111 +189,84 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if len(candidates) != 10 {
 		return fmt.Errorf("可分析候选股必须为 10 只: %d", len(candidates))
 	}
-	items := rankRecommendations(candidates)
-	return s.st.ReplaceRecommendations(ctx, analysisDate, "deterministic-ohlcv-v1", items)
-}
-
-func rankRecommendations(candidates []store.RecommendationCandidate) []model.StockRecommendation {
-	type scored struct {
-		candidate store.RecommendationCandidate
-		score     float64
-		reason    string
+	payload, _ := json.Marshal(candidates)
+	prompt := s.config.Prompt
+	if prompt == "" {
+		prompt = "基于候选股最近60个交易日OHLCV，评估未来10个交易日维持上涨趋势的概率。必须只从候选中选3只，避免保证收益。"
 	}
-	scores := make([]scored, 0, len(candidates))
+	request := map[string]interface{}{
+		"model":           s.config.Model,
+		"temperature":     0.2,
+		"response_format": map[string]string{"type": "json_object"},
+		"messages": []map[string]string{
+			{"role": "system", "content": prompt + ` 返回严格JSON：{"recommendations":[{"symbol":"SH600000","probability":72.5,"reason":"不超过80字","sector":"银行"}]}`},
+			{"role": "user", "content": string(payload)},
+		},
+	}
+	body, _ := json.Marshal(request)
+	url := strings.TrimRight(s.config.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.config.APIKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("AI recommendation request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("AI recommendation HTTP %d: %.300s", resp.StatusCode, respBody)
+	}
+	var envelope struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &envelope); err != nil || len(envelope.Choices) == 0 {
+		return fmt.Errorf("AI recommendation response invalid")
+	}
+	var result struct {
+		Recommendations []model.StockRecommendation `json:"recommendations"`
+	}
+	if err := json.Unmarshal([]byte(envelope.Choices[0].Message.Content), &result); err != nil {
+		return fmt.Errorf("AI recommendation JSON: %w", err)
+	}
+	if len(result.Recommendations) != 3 {
+		return fmt.Errorf("AI recommendation count=%d", len(result.Recommendations))
+	}
+	allowed := make(map[string]store.RecommendationCandidate, len(candidates))
 	for _, candidate := range candidates {
-		klines := candidate.Klines
-		closes := make([]float64, len(klines))
-		positive := 0
-		returns := make([]float64, 0, len(klines)-1)
-		for i, kline := range klines {
-			closes[i] = kline.Close
-			if kline.Close > kline.Open {
-				positive++
-			}
-			if i > 0 && closes[i-1] > 0 {
-				returns = append(returns, closes[i]/closes[i-1]-1)
-			}
+		allowed[candidate.Symbol] = candidate
+	}
+	seen := make(map[string]bool, len(result.Recommendations))
+	for i := range result.Recommendations {
+		item := &result.Recommendations[i]
+		if seen[item.Symbol] {
+			return fmt.Errorf("AI returned duplicate symbol: %s", item.Symbol)
 		}
-		ma20 := average(closes[len(closes)-20:])
-		ma60 := average(closes)
-		trend := percent(closes[len(closes)-1], ma20)*0.6 + percent(ma20, ma60)*0.4
-		momentum10 := percent(closes[len(closes)-1], closes[len(closes)-11])
-		momentum20 := percent(closes[len(closes)-1], closes[len(closes)-21])
-		momentum := momentum10*0.6 + momentum20*0.4
-		positiveRate := float64(positive) / float64(len(klines)) * 100
-		volatility := standardDeviation(returns) * 100
-		score := trend*0.35 + momentum*0.35 + (positiveRate-50)*0.20 - volatility*0.10
-		scores = append(scores, scored{
-			candidate: candidate,
-			score:     score,
-			reason:    fmt.Sprintf("20日趋势%.1f%%，10/20日动量%.1f%%/%.1f%%，阳线率%.0f%%", trend, momentum10, momentum20, positiveRate),
-		})
-	}
-	sort.Slice(scores, func(i, j int) bool {
-		if scores[i].score == scores[j].score {
-			return scores[i].candidate.Symbol < scores[j].candidate.Symbol
+		seen[item.Symbol] = true
+		candidate, ok := allowed[item.Symbol]
+		if !ok {
+			return fmt.Errorf("AI returned unknown symbol: %s", item.Symbol)
 		}
-		return scores[i].score > scores[j].score
-	})
-	out := make([]model.StockRecommendation, 0, 3)
-	for i := 0; i < 3 && i < len(scores); i++ {
-		probability := math.Max(0, math.Min(100, 50+scores[i].score))
-		candidate := scores[i].candidate
-		out = append(out, model.StockRecommendation{
-			Rank: i + 1, Symbol: candidate.Symbol, Code: candidate.Code,
-			Name: candidate.Name, Sector: candidate.Industry,
-			Probability: math.Round(probability*100) / 100,
-			Reason:      scores[i].reason,
-		})
+		if item.Probability < 0 || item.Probability > 100 {
+			return fmt.Errorf("AI returned invalid probability for %s", item.Symbol)
+		}
+		item.Rank, item.Code, item.Name = i+1, candidate.Code, candidate.Name
+		item.Reason = strings.TrimSpace(item.Reason)
+		if item.Reason == "" || utf8.RuneCountInString(item.Reason) > 80 {
+			return fmt.Errorf("AI returned invalid reason for %s", item.Symbol)
+		}
+		if item.Sector != candidate.Industry {
+			return fmt.Errorf("AI returned invalid sector for %s", item.Symbol)
+		}
 	}
-	return out
-}
-
-func average(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, value := range values {
-		sum += value
-	}
-	return sum / float64(len(values))
-}
-
-func percent(current, base float64) float64 {
-	if base == 0 {
-		return 0
-	}
-	return (current/base - 1) * 100
-}
-
-func standardDeviation(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	mean := average(values)
-	var variance float64
-	for _, value := range values {
-		diff := value - mean
-		variance += diff * diff
-	}
-	return math.Sqrt(variance / float64(len(values)))
-}
-
-func isRecommendationTradingDay(now time.Time) bool {
-	return now.Weekday() != time.Saturday && now.Weekday() != time.Sunday
-}
-
-func nextRecommendationRun(now time.Time) time.Time {
-	loc := now.Location()
-	next := time.Date(now.Year(), now.Month(), now.Day(), 16, 30, 0, 0, loc)
-	if !next.After(now) {
-		next = next.AddDate(0, 0, 1)
-	}
-	for !isRecommendationTradingDay(next) {
-		next = next.AddDate(0, 0, 1)
-	}
-	return next
+	return s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations)
 }
 
 func (s *Service) StartScheduler(ctx context.Context) {
@@ -305,6 +277,7 @@ func (s *Service) StartScheduler(ctx context.Context) {
 		for {
 			now := time.Now().In(shanghai())
 			next := nextRecommendationRun(now)
+
 			select {
 			case <-time.After(time.Until(next)):
 				runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -323,4 +296,45 @@ func shanghai() *time.Location {
 		return time.FixedZone("CST", 8*3600)
 	}
 	return loc
+}
+
+func rankRecommendations(candidates []store.RecommendationCandidate) []model.StockRecommendation {
+	type scored struct {
+		candidate store.RecommendationCandidate
+		score     float64
+	}
+	scores := make([]scored, 0, len(candidates))
+	for _, candidate := range candidates {
+		klines := candidate.Klines
+		if len(klines) < 2 || klines[0].Close <= 0 {
+			continue
+		}
+		scores = append(scores, scored{candidate, klines[len(klines)-1].Close / klines[0].Close})
+	}
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].score == scores[j].score {
+			return scores[i].candidate.Symbol < scores[j].candidate.Symbol
+		}
+		return scores[i].score > scores[j].score
+	})
+	out := make([]model.StockRecommendation, 0, 3)
+	for i := 0; i < 3 && i < len(scores); i++ {
+		c := scores[i].candidate
+		out = append(out, model.StockRecommendation{Rank: i + 1, Symbol: c.Symbol, Code: c.Code, Name: c.Name, Sector: c.Industry, Probability: 50 + scores[i].score})
+	}
+	return out
+}
+
+func isRecommendationTradingDay(now time.Time) bool {
+	return now.Weekday() != time.Saturday && now.Weekday() != time.Sunday
+}
+func nextRecommendationRun(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), 16, 30, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	for !isRecommendationTradingDay(next) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }

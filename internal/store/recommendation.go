@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	recommendationSectorLimit    = 10
+	recommendationSectorLimit    = 20
 	recommendationCandidateLimit = 10
 )
 
@@ -46,16 +46,18 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 	}
 
 	sectorRows, err := s.DB.QueryContext(ctx, `
-		SELECT sb.sector_code,sb.sector_type,sb.sector_name,SUM(k.amount) popularity
+		SELECT sb.sector_code,sb.sector_type,sb.sector_name,
+               LOG10(SUM(k.amount)+1)*0.45 + LOG10(SUM(COALESCE(NULLIF(d.circ_mv,0),NULLIF(ms.circ_mv,0),1))+1)*0.30 + GREATEST(AVG(k.change_pct),0)*0.25 popularity
 		FROM sector_basic sb
 		INNER JOIN sector_constituent sc ON sc.sector_code=sb.sector_code
 		INNER JOIN stock_basic b ON b.symbol=sc.symbol
 		INNER JOIN kline_daily k ON k.symbol=b.symbol AND k.trade_date=?
+		LEFT JOIN daily_indicator d ON d.symbol=k.symbol AND d.trade_date=k.trade_date
+		LEFT JOIN (SELECT snap.symbol,snap.circ_mv FROM market_snapshot snap INNER JOIN (SELECT symbol,MAX(snapshot_at) snapshot_at FROM market_snapshot GROUP BY symbol) latest ON latest.symbol=snap.symbol AND latest.snapshot_at=snap.snapshot_at) ms ON ms.symbol=b.symbol
 		WHERE b.status='listed' AND b.sec_type='stock'
 		GROUP BY sb.sector_code,sb.sector_type,sb.sector_name
 		HAVING popularity>0
-		ORDER BY popularity DESC,sb.sector_type ASC,sb.sector_code ASC
-		LIMIT ?`, tradeDate, recommendationSectorLimit)
+		ORDER BY sb.sector_type ASC,popularity DESC,sb.sector_code ASC`, tradeDate)
 	if err != nil {
 		return nil, fmt.Errorf("query popular recommendation sectors: %w", err)
 	}
@@ -71,6 +73,15 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 	if err := sectorRows.Close(); err != nil {
 		return nil, err
 	}
+	perType := map[string]int{}
+	selected := make([]recommendationSector, 0, recommendationSectorLimit)
+	for _, sector := range sectors {
+		if perType[sector.Type] < 10 {
+			selected = append(selected, sector)
+			perType[sector.Type]++
+		}
+	}
+	sectors = selected
 	if len(sectors) == 0 {
 		return []RecommendationCandidate{}, nil
 	}
@@ -137,7 +148,7 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 		if err != nil {
 			return nil, err
 		}
-		if len(klines) != 60 {
+		if !isRecommendationUptrend(klines) {
 			continue
 		}
 		candidate.Klines = klines
@@ -214,4 +225,34 @@ func (s *Store) RecommendationHistory(ctx context.Context, limit int) ([]string,
 		dates = append(dates, date)
 	}
 	return dates, rows.Err()
+}
+
+// isRecommendationUptrend excludes stocks whose price, moving averages, or short momentum are falling.
+func isRecommendationUptrend(klines []model.Kline) bool {
+	if len(klines) < 30 {
+		return false
+	}
+	closes := make([]float64, len(klines))
+	for i, k := range klines {
+		if k.Close <= 0 {
+			return false
+		}
+		closes[i] = k.Close
+	}
+	last := len(closes) - 1
+	average := func(values []float64) float64 {
+		var sum float64
+		for _, value := range values {
+			sum += value
+		}
+		return sum / float64(len(values))
+	}
+	ma20 := average(closes[last-19:])
+	ma20Earlier := average(closes[last-24 : last-4])
+	long := 60
+	if len(closes) < long {
+		long = 30
+	}
+	maLong := average(closes[len(closes)-long:])
+	return closes[last] > ma20 && ma20 > maLong && ma20 > ma20Earlier && closes[last] > closes[last-10]
 }
