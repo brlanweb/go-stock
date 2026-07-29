@@ -200,6 +200,8 @@ async function nextTickDraw() {
     registerTradeOverlay()
     klChart = init('kl-chart', { styles: chartStyles })
     klChart?.createIndicator('VOL')
+    klChart?.createIndicator({ name: 'RSI', calcParams: [14] }, false, { height: 100 })
+    klChart?.createIndicator({ name: 'EMA', calcParams: [12] }, true, { id: 'candle_pane' })
     klChart?.createIndicator('VEGAS', true, { id: 'candle_pane' })
   }
   await drawKline(tab.value)
