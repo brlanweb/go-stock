@@ -311,12 +311,9 @@ func (e *Eastmoney) fetchClist(ctx context.Context, fs string, secType model.Sec
 			if updated := f("f124"); updated.Valid && updated.Value > 0 && (snap.Volume > 0 || snap.Amount > 0) {
 				snap.TradeDate = time.Unix(int64(updated.Value), 0).In(eastmoneyShanghaiLocation()).Format("2006-01-02")
 			}
-			// 没有当日成交且行情时间为空的股票不应继续按在市证券回填到当前日。
-			if secType == model.SecStock && snap.TradeDate == "" && snap.Volume == 0 && snap.Amount == 0 {
-				snap.Status = "delisted"
-			} else {
-				snap.Status = "listed"
-			}
+			// 非交易时段和上游字段缺失都会产生空成交快照，不能据此把正常股票标记为退市。
+			// 退市状态只由本地长期无交易记录的校验流程维护。
+			snap.Status = "listed"
 			// f26 上市日期 YYYYMMDD
 			if d := f("f26"); d.Valid && d.Value > 19000000 {
 				s := strconv.Itoa(int(d.Value))

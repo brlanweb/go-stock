@@ -50,7 +50,7 @@ func (s *Store) upsertSecBatch(ctx context.Context, snaps []provider.SecuritySna
 		}
 		args = append(args, sn.Symbol, "cn", sn.Code, sn.Name, string(sn.SecType), sn.Exchange, sn.Industry, listDate, lastTradeDate, sn.TotalShare, sn.FloatShare, status)
 	}
-	sb.WriteString(" ON DUPLICATE KEY UPDATE name=VALUES(name),industry=VALUES(industry),list_date=COALESESCE_PLACEHOLDER,last_trade_date=COALESCE(VALUES(last_trade_date),last_trade_date),total_share=VALUES(total_share),float_share=VALUES(float_share),status=VALUES(status),updated_at=NOW()")
+	sb.WriteString(" ON DUPLICATE KEY UPDATE name=VALUES(name),industry=VALUES(industry),list_date=COALESESCE_PLACEHOLDER,last_trade_date=COALESCE(VALUES(last_trade_date),last_trade_date),total_share=VALUES(total_share),float_share=VALUES(float_share),status=CASE WHEN status='listed' AND VALUES(status)='delisted' THEN status ELSE VALUES(status) END,updated_at=NOW()")
 	q := strings.Replace(sb.String(), "COALESESCE_PLACEHOLDER", "COALESCE(VALUES(list_date), list_date)", 1)
 	if _, err := s.DB.ExecContext(ctx, q, args...); err != nil {
 		return fmt.Errorf("upsert securities: %w", err)

@@ -89,7 +89,7 @@ async function refresh() {
     const limit = groupBy.value === 'industry' ? 31 : 32
     const heatmap = await api.heatmap(market.value, groupBy.value, metric.value, period.value, limit)
     groups.value = heatmap.groups
-    notice.value = heatmap.notice
+    notice.value = heatmap.notice || (heatmap.groups.length ? '' : '暂无市场云图数据')
     error.value = ''
   } catch (e: any) {
     error.value = e?.message || '市场云图加载失败'
