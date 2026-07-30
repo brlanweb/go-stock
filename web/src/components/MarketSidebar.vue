@@ -38,6 +38,7 @@ const startingBackfill = ref(false)
 const retryingFailed = ref(false)
 const retryMessage = ref('')
 let searchTimer: number | undefined
+let searchRequest = 0
 
 async function loadWatchlist() {
   try {
@@ -90,9 +91,20 @@ function setOption() {
 
 function onSearch() {
   window.clearTimeout(searchTimer)
-  if (!keyword.value.trim()) { searchResults.value = []; return }
+  const query = keyword.value.trim()
+  const request = ++searchRequest
+  // 纯数字至少输入三位再查，避免短代码命中大量结果并扰乱输入焦点。
+  if (!query || (/^\d+$/.test(query) && query.length < 3)) {
+    searchResults.value = []
+    return
+  }
   searchTimer = window.setTimeout(async () => {
-    try { searchResults.value = await api.search(keyword.value.trim()) } catch { searchResults.value = [] }
+    try {
+      const results = await api.search(query)
+      if (request === searchRequest) searchResults.value = results
+    } catch {
+      if (request === searchRequest) searchResults.value = []
+    }
   }, 250)
 }
 
