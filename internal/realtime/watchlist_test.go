@@ -12,12 +12,20 @@ import (
 )
 
 type fakeSymbolStore struct {
-	symbols []string
-	err     error
+	symbols         []string
+	err             error
+	storedQuotes    []*model.Quote
+	storedQuotesErr error
+	snapshotCalls   int
 }
 
 func (s *fakeSymbolStore) WatchlistSymbols(context.Context) ([]string, error) {
 	return append([]string(nil), s.symbols...), s.err
+}
+
+func (s *fakeSymbolStore) LatestQuotes(context.Context, []string) ([]*model.Quote, error) {
+	s.snapshotCalls++
+	return append([]*model.Quote(nil), s.storedQuotes...), s.storedQuotesErr
 }
 
 type fakeQuoteProvider struct {
@@ -158,9 +166,10 @@ func TestWatchlistResponseRejectsChangedSymbolSet(t *testing.T) {
 	}
 }
 
-func TestWatchlistClosedDoesNotCallProviderOrExposeQuotes(t *testing.T) {
+func TestWatchlistClosedReturnsLatestStoredQuotesWithoutCallingProvider(t *testing.T) {
 	now := time.Date(2026, 7, 29, 16, 0, 0, 0, time.FixedZone("CST", 8*60*60))
-	store := &fakeSymbolStore{symbols: []string{"SH600519"}}
+	closeTime := time.Date(2026, 7, 29, 15, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	store := &fakeSymbolStore{symbols: []string{"SH600519", "SZ000001"}, storedQuotes: []*model.Quote{quoteAt("SZ000001", closeTime), quoteAt("SH600519", closeTime)}}
 	upstream := &fakeQuoteProvider{quotes: []*model.Quote{quoteAt("SH600519", now)}}
 	cache := &fakeBatchCache{value: []byte("stale")}
 	syncer := NewWatchlistSyncer(store, upstream, cache, 5*time.Second)
@@ -169,11 +178,26 @@ func TestWatchlistClosedDoesNotCallProviderOrExposeQuotes(t *testing.T) {
 	syncer.syncOnce(context.Background())
 	response := syncer.Response(context.Background())
 
-	if upstream.calls != 0 || cache.deleteCalls != 1 {
-		t.Fatalf("closed market provider calls=%d delete=%d", upstream.calls, cache.deleteCalls)
+	if upstream.calls != 0 || cache.deleteCalls != 1 || store.snapshotCalls != 1 {
+		t.Fatalf("closed market provider calls=%d delete=%d snapshot calls=%d", upstream.calls, cache.deleteCalls, store.snapshotCalls)
 	}
-	if response.Status != "closed" || len(response.Quotes) != 0 || len(response.Symbols) != 1 {
+	if response.Status != "closed" || len(response.Quotes) != 2 || len(response.Symbols) != 2 || response.SyncedAt == nil {
 		t.Fatalf("unexpected closed response: %#v", response)
+	}
+	if response.Quotes[0].Symbol != "SH600519" || response.Quotes[1].Symbol != "SZ000001" {
+		t.Fatalf("closed response did not preserve watchlist order: %#v", response.Quotes)
+	}
+}
+
+func TestWatchlistClosedKeepsAvailableSnapshotsWhenSomeSymbolsAreMissing(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60)) // Saturday
+	store := &fakeSymbolStore{symbols: []string{"SH600519", "SZ000001"}, storedQuotes: []*model.Quote{quoteAt("SZ000001", now.AddDate(0, 0, -1))}}
+	syncer := NewWatchlistSyncer(store, &fakeQuoteProvider{}, &fakeBatchCache{}, 5*time.Second)
+	syncer.now = func() time.Time { return now }
+
+	response := syncer.Response(context.Background())
+	if response.Status != "closed" || len(response.Quotes) != 1 || response.Quotes[0].Symbol != "SZ000001" {
+		t.Fatalf("expected available stored snapshot, got %#v", response)
 	}
 }
 

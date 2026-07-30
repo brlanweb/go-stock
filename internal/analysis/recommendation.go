@@ -192,15 +192,16 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	payload, _ := json.Marshal(candidates)
 	prompt := s.config.Prompt
 	if prompt == "" {
-		prompt = "基于候选股最近60个交易日OHLCV，评估未来10个交易日维持上涨趋势的概率。必须只从候选中选3只，避免保证收益。"
+		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审未来10个交易日的续涨趋势，但不得承诺收益。"
 	}
+	prompt += " 只能从用户提供的10只候选中选择，必须恰好选3只且代码不得重复；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。"
 	request := map[string]interface{}{
 		"model":           s.config.Model,
 		"temperature":     0.2,
 		"response_format": map[string]string{"type": "json_object"},
 		"messages": []map[string]string{
-			{"role": "system", "content": prompt + ` 返回严格JSON：{"recommendations":[{"symbol":"SH600000","probability":72.5,"reason":"不超过80字","sector":"银行"}]}`},
-			{"role": "user", "content": string(payload)},
+			{"role": "system", "content": prompt + ` 返回严格JSON：{"recommendations":[{"symbol":"SH600000","probability":72.5,"reason":"不超过80字","sector":"候选industry字段原值"}]}`},
+			{"role": "user", "content": "以下是唯一允许评审的10只候选股。每只均包含热点题材、确定性趋势评分及最近60个交易日OHLCV；请只返回其中3只。\n" + string(payload)},
 		},
 	}
 	body, _ := json.Marshal(request)

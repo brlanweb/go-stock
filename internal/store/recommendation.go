@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	recommendationSectorLimit    = 20
+	recommendationSectorLimit    = 10
 	recommendationCandidateLimit = 10
+	recommendationKlineDays      = 60
 )
 
 // RecommendationCandidate 包含确定性量化评分所需的最近 60 根日 K。
@@ -23,6 +24,7 @@ type RecommendationCandidate struct {
 	SectorType string        `json:"sector_type"`
 	Popularity float64       `json:"popularity"`
 	SectorHeat float64       `json:"sector_heat"`
+	TrendScore float64       `json:"trend_score"`
 	Klines     []model.Kline `json:"klines"`
 }
 
@@ -33,9 +35,9 @@ type recommendationSector struct {
 	Popularity float64
 }
 
-// RecommendationCandidates 先从行业和概念中选出成交额最高的人气板块，再从
-// 这些板块按最近交易日成交额选股。股票跨板块去重后严格保留前 10 只，最后
-// 为每只股票加载最近 60 根日 K。所有排序均有稳定代码兜底。
+// RecommendationCandidates 从行业和概念的统一热度排名取前 10 个题材，收集其
+// 成分股并去重；对全部候选读取最近 60 根前复权日 K，按确定性趋势分排序后取前 10。
+// 所有排序均有稳定代码兜底，AI 只会接收这 10 只股票及其完整日 K 数据。
 func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationCandidate, error) {
 	tradeDate, err := s.LatestKlineDate(ctx)
 	if err != nil {
@@ -57,7 +59,7 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 		WHERE b.status='listed' AND b.sec_type='stock'
 		GROUP BY sb.sector_code,sb.sector_type,sb.sector_name
 		HAVING popularity>0
-		ORDER BY sb.sector_type ASC,popularity DESC,sb.sector_code ASC`, tradeDate)
+		ORDER BY popularity DESC,sb.sector_code ASC`, tradeDate)
 	if err != nil {
 		return nil, fmt.Errorf("query popular recommendation sectors: %w", err)
 	}
@@ -73,12 +75,11 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 	if err := sectorRows.Close(); err != nil {
 		return nil, err
 	}
-	perType := map[string]int{}
 	selected := make([]recommendationSector, 0, recommendationSectorLimit)
 	for _, sector := range sectors {
-		if perType[sector.Type] < 10 {
-			selected = append(selected, sector)
-			perType[sector.Type]++
+		selected = append(selected, sector)
+		if len(selected) == recommendationSectorLimit {
+			break
 		}
 	}
 	sectors = selected
@@ -142,22 +143,31 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 		return pool[i].Popularity > pool[j].Popularity
 	})
 
-	candidates := make([]RecommendationCandidate, 0, recommendationCandidateLimit)
+	// 候选池通常约百只；只接受完整 60 根日 K 的证券，再按趋势评分统一取前 10。
+	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
 	for _, candidate := range pool {
-		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, 60)
+		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, recommendationKlineDays)
 		if err != nil {
 			return nil, err
 		}
-		if !isRecommendationUptrend(klines) {
+		score, ok := recommendationTrendScore(klines)
+		if !ok {
 			continue
 		}
 		candidate.Klines = klines
-		candidates = append(candidates, candidate)
-		if len(candidates) == recommendationCandidateLimit {
-			break
-		}
+		candidate.TrendScore = score
+		trendCandidates = append(trendCandidates, candidate)
 	}
-	return candidates, nil
+	sort.Slice(trendCandidates, func(i, j int) bool {
+		if trendCandidates[i].TrendScore == trendCandidates[j].TrendScore {
+			return trendCandidates[i].Symbol < trendCandidates[j].Symbol
+		}
+		return trendCandidates[i].TrendScore > trendCandidates[j].TrendScore
+	})
+	if len(trendCandidates) > recommendationCandidateLimit {
+		trendCandidates = trendCandidates[:recommendationCandidateLimit]
+	}
+	return trendCandidates, nil
 }
 
 func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName string, items []model.StockRecommendation) error {
@@ -227,19 +237,19 @@ func (s *Store) RecommendationHistory(ctx context.Context, limit int) ([]string,
 	return dates, rows.Err()
 }
 
-// isRecommendationUptrend excludes stocks whose price, moving averages, or short momentum are falling.
-func isRecommendationUptrend(klines []model.Kline) bool {
-	if len(klines) < 30 {
-		return false
+// recommendationTrendScore 只使用最近 60 个交易日的前复权收盘价。候选必须同时
+// 满足价格、均线和中短期斜率上行；分数用于在热点题材成分股中稳定排序。
+func recommendationTrendScore(klines []model.Kline) (float64, bool) {
+	if len(klines) != recommendationKlineDays {
+		return 0, false
 	}
 	closes := make([]float64, len(klines))
 	for i, k := range klines {
 		if k.Close <= 0 {
-			return false
+			return 0, false
 		}
 		closes[i] = k.Close
 	}
-	last := len(closes) - 1
 	average := func(values []float64) float64 {
 		var sum float64
 		for _, value := range values {
@@ -247,12 +257,21 @@ func isRecommendationUptrend(klines []model.Kline) bool {
 		}
 		return sum / float64(len(values))
 	}
+	last := len(closes) - 1
+	ma5 := average(closes[last-4:])
 	ma20 := average(closes[last-19:])
-	ma20Earlier := average(closes[last-24 : last-4])
-	long := 60
-	if len(closes) < long {
-		long = 30
+	ma20Earlier := average(closes[last-24 : last-5])
+	ma60 := average(closes)
+	return5 := (closes[last] / closes[last-5]) - 1
+	return20 := (closes[last] / closes[last-20]) - 1
+	return60 := (closes[last] / closes[0]) - 1
+	if closes[last] <= ma5 || ma5 <= ma20 || ma20 <= ma60 || ma20 <= ma20Earlier || return5 <= 0 || return20 <= 0 || return60 <= 0 {
+		return 0, false
 	}
-	maLong := average(closes[len(closes)-long:])
-	return closes[last] > ma20 && ma20 > maLong && ma20 > ma20Earlier && closes[last] > closes[last-10]
+	return return60*55 + return20*30 + return5*15 + (ma20/ma60-1)*20, true
+}
+
+func isRecommendationUptrend(klines []model.Kline) bool {
+	_, ok := recommendationTrendScore(klines)
+	return ok
 }

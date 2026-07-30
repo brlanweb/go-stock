@@ -17,9 +17,10 @@ import (
 
 const watchlistBatchKey = "realtime:watchlist:v1:current"
 
-// SymbolStore 提供当前自选股代码集合。
+// SymbolStore 提供当前自选股代码集合，以及非交易时段可展示的本地收盘快照。
 type SymbolStore interface {
 	WatchlistSymbols(context.Context) ([]string, error)
+	LatestQuotes(context.Context, []string) ([]*model.Quote, error)
 }
 
 // QuoteProvider 获取一整批实时行情。
@@ -154,7 +155,8 @@ func (s *WatchlistSyncer) isLive() bool {
 	return s.live
 }
 
-// Response 只读取当前 Redis 批次，不触发上游请求或 MySQL 行情降级。
+// Response 在交易时段只读取当前 Redis 批次；非交易时段只读取本地快照，
+// 不触发任何上游行情请求。
 func (s *WatchlistSyncer) Response(ctx context.Context) WatchlistResponse {
 	now := s.now()
 	symbols, err := s.store.WatchlistSymbols(ctx)
@@ -166,7 +168,23 @@ func (s *WatchlistSyncer) Response(ctx context.Context) WatchlistResponse {
 		return WatchlistResponse{Status: "empty", Symbols: symbols, Quotes: []*model.Quote{}}
 	}
 	if !provider.IsTradingHours(now) {
-		return WatchlistResponse{Status: "closed", Symbols: symbols, Quotes: []*model.Quote{}}
+		quotes, err := s.store.LatestQuotes(ctx, symbols)
+		if err != nil {
+			slog.Debug("读取盘后自选股收盘快照失败", "err", err)
+			return WatchlistResponse{Status: "unavailable", Symbols: symbols, Quotes: []*model.Quote{}}
+		}
+		ordered := orderStoredQuotes(symbols, quotes)
+		response := WatchlistResponse{Status: "closed", Symbols: symbols, Quotes: ordered}
+		if len(ordered) > 0 {
+			syncedAt := ordered[0].FetchedAt
+			for _, quote := range ordered[1:] {
+				if quote.FetchedAt.After(syncedAt) {
+					syncedAt = quote.FetchedAt
+				}
+			}
+			response.SyncedAt = &syncedAt
+		}
+		return response
 	}
 	if !s.isLive() {
 		return WatchlistResponse{Status: "unavailable", Symbols: symbols, Quotes: []*model.Quote{}}
@@ -186,6 +204,28 @@ func (s *WatchlistSyncer) Response(ctx context.Context) WatchlistResponse {
 		return WatchlistResponse{Status: "unavailable", Symbols: symbols, Quotes: []*model.Quote{}}
 	}
 	return WatchlistResponse{Status: "live", SyncedAt: &batch.SyncedAt, Symbols: symbols, Quotes: batch.Quotes}
+}
+
+// orderStoredQuotes keeps the user configured watchlist order. A missing local
+// snapshot is intentionally omitted instead of clearing every other holding.
+func orderStoredQuotes(symbols []string, quotes []*model.Quote) []*model.Quote {
+	bySymbol := make(map[string]*model.Quote, len(quotes))
+	for _, quote := range quotes {
+		if quote == nil || quote.Price == nil || quote.FetchedAt.IsZero() {
+			continue
+		}
+		symbol := model.NormalizeSymbol(quote.Symbol)
+		if symbol != "" {
+			bySymbol[symbol] = quote
+		}
+	}
+	ordered := make([]*model.Quote, 0, len(symbols))
+	for _, symbol := range symbols {
+		if quote, ok := bySymbol[symbol]; ok {
+			ordered = append(ordered, quote)
+		}
+	}
+	return ordered
 }
 
 func normalizedSymbols(inputs []string) []string {
