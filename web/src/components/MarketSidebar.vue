@@ -44,7 +44,7 @@ async function loadWatchlist() {
     const result = await api.watchlist()
     watchlistStatus.value = result.status
     watchlistSymbols.value = result.symbols
-    watchlist.value = result.status === 'live' ? result.quotes : []
+    watchlist.value = result.status === 'live' || result.status === 'closed' ? result.quotes : []
   } catch {
     watchlistStatus.value = 'unavailable'
     watchlist.value = []
@@ -53,7 +53,7 @@ async function loadWatchlist() {
 
 const watchlistMessage = computed(() => {
   if (watchlistStatus.value === 'unavailable') return '实时行情暂不可用'
-  if (watchlistStatus.value === 'closed') return '当前为非交易时段'
+  if (watchlistStatus.value === 'closed') return watchlist.value.length ? '非交易时段，显示最近收盘数据' : '非交易时段，暂无本地收盘快照'
   if (watchlistStatus.value === 'empty') return '在详情页加入自选'
   return watchlist.value.length ? '' : '实时行情暂不可用'
 })
