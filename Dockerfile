@@ -10,7 +10,7 @@ RUN npm run build
 FROM golang:1.26-alpine AS go-builder
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GOPROXY=https://goproxy.cn,direct go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY web/embed.go web/
