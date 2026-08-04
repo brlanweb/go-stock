@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { init, dispose, registerIndicator, registerOverlay, CandleType, IndicatorSeries, LineType, type Chart, type KLineData } from 'klinecharts'
+import { init, dispose, registerIndicator, registerOverlay, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload, type IndicatorDefinition, type BacktestResult } from '../api'
 import AgentPanel from '../components/AgentPanel.vue'
 
@@ -17,7 +17,6 @@ function registerBackgroundVolume() {
   registerIndicator({
     name: 'BACKGROUND_VOL',
     shortName: '',
-    series: IndicatorSeries.Volume,
     zLevel: -1,
     figures: [],
     calc: (dataList: KLineData[]) => dataList.map(k => ({ volume: k.volume || 0 })),
@@ -126,6 +125,7 @@ const quoteTime = computed(() => {
 })
 let klChart: Chart | null = null
 let chartRequestVersion = 0
+const chartRequestsInFlight = new Set<string>()
 let quoteTimer: number | undefined
 
 async function loadWatchState() {
@@ -168,27 +168,34 @@ function openSector(code: string) {
 
 async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
   if (!klChart) return
-  const requestVersion = ++chartRequestVersion
+  const requestVersion = chartRequestVersion
   const symbol = props.symbol
-  if (period === 'minute') {
-    const klines = await api.intraday(symbol)
+  const requestKey = `${symbol}:${period}:${requestVersion}`
+  if (chartRequestsInFlight.has(requestKey)) return
+  chartRequestsInFlight.add(requestKey)
+  try {
+    if (period === 'minute') {
+      const klines = await api.intraday(symbol)
+      if (requestVersion !== chartRequestVersion || period !== tab.value || symbol !== props.symbol || !klChart) return
+      klChart.applyNewData(klines.map(k => ({
+        timestamp: new Date(`${k.time.replace(' ', 'T')}:00+08:00`).getTime(),
+        open: k.open, high: k.high, low: k.low, close: k.close,
+        volume: k.volume, turnover: k.amount
+      })))
+      return
+    }
+    const klines = await api.kline(symbol, period, 'qfq', 700)
     if (requestVersion !== chartRequestVersion || period !== tab.value || symbol !== props.symbol || !klChart) return
+    currentKlines = klines
     klChart.applyNewData(klines.map(k => ({
-      timestamp: new Date(`${k.time.replace(' ', 'T')}:00+08:00`).getTime(),
+      timestamp: new Date(k.date).getTime(),
       open: k.open, high: k.high, low: k.low, close: k.close,
       volume: k.volume, turnover: k.amount
     })))
-    return
+    if (backtestResult.value) drawBacktestSignals(backtestResult.value)
+  } finally {
+    chartRequestsInFlight.delete(requestKey)
   }
-  const klines = await api.kline(symbol, period, 'qfq', 700)
-  if (requestVersion !== chartRequestVersion || period !== tab.value || symbol !== props.symbol || !klChart) return
-  currentKlines = klines
-  klChart.applyNewData(klines.map(k => ({
-    timestamp: new Date(k.date).getTime(),
-    open: k.open, high: k.high, low: k.low, close: k.close,
-    volume: k.volume, turnover: k.amount
-  })))
-  if (backtestResult.value) drawBacktestSignals(backtestResult.value)
 }
 
 async function loadIndicators() {
@@ -234,6 +241,7 @@ async function runBacktest() {
 async function switchTab(t: 'minute' | 'day' | 'week' | 'month') {
   tab.value = t
   chartRequestVersion++
+  klChart?.clearData()
   await nextTickDraw()
 }
 
@@ -295,6 +303,7 @@ const chartStyles = {
 
 watch(() => props.symbol, () => {
   chartRequestVersion++
+  klChart?.clearData()
   backtestResult.value = null
   backtestError.value = ''
   klChart?.removeOverlay({ groupId: 'backtest-signals' })
