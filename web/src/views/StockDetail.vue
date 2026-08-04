@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { init, dispose, registerIndicator, registerOverlay, CandleType, LineType, type Chart, type KLineData } from 'klinecharts'
+import { init, dispose, registerIndicator, registerOverlay, ActionType, CandleType, LineType, type Chart, type Indicator, type KLineData } from 'klinecharts'
 import { api, fmt, fmtPct, fmtBig, pctClass, type Quote, type StockDetailPayload, type IndicatorDefinition, type BacktestResult } from '../api'
 import AgentPanel from '../components/AgentPanel.vue'
 
 // Vegas 隧道：EMA144 / EMA169（过滤隧道）+ EMA576 / EMA676（趋势隧道）。
 const VEGAS_PERIODS = [144, 169, 576, 676]
 const VEGAS_COLORS = ['#e6a23c', '#f2c96b', '#409eff', '#7cc0ff']
+const DEFAULT_PRICE_PANE_GAP = { top: 0.2, bottom: 0.1 }
 let vegasRegistered = false
 let backgroundVolumeRegistered = false
 let tradeOverlayRegistered = false
@@ -100,6 +101,7 @@ const quote = ref<Quote | null>(null)
 const detail = ref<StockDetailPayload | null>(null)
 const tab = ref<'minute' | 'day' | 'week' | 'month'>('minute')
 const errMsg = ref('')
+const chartErrMsg = ref('')
 const syncMsg = ref('')
 const syncing = ref(false)
 const watched = ref(false)
@@ -124,6 +126,8 @@ const quoteTime = computed(() => {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour12: false })
 })
 let klChart: Chart | null = null
+let historicalVolumePaneId: string | null = null
+let pricePaneBottomGap: number | null = null
 let chartRequestVersion = 0
 const chartRequestsInFlight = new Set<string>()
 let quoteTimer: number | undefined
@@ -182,6 +186,7 @@ async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
         open: k.open, high: k.high, low: k.low, close: k.close,
         volume: k.volume, turnover: k.amount
       })))
+      chartErrMsg.value = ''
       return
     }
     const klines = await api.kline(symbol, period, 'qfq', 700)
@@ -193,6 +198,11 @@ async function drawKline(period: 'minute' | 'day' | 'week' | 'month') {
       volume: k.volume, turnover: k.amount
     })))
     if (backtestResult.value) drawBacktestSignals(backtestResult.value)
+    chartErrMsg.value = ''
+  } catch (e: any) {
+    if (requestVersion === chartRequestVersion && period === tab.value && symbol === props.symbol) {
+      chartErrMsg.value = e.message || 'K线加载失败'
+    }
   } finally {
     chartRequestsInFlight.delete(requestKey)
   }
@@ -241,8 +251,72 @@ async function runBacktest() {
 async function switchTab(t: 'minute' | 'day' | 'week' | 'month') {
   tab.value = t
   chartRequestVersion++
+  chartErrMsg.value = ''
   klChart?.clearData()
   await nextTickDraw()
+}
+
+function calculatePricePaneBottomGap(chart: Chart): number {
+  const dataList = chart.getDataList()
+  if (dataList.length === 0) return DEFAULT_PRICE_PANE_GAP.bottom
+
+  const visibleRange = chart.getVisibleRange()
+  const from = Math.max(0, Math.floor(visibleRange.from))
+  const to = Math.min(dataList.length - 1, Math.ceil(visibleRange.to))
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  const include = (value: unknown) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return
+    min = Math.min(min, value)
+    max = Math.max(max, value)
+  }
+
+  for (let index = from; index <= to; index++) {
+    include(dataList[index]?.low)
+    include(dataList[index]?.high)
+  }
+
+  const indicators = chart.getIndicatorByPaneId('candle_pane') as Map<string, Indicator> | null
+  indicators?.forEach(indicator => {
+    for (let index = from; index <= to; index++) {
+      const result = indicator.result[index] as Record<string, unknown> | undefined
+      indicator.figures.forEach(figure => include(result?.[figure.key]))
+    }
+  })
+
+  const range = max - min
+  if (!Number.isFinite(range) || range <= 0 || min <= 0) return 0
+
+  // klinecharts expands the range by range * gap.bottom. Keep its normal
+  // breathing room unless that expansion would cross the zero-price floor.
+  return Math.min(DEFAULT_PRICE_PANE_GAP.bottom, min / range * 0.95)
+}
+
+function updatePricePaneGap() {
+  if (!klChart) return
+  const bottom = calculatePricePaneBottomGap(klChart)
+  if (pricePaneBottomGap !== null && Math.abs(bottom - pricePaneBottomGap) < 1e-8) return
+  pricePaneBottomGap = bottom
+  klChart.setPaneOptions({ id: 'candle_pane', gap: { top: DEFAULT_PRICE_PANE_GAP.top, bottom } })
+}
+
+function configureVolumeIndicator(period: 'minute' | 'day' | 'week' | 'month') {
+  if (!klChart) return
+  if (period === 'minute') {
+    if (historicalVolumePaneId) {
+      klChart.removeIndicator(historicalVolumePaneId, 'VOL')
+      historicalVolumePaneId = null
+    }
+    if (!klChart.getIndicatorByPaneId('candle_pane', 'BACKGROUND_VOL')) {
+      klChart.createIndicator('BACKGROUND_VOL', true, { id: 'candle_pane' })
+    }
+    return
+  }
+
+  klChart.removeIndicator('candle_pane', 'BACKGROUND_VOL')
+  if (!historicalVolumePaneId) {
+    historicalVolumePaneId = klChart.createIndicator('VOL', false, { height: 100 })
+  }
 }
 
 async function nextTickDraw() {
@@ -252,11 +326,13 @@ async function nextTickDraw() {
     registerVegas()
     registerTradeOverlay()
     klChart = init('kl-chart', { styles: chartStyles })
-    klChart?.createIndicator('BACKGROUND_VOL', true, { id: 'candle_pane' })
+    klChart?.subscribeAction(ActionType.OnDataReady, updatePricePaneGap)
+    klChart?.subscribeAction(ActionType.OnVisibleRangeChange, updatePricePaneGap)
     klChart?.createIndicator({ name: 'RSI', calcParams: [14] }, false, { height: 100 })
     klChart?.createIndicator({ name: 'EMA', calcParams: [12] }, true, { id: 'candle_pane' })
     klChart?.createIndicator('VEGAS', true, { id: 'candle_pane' })
   }
+  configureVolumeIndicator(tab.value)
   await drawKline(tab.value)
 }
 
@@ -303,6 +379,7 @@ const chartStyles = {
 
 watch(() => props.symbol, () => {
   chartRequestVersion++
+  chartErrMsg.value = ''
   klChart?.clearData()
   backtestResult.value = null
   backtestError.value = ''
@@ -329,6 +406,8 @@ onMounted(async () => {
 onUnmounted(() => {
   chartRequestVersion++
   if (quoteTimer) window.clearInterval(quoteTimer)
+  klChart?.unsubscribeAction(ActionType.OnDataReady, updatePricePaneGap)
+  klChart?.unsubscribeAction(ActionType.OnVisibleRangeChange, updatePricePaneGap)
   if (klChart) { dispose('kl-chart'); klChart = null }
 })
 </script>
@@ -428,6 +507,7 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-if="syncMsg" class="sync-msg">{{ syncMsg }}</div>
+      <div v-if="chartErrMsg" class="backtest-error">{{ chartErrMsg }}</div>
       <div v-if="backtestError" class="backtest-error">{{ backtestError }}</div>
       <div class="chart-stage">
         <div id="kl-chart" class="kline-chart"></div>

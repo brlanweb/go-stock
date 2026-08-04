@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.1] - 2026-08-04
+
+### Fixed
+
+- Restore realtime volume as a background overlay while keeping dedicated volume panes for daily, weekly, and monthly candlestick charts.
+- Prevent long-range monthly price scales from extending below zero by dynamically limiting the main price pane's bottom gap.
+- Preserve stock, period, and request-version isolation during asynchronous chart loads, and show errors only for the current request.
+
+### Database
+
+- No database schema or DML changes relative to v1.1.0.
+
 ## [1.1.0] - 2026-08-04
 
 ### Added
@@ -24,4 +36,5 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
+[1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/brlanweb/go-stock/releases/tag/v1.1.0
