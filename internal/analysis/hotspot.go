@@ -209,7 +209,10 @@ func (s *Service) analyzeHotspotWithAI(ctx context.Context, input interface{}) (
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.config.APIKey)
-	resp, err := s.client.Do(req)
+	// 热点产业链分析输入大、推理时间长，使用独立长超时客户端，
+	// 不复用 90s 的通用客户端；整体截止时间仍受调用方 ctx 约束。
+	hotspotClient := &http.Client{Timeout: 8 * time.Minute}
+	resp, err := hotspotClient.Do(req)
 	if err != nil {
 		return hotspotAIResult{}, fmt.Errorf("AI hotspot request: %w", err)
 	}
