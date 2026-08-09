@@ -799,13 +799,18 @@ func (s *Server) handleHotspotRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "热点漏斗任务正在执行")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
-	defer cancel()
-	if err := s.Analysis.RunHotspot(ctx); err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "analysis completed"})
+	// 真实数据量下全市场板块重算加 AI 分析需数分钟，改为后台执行并立即返回，
+	// 避免任务随 HTTP 请求断开被取消；前端通过 /hotspot/status 轮询完成状态。
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := s.Analysis.RunHotspot(ctx); err != nil {
+			slog.Warn("手动热点漏斗分析失败", "err", err)
+		} else {
+			slog.Info("手动热点漏斗分析完成")
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
