@@ -61,6 +61,8 @@ type hotspotPoint struct {
 }
 
 // RecomputeHotspotStats 从本地日 K 生成概念板块统计，不在页面请求链路访问上游。
+// 按板块分批查询：全量单条 SQL 在真实数据量下（数百概念×数万成分×120天）
+// 流式读取会超过 DSN readTimeout 导致 invalid connection，分批后每批秒级完成。
 func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) error {
 	if tradeDate == "" {
 		var err error
@@ -69,6 +71,62 @@ func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) err
 			return err
 		}
 	}
+	codeRows, err := s.DB.QueryContext(ctx, `SELECT sector_code FROM sector_basic WHERE sector_type='concept' ORDER BY sector_code`)
+	if err != nil {
+		return fmt.Errorf("查询概念板块列表: %w", err)
+	}
+	var sectorCodes []string
+	for codeRows.Next() {
+		var code string
+		if err := codeRows.Scan(&code); err != nil {
+			codeRows.Close()
+			return err
+		}
+		sectorCodes = append(sectorCodes, code)
+	}
+	if err := codeRows.Close(); err != nil {
+		return err
+	}
+	if len(sectorCodes) == 0 {
+		return nil
+	}
+
+	const sectorBatch = 25
+	stats := make([]HotspotSectorStat, 0, len(sectorCodes))
+	for start := 0; start < len(sectorCodes); start += sectorBatch {
+		end := min(start+sectorBatch, len(sectorCodes))
+		batch := sectorCodes[start:end]
+		batchStats, err := s.hotspotStatsForSectors(ctx, tradeDate, batch)
+		if err != nil {
+			return err
+		}
+		stats = append(stats, batchStats...)
+	}
+	assignHotspotHeatScores(stats)
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO sector_daily_stats
+		(sector_code,trade_date,sector_type,stock_count,avg_change,avg_change_5d,avg_change_20d,up_ratio,limit_up_count,total_amount,amount_ratio,avg_turnover,heat_score)
+		VALUES (?,?,'concept',?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
+		stock_count=VALUES(stock_count),avg_change=VALUES(avg_change),avg_change_5d=VALUES(avg_change_5d),avg_change_20d=VALUES(avg_change_20d),up_ratio=VALUES(up_ratio),limit_up_count=VALUES(limit_up_count),total_amount=VALUES(total_amount),amount_ratio=VALUES(amount_ratio),avg_turnover=VALUES(avg_turnover),heat_score=VALUES(heat_score)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, stat := range stats {
+		if _, err := stmt.ExecContext(ctx, stat.SectorCode, tradeDate, stat.StockCount, stat.AvgChange, stat.AvgChange5D, stat.AvgChange20D, stat.UpRatio, stat.LimitUpCount, stat.TotalAmount, stat.AmountRatio, stat.AvgTurnover, stat.HeatScore); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// hotspotStatsForSectors 查询并聚合一批概念板块的日 K 统计。
+func (s *Store) hotspotStatsForSectors(ctx context.Context, tradeDate string, batch []string) ([]HotspotSectorStat, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT sb.sector_code,sb.sector_name,k.symbol,k.trade_date,k.close,k.change_pct,k.amount,k.turnover_rate
 		FROM sector_basic sb
@@ -76,9 +134,10 @@ func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) err
 		INNER JOIN stock_basic b ON b.symbol=sc.symbol AND b.status='listed' AND b.sec_type='stock'
 		INNER JOIN kline_daily k ON k.symbol=sc.symbol
 		WHERE sb.sector_type='concept' AND k.trade_date<=? AND k.trade_date>=DATE_SUB(?, INTERVAL 120 DAY)
+		  AND sb.sector_code IN (`+sqlStringList(batch)+`)
 		ORDER BY sb.sector_code,k.symbol,k.trade_date DESC`, tradeDate, tradeDate)
 	if err != nil {
-		return fmt.Errorf("查询热点板块日K: %w", err)
+		return nil, fmt.Errorf("查询热点板块日K: %w", err)
 	}
 	defer rows.Close()
 	series := make(map[string]*hotspotSectorSeries)
@@ -86,7 +145,7 @@ func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) err
 		var code, name, symbol string
 		var point hotspotPoint
 		if err := rows.Scan(&code, &name, &symbol, &point.date, &point.close, &point.change, &point.amount, &point.turnover); err != nil {
-			return err
+			return nil, err
 		}
 		item := series[code]
 		if item == nil {
@@ -96,7 +155,7 @@ func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) err
 		item.stocks[symbol] = append(item.stocks[symbol], point)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	stats := make([]HotspotSectorStat, 0, len(series))
@@ -160,27 +219,7 @@ func (s *Store) RecomputeHotspotStats(ctx context.Context, tradeDate string) err
 		}
 		stats = append(stats, stat)
 	}
-	assignHotspotHeatScores(stats)
-
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO sector_daily_stats
-		(sector_code,trade_date,sector_type,stock_count,avg_change,avg_change_5d,avg_change_20d,up_ratio,limit_up_count,total_amount,amount_ratio,avg_turnover,heat_score)
-		VALUES (?,?,'concept',?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
-		stock_count=VALUES(stock_count),avg_change=VALUES(avg_change),avg_change_5d=VALUES(avg_change_5d),avg_change_20d=VALUES(avg_change_20d),up_ratio=VALUES(up_ratio),limit_up_count=VALUES(limit_up_count),total_amount=VALUES(total_amount),amount_ratio=VALUES(amount_ratio),avg_turnover=VALUES(avg_turnover),heat_score=VALUES(heat_score)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, stat := range stats {
-		if _, err := stmt.ExecContext(ctx, stat.SectorCode, tradeDate, stat.StockCount, stat.AvgChange, stat.AvgChange5D, stat.AvgChange20D, stat.UpRatio, stat.LimitUpCount, stat.TotalAmount, stat.AmountRatio, stat.AvgTurnover, stat.HeatScore); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return stats, nil
 }
 
 func assignHotspotHeatScores(stats []HotspotSectorStat) {
@@ -391,18 +430,61 @@ func (s *Store) HotspotStatsByCodes(ctx context.Context, codes []string) (map[st
 	return out, rows.Err()
 }
 
+// SaveHotspotReport 追加保存一次运行的阶段结果；同日多次运行全部保留为历史记录。
 func (s *Store) SaveHotspotReport(ctx context.Context, date, stage, model string, payload interface{}) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO hotspot_report (report_date,stage,payload,model) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE payload=VALUES(payload),model=VALUES(model),updated_at=CURRENT_TIMESTAMP`, date, stage, string(raw), model)
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO hotspot_report (report_date,stage,payload,model) VALUES (?,?,?,?)`, date, stage, string(raw), model)
 	return err
+}
+
+// HotspotRunSummary 描述一次已完成的漏斗运行（final 阶段）。
+type HotspotRunSummary struct {
+	ID         int64  `json:"id"`
+	ReportDate string `json:"report_date"`
+	Model      string `json:"model"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// HotspotRunHistory 返回最近的 final 运行记录列表，供前端历史选择。
+func (s *Store) HotspotRunHistory(ctx context.Context, limit int) ([]HotspotRunSummary, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 30
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,DATE_FORMAT(report_date,'%Y-%m-%d'),model,DATE_FORMAT(created_at,'%Y-%m-%d %H:%i') FROM hotspot_report WHERE stage='final' ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HotspotRunSummary{}
+	for rows.Next() {
+		var item HotspotRunSummary
+		if err := rows.Scan(&item.ID, &item.ReportDate, &item.Model, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// HotspotReportByID 按运行 id 读取 final 报告。
+func (s *Store) HotspotReportByID(ctx context.Context, id int64) (json.RawMessage, error) {
+	var raw string
+	err := s.DB.QueryRowContext(ctx, `SELECT payload FROM hotspot_report WHERE id=? AND stage='final'`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(raw), nil
 }
 
 func (s *Store) LatestHotspotReport(ctx context.Context) (json.RawMessage, error) {
 	var raw string
-	err := s.DB.QueryRowContext(ctx, `SELECT payload FROM hotspot_report WHERE stage='final' ORDER BY report_date DESC LIMIT 1`).Scan(&raw)
+	err := s.DB.QueryRowContext(ctx, `SELECT payload FROM hotspot_report WHERE stage='final' ORDER BY id DESC LIMIT 1`).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

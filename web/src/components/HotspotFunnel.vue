@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmtBig, fmtPct, type HotspotReport } from '../api'
+import { api, fmtBig, fmtPct, type HotspotReport, type HotspotRunSummary } from '../api'
 
 const router = useRouter()
 const report = ref<HotspotReport>({})
+const history = ref<HotspotRunSummary[]>([])
+const activeRunId = ref<number | ''>('')
 const activeStage = ref(0)
 const loading = ref(true)
 const running = ref(false)
@@ -44,13 +46,28 @@ const statusMeta: Record<string, { label: string; className: string }> = {
 async function load() {
   loading.value = true
   try {
-    const [result, status] = await Promise.all([api.hotspot(), api.hotspotStatus()])
+    const [result, status, runs] = await Promise.all([api.hotspot(), api.hotspotStatus(), api.hotspotHistory(30).catch(() => [] as HotspotRunSummary[])])
     report.value = result
     enabled.value = status.enabled
     running.value = status.running
+    history.value = runs
+    activeRunId.value = runs.length ? runs[0].id : ''
     error.value = ''
   } catch (e: any) {
     error.value = e?.message || '热点漏斗加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadRun() {
+  if (activeRunId.value === '') return
+  loading.value = true
+  try {
+    report.value = await api.hotspot(Number(activeRunId.value))
+    error.value = ''
+  } catch (e: any) {
+    error.value = e?.message || '历史报告加载失败'
   } finally {
     loading.value = false
   }
@@ -102,8 +119,10 @@ onUnmounted(() => window.clearInterval(statusTimer))
       <div class="funnel-heading">
         <div class="heading-copy"><strong>热点发现漏斗</strong><span>本地行情证据 · AI 产业链推理</span></div>
         <div class="heading-meta">
+          <select v-if="history.length" v-model="activeRunId" class="run-select" aria-label="历史运行记录" @change="loadRun">
+            <option v-for="run in history" :key="run.id" :value="run.id">{{ run.report_date }} · {{ run.created_at.slice(11) || run.created_at }}</option>
+          </select>
           <span class="schedule-badge"><i></i>交易日 08:00</span>
-          <span v-if="report.report_date" class="heading-date">数据 {{ report.report_date }}</span>
         </div>
       </div>
       <div class="funnel-stack">
@@ -227,6 +246,7 @@ onUnmounted(() => window.clearInterval(statusTimer))
 .heading-copy strong { font-size:17px; letter-spacing:0; }
 .heading-copy span { overflow:hidden; color:#8391a6; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
 .heading-meta { display:flex; flex:0 0 auto; flex-direction:column; align-items:flex-end; gap:5px; }
+.run-select { max-width:180px; padding:3px 6px; border:1px solid #39465c; border-radius:3px; background:#1b2740; color:#c8d2e0; font-size:11px; }
 .schedule-badge,.heading-date { display:flex; align-items:center; gap:6px; color:#97a5b9; font-size:10px; }
 .schedule-badge i { width:6px; height:6px; border-radius:50%; background:#18a976; box-shadow:0 0 0 3px rgba(24,169,118,.13); }
 .heading-date { color:#d5b457; }

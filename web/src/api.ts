@@ -310,6 +310,13 @@ export interface HotspotConcept {
   stocks: Array<{ symbol: string; code: string; name: string; change_pct: number; circ_mv: number; amount: number }>
 }
 
+export interface HotspotRunSummary {
+  id: number
+  report_date: string
+  model: string
+  created_at: string
+}
+
 export interface HotspotReport {
   available?: boolean
   report_date?: string
@@ -355,7 +362,8 @@ export const api = {
   recommendationPerformance: (days = 5) => req<RecommendationPerformance[]>(`/recommendations/performance?days=${days}`),
   recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
-  hotspot: () => req<HotspotReport>('/hotspot'),
+  hotspot: (id?: number) => req<HotspotReport>(`/hotspot${id ? `?id=${id}` : ''}`),
+  hotspotHistory: (limit = 30) => req<HotspotRunSummary[]>(`/hotspot/history?limit=${limit}`),
   hotspotStatus: () => req<{ enabled: boolean; running: boolean }>('/hotspot/status'),
   runHotspot: () => req<{ status: string }>('/hotspot/run', { method: 'POST' }),
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),

@@ -63,6 +63,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
+	mux.HandleFunc("GET /api/v1/hotspot/history", s.handleHotspotHistory)
 	mux.HandleFunc("GET /api/v1/hotspot/status", s.handleHotspotStatus)
 	mux.HandleFunc("POST /api/v1/hotspot/run", s.handleHotspotRun)
 
@@ -745,7 +746,18 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 func (s *Server) handleHotspot(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	report, err := s.St.LatestHotspotReport(ctx)
+	var report json.RawMessage
+	var err error
+	if idText := r.URL.Query().Get("id"); idText != "" {
+		id, parseErr := strconv.ParseInt(idText, 10, 64)
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, "无效的运行 id")
+			return
+		}
+		report, err = s.St.HotspotReportByID(ctx, id)
+	} else {
+		report, err = s.St.LatestHotspotReport(ctx)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -755,6 +767,18 @@ func (s *Server) handleHotspot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleHotspotHistory(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.HotspotRunHistory(ctx, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) handleHotspotStatus(w http.ResponseWriter, r *http.Request) {
