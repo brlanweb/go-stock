@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from 'd3-hierarchy'
 import { api, fmtBig, fmtPct, type HeatmapGroup, type HeatmapItem } from '../api'
@@ -167,18 +167,23 @@ function openSector(name: string) {
   if (code) router.push(`/sector/${encodeURIComponent(code)}`)
 }
 
+// mapHost 位于 v-if 分支内，切换 Tab 会卸载并重建 DOM；
+// 必须跟随元素变化重新 observe，否则尺寸停留在 0 导致云图无法恢复。
+watch(mapHost, host => {
+  resizeObserver?.disconnect()
+  if (!host) return
+  resizeObserver = new ResizeObserver(entries => {
+    const rect = entries[0]?.contentRect
+    if (rect && rect.width > 0 && rect.height > 0) {
+      mapWidth.value = Math.floor(rect.width)
+      mapHeight.value = Math.floor(rect.height)
+    }
+  })
+  resizeObserver.observe(host)
+})
+
 onMounted(async () => {
   await nextTick()
-  if (mapHost.value) {
-    resizeObserver = new ResizeObserver(entries => {
-      const rect = entries[0]?.contentRect
-      if (rect) {
-        mapWidth.value = Math.floor(rect.width)
-        mapHeight.value = Math.floor(rect.height)
-      }
-    })
-    resizeObserver.observe(mapHost.value)
-  }
   refresh()
 })
 onUnmounted(() => {

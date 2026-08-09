@@ -101,7 +101,8 @@ function onSearch() {
   searchTimer = window.setTimeout(async () => {
     try {
       const results = await api.search(query)
-      if (request === searchRequest) searchResults.value = results
+      // 后端无匹配（如拼音关键词）会返回 null，必须归一化为数组，否则模板渲染报错导致页面错乱。
+      if (request === searchRequest) searchResults.value = Array.isArray(results) ? results : []
     } catch {
       if (request === searchRequest) searchResults.value = []
     }

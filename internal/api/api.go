@@ -279,6 +279,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if results == nil {
+		results = []model.Security{}
+	}
 	writeJSON(w, 200, results)
 }
 
