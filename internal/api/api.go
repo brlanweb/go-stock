@@ -59,7 +59,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/agent/chat/history/{code}", s.handleAgentChatClear)
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
+	mux.HandleFunc("GET /api/v1/recommendations/performance", s.handleRecommendationPerformance)
+	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
+	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
+	mux.HandleFunc("GET /api/v1/hotspot/status", s.handleHotspotStatus)
+	mux.HandleFunc("POST /api/v1/hotspot/run", s.handleHotspotRun)
 
 	mux.HandleFunc("GET /api/v1/watchlist", s.handleWatchlistGet)
 	mux.HandleFunc("POST /api/v1/watchlist/{code}", s.handleWatchlistAdd)
@@ -695,6 +700,30 @@ func (s *Server) handleRecommendationHistory(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, dates)
 }
 
+func (s *Server) handleRecommendationPerformance(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	summaries, err := s.St.RecommendationRecentPerformance(ctx, days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, summaries)
+}
+
+func (s *Server) handleRecommendationStats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	stats, err := s.St.RecommendationOverallStats(ctx, days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, stats)
+}
+
 func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request) {
 	if s.Analysis == nil || !s.Analysis.Enabled() {
 		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置")
@@ -707,6 +736,48 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.Analysis.RunDaily(ctx); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "analysis completed"})
+}
+
+func (s *Server) handleHotspot(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	report, err := s.St.LatestHotspotReport(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if report == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleHotspotStatus(w http.ResponseWriter, r *http.Request) {
+	enabled, running := false, false
+	if s.Analysis != nil {
+		enabled = s.Analysis.Enabled()
+		running = s.Analysis.HotspotRunning()
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled, "running": running})
+}
+
+func (s *Server) handleHotspotRun(w http.ResponseWriter, r *http.Request) {
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 热点分析未配置")
+		return
+	}
+	if s.Analysis.HotspotRunning() {
+		writeErr(w, http.StatusConflict, "热点漏斗任务正在执行")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	if err := s.Analysis.RunHotspot(ctx); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

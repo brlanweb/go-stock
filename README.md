@@ -68,6 +68,8 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_AI_MODEL | 空 | 模型正式标识，如服务商实际提供的模型 ID |
 | GOSTOCK_AI_PROMPT_FILE | config/ai_prompt.md | AI 趋势推荐提示词文件路径（长提示词放文件，配置只填路径） |
 | GOSTOCK_AI_PROMPT | 空 | 可选内联短提示词；留空则用提示词文件，再空则用内嵌默认 |
+| GOSTOCK_AI_HOTSPOT_PROMPT_FILE | config/hotspot_prompt.md | 热点漏斗的产业链分析提示词文件 |
+| GOSTOCK_HOTSPOT_BLACKLIST_FILE | config/hotspot_blacklist.txt | 泛概念过滤关键词文件，每行一个关键词 |
 
 ### AI 推荐配置示例
 
@@ -102,6 +104,7 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/security/{code}` | 基础信息 |
 | `GET /api/v1/indicator/{code}` | 每日指标历史 |
 | `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d&limit=31` | 本地日K与指标生成的一级行业/主要概念云图；板块和个股面积按流通市值，每板块最多 50 只 |
+| `GET /api/v1/hotspot`、`POST /api/v1/hotspot/run` | 查询或触发热点漏斗；按数据初筛、关系收敛、AI产业链分析、本地回验输出有效概念。配置 AI 后交易日 08:00 自动运行盘前分析 |
 | `GET/PUT /api/v1/indicators[/{id}]` | 指标与策略目录、启停及参数管理 |
 | `POST /api/v1/indicators/{id}/reset` | 恢复指标默认参数 |
 | `POST /api/v1/backtest` | 使用本地日 K 执行确定性 A 股策略回测 |

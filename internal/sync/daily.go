@@ -172,6 +172,9 @@ func (e *Engine) persistCloseSession(ctx context.Context, capturedAt time.Time, 
 	if err := e.st.UpsertKlines(ctx, klines); err != nil {
 		return err
 	}
+	if err := e.st.RecomputeHotspotStats(ctx, today); err != nil {
+		slog.Warn("计算热点板块统计失败", "date", today, "err", err)
+	}
 
 	symbols := make([]string, 0, len(snaps))
 	for _, snapshot := range snaps {

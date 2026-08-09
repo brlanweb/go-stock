@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,17 +20,19 @@ import (
 )
 
 type Config struct {
-	BaseURL string
-	APIKey  string
-	Model   string
-	Prompt  string
+	BaseURL       string
+	APIKey        string
+	Model         string
+	Prompt        string
+	HotspotPrompt string
 }
 
 type Service struct {
-	st      *store.Store
-	config  Config
-	client  *http.Client
-	running atomic.Bool
+	st             *store.Store
+	config         Config
+	client         *http.Client
+	running        atomic.Bool
+	hotspotRunning atomic.Bool
 }
 
 func New(st *store.Store, config Config) *Service {
@@ -270,6 +273,11 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	return s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations)
 }
 
+// StartScheduler 启动两条独立调度：
+//   - 交易日 16:30 收盘后生成 AI 趋势推荐（依赖当日收盘日 K）；
+//   - 交易日 08:00 盘前运行热点漏斗（基于前一交易日收盘数据，供开盘决策）。
+//
+// 两条调度各自独立超时，互不挤占。
 func (s *Service) StartScheduler(ctx context.Context) {
 	if !s.Enabled() {
 		return
@@ -282,7 +290,28 @@ func (s *Service) StartScheduler(ctx context.Context) {
 			select {
 			case <-time.After(time.Until(next)):
 				runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-				_ = s.runDailyAt(runCtx, next)
+				if err := s.runDailyAt(runCtx, next); err != nil {
+					slog.Warn("AI 推荐生成失败", "err", err)
+				}
+				cancel()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			now := time.Now().In(shanghai())
+			next := nextHotspotRun(now)
+
+			select {
+			case <-time.After(time.Until(next)):
+				runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				if err := s.RunHotspot(runCtx); err != nil {
+					slog.Warn("AI 热点漏斗生成失败", "err", err)
+				} else {
+					slog.Info("AI 热点漏斗盘前分析完成")
+				}
 				cancel()
 			case <-ctx.Done():
 				return
@@ -331,6 +360,18 @@ func isRecommendationTradingDay(now time.Time) bool {
 }
 func nextRecommendationRun(now time.Time) time.Time {
 	next := time.Date(now.Year(), now.Month(), now.Day(), 16, 30, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	for !isRecommendationTradingDay(next) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
+}
+
+// nextHotspotRun 计算下一次盘前热点漏斗运行时间：交易日 08:00 Asia/Shanghai。
+func nextHotspotRun(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location())
 	if !next.After(now) {
 		next = next.AddDate(0, 0, 1)
 	}

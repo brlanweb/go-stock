@@ -145,6 +145,39 @@ export interface Recommendation {
   probability: number
   reason: string
   model: string
+  entry_price: number | null
+  latest_price: number | null
+  change_pct: number | null
+  tracked_days: number
+}
+
+export interface RecommendationStats {
+  total_days: number
+  frozen_picks: number
+  tracking_picks: number
+  wins: number
+  win_rate: number | null
+  avg_change_pct: number | null
+  sum_change_pct: number | null
+  median_pct: number | null
+  avg_win_pct: number | null
+  avg_loss_pct: number | null
+  best_pct: number | null
+  best_name: string
+  worst_pct: number | null
+  worst_name: string
+  day_wins: number
+  day_frozen: number
+  day_win_rate: number | null
+}
+
+export interface RecommendationPerformance {
+  date: string
+  stocks: number
+  tracked_days: number
+  finished: boolean
+  sum_change_pct: number | null
+  avg_change_pct: number | null
 }
 
 export interface SectorListItem {
@@ -227,6 +260,67 @@ export interface BacktestResult {
   params: Record<string, any>
 }
 
+export interface HotspotSectorStat {
+  sector_code: string
+  sector_name: string
+  stock_count: number
+  avg_change: number
+  avg_change_5d: number
+  avg_change_20d: number
+  up_ratio: number
+  limit_up_count: number
+  total_amount: number
+  amount_ratio: number
+  avg_turnover: number
+  heat_score: number
+}
+
+export interface HotspotRelation {
+  from_code: string
+  from_name: string
+  to_code: string
+  to_name: string
+  common_count: number
+  jaccard: number
+}
+
+export interface HotspotAIRelation {
+  from_code: string
+  to_code: string
+  type: string
+  reason: string
+}
+
+export interface HotspotMainline {
+  name: string
+  thesis: string
+  concept_codes: string[]
+  relations: HotspotAIRelation[]
+  chokepoints: Array<{ sector_code: string; status: string; confidence: number; reason: string; invalidation: string }>
+}
+
+export interface HotspotConcept {
+  sector_code: string
+  sector_name: string
+  status: 'accelerating' | 'latent' | 'overheated'
+  confidence: number
+  reason: string
+  invalidation: string
+  stats: HotspotSectorStat
+  stocks: Array<{ symbol: string; code: string; name: string; change_pct: number; circ_mv: number; amount: number }>
+}
+
+export interface HotspotReport {
+  available?: boolean
+  report_date?: string
+  model?: string
+  generated_at?: string
+  screened?: HotspotSectorStat[]
+  data_relations?: HotspotRelation[]
+  mainlines?: HotspotMainline[]
+  concepts?: HotspotConcept[]
+}
+
 export interface HeatmapResponse {
   market: string
   group_by: string
@@ -258,7 +352,12 @@ export const api = {
   watchlist: () => req<WatchlistResponse>('/watchlist'),
   recommendations: (date = '') => req<Recommendation[]>(`/recommendations${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   recommendationHistory: (limit = 90) => req<string[]>(`/recommendations/history?limit=${limit}`),
+  recommendationPerformance: (days = 5) => req<RecommendationPerformance[]>(`/recommendations/performance?days=${days}`),
+  recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
+  hotspot: () => req<HotspotReport>('/hotspot'),
+  hotspotStatus: () => req<{ enabled: boolean; running: boolean }>('/hotspot/status'),
+  runHotspot: () => req<{ status: string }>('/hotspot/run', { method: 'POST' }),
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),
   delWatch: (code: string) => req(`/watchlist/${code}`, { method: 'DELETE' }),
   syncStatus: () => req<SyncStatus>('/sync/status'),

@@ -57,3 +57,31 @@ func TestNextRecommendationRunSkipsWeekend(t *testing.T) {
 		t.Fatal("Saturday must not be treated as a trading day")
 	}
 }
+
+func TestNextHotspotRunMorningSchedule(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+
+	// 交易日 07:30 → 当天 08:00
+	beforeOpen := time.Date(2026, time.July, 23, 7, 30, 0, 0, loc)
+	if next, want := nextHotspotRun(beforeOpen), time.Date(2026, time.July, 23, 8, 0, 0, 0, loc); !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+
+	// 交易日 08:00 整点已过 → 次一交易日 08:00
+	atOpen := time.Date(2026, time.July, 23, 8, 0, 0, 0, loc)
+	if next, want := nextHotspotRun(atOpen), time.Date(2026, time.July, 24, 8, 0, 0, 0, loc); !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+
+	// 周五 09:00 → 跳过周末到周一 08:00
+	fridayMorning := time.Date(2026, time.July, 24, 9, 0, 0, 0, loc)
+	if next, want := nextHotspotRun(fridayMorning), time.Date(2026, time.July, 27, 8, 0, 0, 0, loc); !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+
+	// 周六任意时刻 → 周一 08:00
+	saturday := time.Date(2026, time.July, 25, 12, 0, 0, 0, loc)
+	if next, want := nextHotspotRun(saturday), time.Date(2026, time.July, 27, 8, 0, 0, 0, loc); !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+}

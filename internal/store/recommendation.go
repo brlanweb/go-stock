@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -198,7 +199,9 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 		where = "r.analysis_date=?"
 		args = append(args, date)
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.reason,r.model_name FROM stock_recommendation r INNER JOIN stock_basic b ON b.symbol=r.symbol WHERE `+where+` ORDER BY r.rank_no LIMIT 3`, args...)
+	rows, err := s.DB.QueryContext(ctx, `SELECT
+		DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.reason,r.model_name
+		FROM stock_recommendation r INNER JOIN stock_basic b ON b.symbol=r.symbol WHERE `+where+` ORDER BY r.rank_no LIMIT 3`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,10 +214,245 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 		}
 		out = append(out, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		window, err := s.recommendationWindow(ctx, out[i].Symbol, out[i].Date)
+		if err != nil {
+			return nil, err
+		}
+		out[i].EntryPrice, out[i].LatestPrice, out[i].ChangePct = recommendationPerformance(window.entryOpen, window.lastClose)
+		out[i].TrackedDays = window.days
+	}
 	if out == nil {
 		out = []model.StockRecommendation{}
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// recommendationTrackWindow 是推荐收益追踪窗口：加入日起 5 个交易日。
+const recommendationTrackWindow = 5
+
+type recommendationWindow struct {
+	entryOpen sql.NullFloat64
+	lastClose sql.NullFloat64
+	days      int
+}
+
+// recommendationWindow 读取加入日起最多 5 个交易日的日 K：
+// 买入基准为加入日开盘价，收益终点为窗口内最后一个交易日收盘价。
+// 超过窗口的新行情不参与计算，因此满 5 个交易日后结果自然冻结。
+func (s *Store) recommendationWindow(ctx context.Context, symbol, analysisDate string) (recommendationWindow, error) {
+	var window recommendationWindow
+	rows, err := s.DB.QueryContext(ctx, `SELECT k.open,k.close FROM kline_daily k
+		WHERE k.symbol=? AND k.trade_date>=? ORDER BY k.trade_date ASC LIMIT ?`, symbol, analysisDate, recommendationTrackWindow)
+	if err != nil {
+		return window, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var open, close sql.NullFloat64
+		if err := rows.Scan(&open, &close); err != nil {
+			return window, err
+		}
+		if window.days == 0 {
+			window.entryOpen = open
+		}
+		window.lastClose = close
+		window.days++
+	}
+	return window, rows.Err()
+}
+
+// RecommendationDailyPerformance 是“最近 N 个推荐日全部买入”的组合口径统计。
+type RecommendationDailyPerformance struct {
+	Date         string   `json:"date"`
+	Stocks       int      `json:"stocks"`
+	TrackedDays  int      `json:"tracked_days"`
+	Finished     bool     `json:"finished"`
+	SumChangePct *float64 `json:"sum_change_pct"`
+	AvgChangePct *float64 `json:"avg_change_pct"`
+}
+
+// RecommendationRecentPerformance 汇总最近 days 个推荐日的窗口收益：
+// 假设每只推荐股按加入日开盘价等权买入，输出各日合计与平均涨跌点数。
+func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) ([]RecommendationDailyPerformance, error) {
+	if days <= 0 || days > 30 {
+		days = recommendationTrackWindow
+	}
+	dates, err := s.RecommendationHistory(ctx, days)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RecommendationDailyPerformance, 0, len(dates))
+	for _, date := range dates {
+		items, err := s.RecommendationsByDate(ctx, date)
+		if err != nil {
+			return nil, err
+		}
+		summary := RecommendationDailyPerformance{Date: date, Stocks: len(items)}
+		var sum float64
+		var counted int
+		for _, item := range items {
+			if item.TrackedDays > summary.TrackedDays {
+				summary.TrackedDays = item.TrackedDays
+			}
+			if item.ChangePct != nil {
+				sum += *item.ChangePct
+				counted++
+			}
+		}
+		summary.Finished = summary.TrackedDays >= recommendationTrackWindow
+		if counted > 0 {
+			total := sum
+			avg := sum / float64(counted)
+			summary.SumChangePct = &total
+			summary.AvgChangePct = &avg
+		}
+		out = append(out, summary)
+	}
+	return out, nil
+}
+
+// recommendationPerformance 将加入日开盘价与追踪窗口内最后收盘价转换为展示数据。
+// 无历史行情或加入日价格无效时不计算收益率，前端据此显示“-”。
+func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float64, *float64, *float64) {
+	var entry, latest, changePct *float64
+	if entryPrice.Valid && entryPrice.Float64 > 0 {
+		value := entryPrice.Float64
+		entry = &value
+	}
+	if latestPrice.Valid && latestPrice.Float64 > 0 {
+		value := latestPrice.Float64
+		latest = &value
+	}
+	if entry != nil && latest != nil {
+		value := (*latest - *entry) / *entry * 100
+		changePct = &value
+	}
+	return entry, latest, changePct
+}
+
+// RecommendationStats 是 AI 趋势推荐的整体成功率评估，仅统计已冻结
+// （满 5 个交易日窗口）的推荐，避免追踪中的浮动数据污染胜率。
+type RecommendationStats struct {
+	TotalDays     int      `json:"total_days"`
+	FrozenPicks   int      `json:"frozen_picks"`
+	TrackingPicks int      `json:"tracking_picks"`
+	Wins          int      `json:"wins"`
+	WinRate       *float64 `json:"win_rate"`
+	AvgChangePct  *float64 `json:"avg_change_pct"`
+	SumChangePct  *float64 `json:"sum_change_pct"`
+	MedianPct     *float64 `json:"median_pct"`
+	AvgWinPct     *float64 `json:"avg_win_pct"`
+	AvgLossPct    *float64 `json:"avg_loss_pct"`
+	BestPct       *float64 `json:"best_pct"`
+	BestName      string   `json:"best_name"`
+	WorstPct      *float64 `json:"worst_pct"`
+	WorstName     string   `json:"worst_name"`
+	DayWins       int      `json:"day_wins"`
+	DayFrozen     int      `json:"day_frozen"`
+	DayWinRate    *float64 `json:"day_win_rate"`
+}
+
+// RecommendationOverallStats 汇总最近 days 个推荐日的成功率评估。
+// 个股口径：加入日开盘价 → 第 5 个交易日收盘价；组合口径：单日 3 只求和。
+func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (RecommendationStats, error) {
+	if days <= 0 || days > 365 {
+		days = 60
+	}
+	var stats RecommendationStats
+	dates, err := s.RecommendationHistory(ctx, days)
+	if err != nil {
+		return stats, err
+	}
+	stats.TotalDays = len(dates)
+	var frozen []float64
+	var winSum, lossSum float64
+	var winCnt, lossCnt int
+	for _, date := range dates {
+		items, err := s.RecommendationsByDate(ctx, date)
+		if err != nil {
+			return stats, err
+		}
+		var daySum float64
+		dayFrozen := true
+		dayCounted := 0
+		for _, item := range items {
+			if item.ChangePct == nil {
+				continue
+			}
+			if item.TrackedDays < recommendationTrackWindow {
+				stats.TrackingPicks++
+				dayFrozen = false
+				continue
+			}
+			pct := *item.ChangePct
+			stats.FrozenPicks++
+			frozen = append(frozen, pct)
+			daySum += pct
+			dayCounted++
+			if pct > 0 {
+				stats.Wins++
+				winSum += pct
+				winCnt++
+			} else if pct < 0 {
+				lossSum += pct
+				lossCnt++
+			}
+			if stats.BestPct == nil || pct > *stats.BestPct {
+				value := pct
+				stats.BestPct = &value
+				stats.BestName = item.Name
+			}
+			if stats.WorstPct == nil || pct < *stats.WorstPct {
+				value := pct
+				stats.WorstPct = &value
+				stats.WorstName = item.Name
+			}
+		}
+		if dayFrozen && dayCounted > 0 {
+			stats.DayFrozen++
+			if daySum > 0 {
+				stats.DayWins++
+			}
+		}
+	}
+	if stats.FrozenPicks > 0 {
+		var sum float64
+		for _, pct := range frozen {
+			sum += pct
+		}
+		total := sum
+		avg := sum / float64(stats.FrozenPicks)
+		winRate := float64(stats.Wins) / float64(stats.FrozenPicks) * 100
+		stats.SumChangePct = &total
+		stats.AvgChangePct = &avg
+		stats.WinRate = &winRate
+		sort.Float64s(frozen)
+		var median float64
+		mid := len(frozen) / 2
+		if len(frozen)%2 == 1 {
+			median = frozen[mid]
+		} else {
+			median = (frozen[mid-1] + frozen[mid]) / 2
+		}
+		stats.MedianPct = &median
+	}
+	if winCnt > 0 {
+		value := winSum / float64(winCnt)
+		stats.AvgWinPct = &value
+	}
+	if lossCnt > 0 {
+		value := lossSum / float64(lossCnt)
+		stats.AvgLossPct = &value
+	}
+	if stats.DayFrozen > 0 {
+		value := float64(stats.DayWins) / float64(stats.DayFrozen) * 100
+		stats.DayWinRate = &value
+	}
+	return stats, nil
 }
 
 func (s *Store) RecommendationHistory(ctx context.Context, limit int) ([]string, error) {

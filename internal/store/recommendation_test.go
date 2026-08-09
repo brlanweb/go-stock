@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/hoax/go-stock/internal/model"
@@ -29,5 +30,23 @@ func TestRecommendationTrendScoreRejectsFallingTrend(t *testing.T) {
 	}
 	if _, ok := recommendationTrendScore(klines); ok {
 		t.Fatal("falling trend must not qualify")
+	}
+}
+
+func TestRecommendationPerformance(t *testing.T) {
+	entry, latest, changePct := recommendationPerformance(
+		sql.NullFloat64{Float64: 10, Valid: true},
+		sql.NullFloat64{Float64: 12.5, Valid: true},
+	)
+	if entry == nil || latest == nil || changePct == nil {
+		t.Fatal("expected complete performance data")
+	}
+	if *entry != 10 || *latest != 12.5 || *changePct != 25 {
+		t.Fatalf("unexpected performance: entry=%v latest=%v change=%v", *entry, *latest, *changePct)
+	}
+
+	entry, latest, changePct = recommendationPerformance(sql.NullFloat64{}, sql.NullFloat64{Float64: 12.5, Valid: true})
+	if entry != nil || latest == nil || changePct != nil {
+		t.Fatalf("expected incomplete performance data: entry=%v latest=%v change=%v", entry, latest, changePct)
 	}
 }

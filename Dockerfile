@@ -31,6 +31,8 @@ COPY python-provider/requirements.txt python-provider/requirements.txt
 RUN pip install --no-cache-dir -r python-provider/requirements.txt
 COPY python-provider/fetch_kline.py python-provider/fetch_kline.py
 COPY config/ai_prompt.md config/ai_prompt.md
+COPY config/hotspot_prompt.md config/hotspot_prompt.md
+COPY config/hotspot_blacklist.txt config/hotspot_blacklist.txt
 ENV TZ=Asia/Shanghai
 USER gostock
 COPY --from=go-builder /go-stock /usr/local/bin/go-stock

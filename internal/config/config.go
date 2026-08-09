@@ -41,11 +41,13 @@ type Config struct {
 	RedisDB         int
 	RedisTTLSeconds int
 
-	AIBaseURL    string // OpenAI 兼容模型地址
-	AIAPIKey     string // 模型密钥
-	AIModel      string // 模型名称
-	AIPrompt     string // 股票分析提示词（可由 AIPromptFile 覆盖）
-	AIPromptFile string // 提示词文件路径（优先级高于 AIPrompt）
+	AIBaseURL           string // OpenAI 兼容模型地址
+	AIAPIKey            string // 模型密钥
+	AIModel             string // 模型名称
+	AIPrompt            string // 股票分析提示词（可由 AIPromptFile 覆盖）
+	AIPromptFile        string // 提示词文件路径（优先级高于 AIPrompt）
+	AIHotspotPrompt     string // 热点漏斗 AI 提示词
+	AIHotspotPromptFile string // 热点漏斗提示词文件路径
 
 	LogLevel string
 }
@@ -85,12 +87,21 @@ func Load() (*Config, error) {
 		AIModel:              getEnv("GOSTOCK_AI_MODEL", ""),
 		AIPrompt:             getEnv("GOSTOCK_AI_PROMPT", ""),
 		AIPromptFile:         getEnv("GOSTOCK_AI_PROMPT_FILE", "config/ai_prompt.md"),
+		AIHotspotPrompt:      getEnv("GOSTOCK_AI_HOTSPOT_PROMPT", ""),
+		AIHotspotPromptFile:  getEnv("GOSTOCK_AI_HOTSPOT_PROMPT_FILE", "config/hotspot_prompt.md"),
 		LogLevel:             getEnv("GOSTOCK_LOG_LEVEL", "info"),
 	}
 	if c.AIPromptFile != "" {
 		if data, err := os.ReadFile(c.AIPromptFile); err == nil {
 			if text := strings.TrimSpace(string(data)); text != "" {
 				c.AIPrompt = text
+			}
+		}
+	}
+	if c.AIHotspotPromptFile != "" {
+		if data, err := os.ReadFile(c.AIHotspotPromptFile); err == nil {
+			if text := strings.TrimSpace(string(data)); text != "" {
+				c.AIHotspotPrompt = text
 			}
 		}
 	}
