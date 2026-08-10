@@ -247,6 +247,11 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 
 	// 3. 按目标交易日重新判定缺失。这样历史完整且已经更新的证券不会重复请求上游。
 	targetDate := latestExpectedTradeDate(time.Now())
+	if n, err := e.st.MarkDelistedByName(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已按退市整理期名称识别退市证券", "count", n)
+	}
 	if n, err := e.st.MarkSecuritiesWithStaleTradeDateDelisted(ctx, targetDate); err != nil {
 		return err
 	} else if n > 0 {
@@ -359,6 +364,20 @@ func (e *Engine) backfillOne(ctx context.Context, cp model.SyncCheckpoint) error
 		return err
 	}
 	if !updated.Complete {
+		// 尾部已到位、仅头部缺失：本轮已尝试全部数据源，上游给不出更早历史。
+		// 标记 head_exhausted 收敛为完成，避免每轮全量重拉；显式 full 模式仍可重试。
+		tailTarget := targetDate
+		if updated.Status != "listed" && updated.LastTradeDate != "" {
+			tailTarget = updated.LastTradeDate
+		}
+		if !updated.HistoryStartComplete && updated.LastDate != "" && updated.LastDate >= tailTarget {
+			if err := e.st.MarkHeadExhausted(ctx, TaskBackfill, cp.Symbol); err != nil {
+				return err
+			}
+			slog.Info("头部历史上游不可得，按可得最早日期收敛",
+				"symbol", cp.Symbol, "first", updated.FirstDate, "list_date", updated.ListDate)
+			return e.st.MarkDone(ctx, TaskBackfill, cp.Symbol, targetDate)
+		}
 		return fmt.Errorf("历史覆盖仍不完整 first=%s last=%s count=%d", updated.FirstDate, updated.LastDate, updated.Count)
 	}
 	return nil
@@ -431,6 +450,15 @@ func (e *Engine) fetchKlinesWithFallback(ctx context.Context, symbol, beg string
 	}
 	if len(best) > 0 {
 		first, last := klineDateRange(best)
+		// 尾部已达到目标交易日、仅头部不齐时返回已合并结果：
+		// 各数据源都给不出更早历史，由调用方按实际覆盖收敛（head_exhausted）。
+		tailTarget := latestExpectedTradeDate(time.Now())
+		if coverage != nil && coverage.Status != "listed" && coverage.LastTradeDate != "" {
+			tailTarget = coverage.LastTradeDate
+		}
+		if last >= tailTarget {
+			return best, nil
+		}
 		return nil, fmt.Errorf("历史数据源均未达到覆盖要求 first=%s last=%s count=%d", first, last, len(best))
 	}
 	if lastErr == nil {

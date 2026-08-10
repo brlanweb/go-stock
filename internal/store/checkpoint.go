@@ -84,15 +84,25 @@ func (s *Store) MarkDone(ctx context.Context, task, symbol, targetDate string) e
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
 				WHEN b.list_date>? THEN 'done'
+				WHEN b.list_date IS NULL AND k.last_date IS NULL THEN 'done'
 				WHEN b.status<>'listed' AND k.last_date IS NULL THEN 'done'
 				WHEN k.last_date IS NOT NULL
 				 AND k.last_date>=CASE
 					WHEN b.status<>'listed' AND b.last_trade_date IS NOT NULL THEN b.last_trade_date
 					ELSE ? END
-				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
+				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY) OR cp.head_exhausted=1)
 				THEN 'done' ELSE 'pending' END,
 			cp.last_error=''
 		WHERE cp.symbol=? AND cp.task=?`, symbol, targetDate, targetDate, symbol, task)
+	return err
+}
+
+// MarkHeadExhausted 标记头部历史各数据源已尽力仍不可得。协调阶段据此把
+// "尾部已到位、仅头部缺失"的证券视为完成，不再每轮全量重拉上游。
+// 显式 full 模式重拉补齐头部后，MarkDone/Reconcile 按真实覆盖正常判定。
+func (s *Store) MarkHeadExhausted(ctx context.Context, task, symbol string) error {
+	_, err := s.DB.ExecContext(ctx,
+		"UPDATE sync_checkpoint SET head_exhausted=1 WHERE symbol=? AND task=?", symbol, task)
 	return err
 }
 
@@ -193,22 +203,23 @@ func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate strin
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
 				WHEN b.list_date>? THEN 'done'
+				WHEN b.list_date IS NULL AND k.last_date IS NULL THEN 'done'
 				WHEN b.status<>'listed' AND k.last_date IS NULL THEN 'done'
 				WHEN k.last_date IS NOT NULL
 				 AND k.last_date>=CASE
 					WHEN b.status<>'listed' AND b.last_trade_date IS NOT NULL THEN b.last_trade_date
 					ELSE ? END
-				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY))
+				 AND (b.list_date IS NULL OR k.first_date<=DATE_ADD(b.list_date, INTERVAL 14 DAY) OR cp.head_exhausted=1)
 				THEN 'done'
 				WHEN cp.status='failed' THEN 'failed'
 				ELSE 'pending'
 			END,
 			cp.retry_count=CASE
-				WHEN b.list_date>? OR (b.status<>'listed' AND k.last_date IS NULL) THEN 0
+				WHEN b.list_date>? OR (b.list_date IS NULL AND k.last_date IS NULL) OR (b.status<>'listed' AND k.last_date IS NULL) THEN 0
 				WHEN cp.status='failed' THEN cp.retry_count
 				ELSE 0 END,
 			cp.last_error=CASE
-				WHEN b.list_date>? OR (b.status<>'listed' AND k.last_date IS NULL) THEN ''
+				WHEN b.list_date>? OR (b.list_date IS NULL AND k.last_date IS NULL) OR (b.status<>'listed' AND k.last_date IS NULL) THEN ''
 				ELSE cp.last_error END
 		WHERE cp.task=?`, targetDate, targetDate, targetDate, targetDate, task)
 	if err != nil {

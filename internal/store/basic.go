@@ -95,6 +95,22 @@ func (s *Store) MarkSecuritiesWithStaleTradeDateDelisted(ctx context.Context, ta
 	return res.RowsAffected()
 }
 
+// MarkDelistedByName 按退市整理期命名规范识别退市股票：沪市"退市XX"、深市/北交所
+// "XX退"。上游全市场列表在摘牌后一段时间仍包含这些代码，而 180 天兜底阈值尚未触发，
+// 若不提前收敛会反复请求上游并失败。
+func (s *Store) MarkDelistedByName(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE stock_basic b
+		LEFT JOIN (SELECT symbol,MAX(trade_date) last_date FROM kline_daily GROUP BY symbol) k ON k.symbol=b.symbol
+		SET b.status='delisted',b.last_trade_date=COALESCE(k.last_date,b.last_trade_date),b.updated_at=NOW()
+		WHERE b.status='listed' AND b.sec_type='stock'
+		  AND (b.name LIKE '退市%' OR b.name LIKE '%退')`)
+	if err != nil {
+		return 0, fmt.Errorf("mark delisted by name: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // NormalizeInactiveLastTradeDates 以本地已保存的最后一根日 K 作为非在市证券的
 // 实际覆盖终点。退市、转板旧代码不应继续追赶全市场最近交易日。
 func (s *Store) NormalizeInactiveLastTradeDates(ctx context.Context) (int64, error) {
