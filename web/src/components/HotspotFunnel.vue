@@ -120,7 +120,8 @@ onUnmounted(() => window.clearInterval(statusTimer))
         <div class="heading-copy"><strong>热点发现漏斗</strong><span>本地行情证据 · AI 产业链推理</span></div>
         <div class="heading-meta">
           <select v-if="history.length" v-model="activeRunId" class="run-select" aria-label="历史运行记录" @change="loadRun">
-            <option v-for="run in history" :key="run.id" :value="run.id">{{ run.report_date }} · {{ run.created_at.slice(11) || run.created_at }}</option>
+            <!-- created_at 是运行时间，report_date 是所用收盘数据日期（周一盘前为上周五），分开标注避免误解 -->
+            <option v-for="run in history" :key="run.id" :value="run.id">{{ run.created_at.slice(5) }} 运行 · 数据 {{ run.report_date.slice(5) }}</option>
           </select>
           <span class="schedule-badge"><i></i>交易日 08:00</span>
         </div>
@@ -246,7 +247,7 @@ onUnmounted(() => window.clearInterval(statusTimer))
 .heading-copy strong { font-size:17px; letter-spacing:0; }
 .heading-copy span { overflow:hidden; color:#8391a6; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
 .heading-meta { display:flex; flex:0 0 auto; flex-direction:column; align-items:flex-end; gap:5px; }
-.run-select { max-width:180px; padding:3px 6px; border:1px solid #39465c; border-radius:3px; background:#1b2740; color:#c8d2e0; font-size:11px; }
+.run-select { max-width:210px; padding:3px 6px; border:1px solid #39465c; border-radius:3px; background:#1b2740; color:#c8d2e0; font-size:11px; }
 .schedule-badge,.heading-date { display:flex; align-items:center; gap:6px; color:#97a5b9; font-size:10px; }
 .schedule-badge i { width:6px; height:6px; border-radius:50%; background:#18a976; box-shadow:0 0 0 3px rgba(24,169,118,.13); }
 .heading-date { color:#d5b457; }
