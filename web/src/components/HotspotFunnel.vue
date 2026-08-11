@@ -339,7 +339,7 @@ onUnmounted(() => window.clearInterval(statusTimer))
 
 /* L4 有效概念 */
 .final-list { display:flex; flex-direction:column; gap:16px; }
-.concept-result { overflow:hidden; border:1px solid #e3e7ec; border-radius:12px; background:#fff; box-shadow:0 2px 6px rgba(23,32,45,.06); }
+.concept-result { flex:0 0 auto; overflow:hidden; border:1px solid #e3e7ec; border-radius:12px; background:#fff; box-shadow:0 2px 6px rgba(23,32,45,.06); }
 .concept-result>header { display:flex; min-height:54px; align-items:center; gap:10px; padding:0 18px; border-bottom:1px solid #eceff3; }
 .concept-result>header>button { border:0; background:transparent; color:#153f63; cursor:pointer; font-size:18px; font-weight:700; }
 .concept-result>header>button:hover { color:#0d5c94; text-decoration:underline; }
