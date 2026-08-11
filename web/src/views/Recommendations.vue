@@ -19,8 +19,16 @@ function fmtSigned(value: number | null | undefined, suffix = '%') {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}${suffix}`
 }
 
+// 风险分档位：≤40 低风险、41-60 中风险、>60 偏高（超过 70 的候选不会出现）。
+function riskClass(value: number | null | undefined) {
+  if (value == null) return ''
+  if (value <= 40) return 'risk-low'
+  if (value <= 60) return 'risk-mid'
+  return 'risk-high'
+}
+
 // 最近 5 个推荐日全部推荐股（通常 15 只）的总口径：
-// 每只按加入日开盘价买入、追踪窗口收盘价（未满 5 个交易日为当前收盘）计算后求和。
+// 每只按建仓日（推荐日后首个交易日）开盘价买入、追踪窗口收盘价（未满 5 个交易日为当前收盘）计算后求和。
 const overall = computed(() => {
   let stocks = 0
   let sum = 0
@@ -118,7 +126,7 @@ onMounted(refreshDates)
     <MarketSidebar :controls="false" />
     <main class="reco-content">
       <header class="reco-header">
-        <div class="reco-title"><strong>AI 趋势推荐 · 成功率评估</strong><small>口径：推荐日开盘价买入 → 第 5 个交易日收盘价冻结</small></div>
+        <div class="reco-title"><strong>AI 趋势推荐 · 成功率评估</strong><small>口径：推荐日后首个交易日开盘价买入 → 第 5 个交易日收盘价冻结</small></div>
         <div class="reco-tools">
           <button class="run-btn" :disabled="running" @click="runAnalysis">{{ running ? '分析中…' : '立即生成' }}</button>
         </div>
@@ -145,7 +153,7 @@ onMounted(refreshDates)
       </div>
 
       <div v-if="chart.bars.length" class="chart-strip">
-        <div class="perf-caption"><b>近 30 个推荐日每日组合涨跌</b><small>每日 3 只推荐股按加入日开盘价买入的涨跌幅求和；红涨绿跌，浅色为追踪中，点击柱体查看当日明细</small></div>
+        <div class="perf-caption"><b>近 30 个推荐日每日组合涨跌</b><small>每日 3 只推荐股按建仓日开盘价买入的涨跌幅求和；红涨绿跌，浅色为追踪中，点击柱体查看当日明细</small></div>
         <svg class="perf-chart" :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" role="img" aria-label="近30个推荐日组合涨跌柱状图">
           <line :x1="0" :y1="chart.zeroY" :x2="chart.width" :y2="chart.zeroY" class="zero-line" />
           <g v-for="(bar, i) in chart.bars" :key="bar.date" class="bar-group" @click="loadDate(bar.date)">
@@ -159,7 +167,7 @@ onMounted(refreshDates)
       </div>
 
       <div v-if="performance.length" class="perf-strip">
-        <div class="perf-caption"><b>近 5 个推荐日组合表现</b><small>每只按加入日开盘价买入，追踪 5 个交易日后冻结</small></div>
+        <div class="perf-caption"><b>近 5 个推荐日组合表现</b><small>每只按建仓日开盘价买入，追踪 5 个交易日后冻结</small></div>
         <div class="perf-cards">
           <div class="perf-card total">
             <small>合计 {{ overall.stocks }} 只<i class="tracking">近 5 个推荐日</i></small>
@@ -183,7 +191,7 @@ onMounted(refreshDates)
         <section class="reco-table">
           <div v-if="loading" class="empty">加载中…</div>
           <template v-else-if="items.length">
-            <div class="reco-row head"><span>排名</span><span>股票</span><span>加入日开盘</span><span>窗口收盘</span><span>涨跌幅</span><span>动量分</span><span>核心依据</span><span>板块</span></div>
+            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓日开盘</span><span>窗口收盘</span><span>涨跌幅</span><span>动量分</span><span>风险分</span><span>核心依据</span><span>板块</span></div>
             <button v-for="item in items" :key="item.symbol" class="reco-row" @click="openStock(item.symbol)">
               <span class="rank">{{ item.rank }}</span>
               <span class="stock"><b>{{ item.name }}</b><small>{{ item.code }}</small></span>
@@ -191,10 +199,11 @@ onMounted(refreshDates)
               <span>{{ fmt(item.latest_price) }}<small v-if="item.tracked_days > 0" class="track-tag">{{ item.tracked_days >= 5 ? '已冻结' : `第${item.tracked_days}天` }}</small></span>
               <span :class="pctClass(item.change_pct)">{{ fmtPct(item.change_pct) }}</span>
               <span class="score">{{ item.probability.toFixed(1) }}</span>
+              <span class="risk" :class="riskClass(item.risk_score)">{{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</span>
               <span class="reason">{{ item.reason }}</span>
               <span class="sector">{{ item.sector }}</span>
             </button>
-            <p class="disclaimer">说明：涨跌幅按“加入日开盘价买入，加入日起第 5 个交易日收盘价冻结”口径计算；动量分仅为基于历史价格动量的相对排序，非真实统计概率；历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：推荐于交易日盘前 08:10 基于前一收盘数据生成，最早次日开盘建仓；涨跌幅按“推荐日后首个交易日开盘价买入，其后第 5 个交易日收盘价冻结”口径计算，推荐日当天涨幅不计入收益。动量分仅为历史价格动量相对排序；风险分（0-100）由本地波动率/回撤/短期过热确定性计算，超过 70 的候选已在进入 AI 评审前剔除。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
@@ -255,12 +264,16 @@ onMounted(refreshDates)
 .date-list button.active { border-left-color:#e9c16c; background:#22314e; color:#fff; }
 .date-list .empty { padding:8px; color:#6f7c92; font-size:11px; }
 .reco-table { display:flex; min-height:0; flex-direction:column; overflow-y:auto; }
-.reco-row { display:grid; grid-template-columns:48px 135px 86px 86px 78px 64px minmax(180px,1fr) 90px; gap:10px; align-items:center; padding:11px 10px; border:0; border-bottom:1px solid #1e2a40; background:transparent; color:#e7ecf4; text-align:left; cursor:pointer; }
+.reco-row { display:grid; grid-template-columns:48px 135px 86px 86px 78px 64px 56px minmax(160px,1fr) 90px; gap:10px; align-items:center; padding:11px 10px; border:0; border-bottom:1px solid #1e2a40; background:transparent; color:#e7ecf4; text-align:left; cursor:pointer; }
 .reco-row.head { position:sticky; top:0; background:#101a2b; color:#8895ab; font-size:12px; cursor:default; }
 .reco-row:not(.head):hover { background:#1a2540; }
 .reco-row .rank { display:inline-flex; width:26px; height:26px; align-items:center; justify-content:center; background:#2a3a5c; color:#e9c16c; font-weight:700; }
 .reco-row .stock b { font-size:14px; }.reco-row .stock small { display:block; margin-top:2px; color:#8895ab; font-size:11px; }
 .reco-row .score { color:#ef6a72; font-size:16px; font-weight:700; }
+.reco-row .risk { font-size:14px; font-weight:700; }
+.reco-row .risk-low { color:#55b996; }
+.reco-row .risk-mid { color:#e9c16c; }
+.reco-row .risk-high { color:#ef6a72; }
 .reco-row .reason { color:#c4cddc; font-size:12px; line-height:1.4; }
 .reco-row .sector { color:#93a0b6; font-size:12px; }
 .reco-row .up { color:#ef6a72; }.reco-row .down { color:#55b996; }.reco-row .dim { color:#93a0b6; }
@@ -273,6 +286,6 @@ onMounted(refreshDates)
   .reco-body { grid-template-columns:1fr; }
   .date-list { flex-direction:row; flex-wrap:wrap; max-height:none; }
   .reco-row { grid-template-columns:36px minmax(90px,1fr) 76px 76px 70px; gap:6px; padding:10px 6px; }
-  .reco-row .score, .reco-row .reason, .reco-row .sector, .reco-row.head span:nth-child(6), .reco-row.head span:nth-child(7), .reco-row.head span:nth-child(8) { display:none; }
+  .reco-row .score, .reco-row .risk, .reco-row .reason, .reco-row .sector, .reco-row.head span:nth-child(6), .reco-row.head span:nth-child(7), .reco-row.head span:nth-child(8), .reco-row.head span:nth-child(9) { display:none; }
 }
 </style>

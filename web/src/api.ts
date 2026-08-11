@@ -143,6 +143,7 @@ export interface Recommendation {
   name: string
   sector: string
   probability: number
+  risk_score: number | null
   reason: string
   model: string
   entry_price: number | null

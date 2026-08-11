@@ -47,14 +47,37 @@ func TestRankRecommendationsIsDeterministic(t *testing.T) {
 
 func TestNextRecommendationRunSkipsWeekend(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
-	fridayAfterClose := time.Date(2026, time.July, 24, 17, 0, 0, 0, loc)
-	next := nextRecommendationRun(fridayAfterClose)
-	want := time.Date(2026, time.July, 27, 16, 30, 0, 0, loc)
+
+	// 交易日 07:30 → 当天 08:10
+	beforeRun := time.Date(2026, time.July, 23, 7, 30, 0, 0, loc)
+	if next, want := nextRecommendationRun(beforeRun), time.Date(2026, time.July, 23, 8, 10, 0, 0, loc); !next.Equal(want) {
+		t.Fatalf("next run = %s, want %s", next, want)
+	}
+
+	// 周五 09:00 已过运行点 → 跳过周末到周一 08:10
+	fridayMorning := time.Date(2026, time.July, 24, 9, 0, 0, 0, loc)
+	next := nextRecommendationRun(fridayMorning)
+	want := time.Date(2026, time.July, 27, 8, 10, 0, 0, loc)
 	if !next.Equal(want) {
 		t.Fatalf("next run = %s, want %s", next, want)
 	}
 	if isRecommendationTradingDay(time.Date(2026, time.July, 25, 5, 0, 0, 0, loc)) {
 		t.Fatal("Saturday must not be treated as a trading day")
+	}
+}
+
+func TestPreviousTradingDaySkipsWeekend(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+
+	// 周一早晨的上一交易日是上周五
+	monday := time.Date(2026, time.July, 27, 8, 10, 0, 0, loc)
+	if prev := previousTradingDay(monday); prev.Format("2006-01-02") != "2026-07-24" {
+		t.Fatalf("previous trading day = %s, want 2026-07-24", prev.Format("2006-01-02"))
+	}
+	// 周三的上一交易日是周二
+	wednesday := time.Date(2026, time.July, 22, 8, 10, 0, 0, loc)
+	if prev := previousTradingDay(wednesday); prev.Format("2006-01-02") != "2026-07-21" {
+		t.Fatalf("previous trading day = %s, want 2026-07-21", prev.Format("2006-01-02"))
 	}
 }
 

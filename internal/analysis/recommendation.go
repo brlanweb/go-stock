@@ -182,8 +182,10 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if analysisDate == "" || analysisDate != now.Format("2006-01-02") {
-		return fmt.Errorf("当日收盘日 K 尚未就绪: latest=%s", analysisDate)
+	// 盘前 08:00 运行：分析基准是最近一个已收盘交易日（周一早晨为上周五）。
+	// 只要求日 K 不早于上一交易日，避免数据长期停滞时基于陈旧行情推荐。
+	if analysisDate == "" || analysisDate < previousTradingDay(now).Format("2006-01-02") {
+		return fmt.Errorf("最近收盘日 K 尚未就绪: latest=%s", analysisDate)
 	}
 	candidates, err := s.st.RecommendationCandidates(ctx)
 	if err != nil {
@@ -262,6 +264,8 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 			return fmt.Errorf("AI returned invalid probability for %s", item.Symbol)
 		}
 		item.Rank, item.Code, item.Name = i+1, candidate.Code, candidate.Name
+		risk := candidate.RiskScore
+		item.RiskScore = &risk
 		item.Reason = strings.TrimSpace(item.Reason)
 		if item.Reason == "" || utf8.RuneCountInString(item.Reason) > 80 {
 			return fmt.Errorf("AI returned invalid reason for %s", item.Symbol)
@@ -274,7 +278,7 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 }
 
 // StartScheduler 启动两条独立调度：
-//   - 交易日 16:30 收盘后生成 AI 趋势推荐（依赖当日收盘日 K）；
+//   - 交易日 08:10 盘前生成 AI 趋势推荐（基于前一交易日收盘数据，最早次日建仓）；
 //   - 交易日 08:00 盘前运行热点漏斗（基于前一交易日收盘数据，供开盘决策）。
 //
 // 两条调度各自独立超时，互不挤占。
@@ -358,8 +362,11 @@ func rankRecommendations(candidates []store.RecommendationCandidate) []model.Sto
 func isRecommendationTradingDay(now time.Time) bool {
 	return now.Weekday() != time.Saturday && now.Weekday() != time.Sunday
 }
+
+// nextRecommendationRun 计算下一次盘前趋势推荐运行时间：交易日 08:10 Asia/Shanghai。
+// 盘前生成基于前一收盘数据，最早次日开盘建仓，收益追踪从推荐日之后的交易日开始。
 func nextRecommendationRun(now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(), 16, 30, 0, 0, now.Location())
+	next := time.Date(now.Year(), now.Month(), now.Day(), 8, 10, 0, 0, now.Location())
 	if !next.After(now) {
 		next = next.AddDate(0, 0, 1)
 	}
@@ -367,6 +374,15 @@ func nextRecommendationRun(now time.Time) time.Time {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
+}
+
+// previousTradingDay 返回给定时刻的上一交易日（跳过周末，不含当天）。
+func previousTradingDay(now time.Time) time.Time {
+	day := now.AddDate(0, 0, -1)
+	for !isRecommendationTradingDay(day) {
+		day = day.AddDate(0, 0, -1)
+	}
+	return day
 }
 
 // nextHotspotRun 计算下一次盘前热点漏斗运行时间：交易日 08:00 Asia/Shanghai。

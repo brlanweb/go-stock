@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -14,6 +15,9 @@ const (
 	recommendationSectorLimit    = 10
 	recommendationCandidateLimit = 10
 	recommendationKlineDays      = 60
+	// recommendationMaxRiskScore 是候选风险上限：超过该分值的股票波动/回撤/
+	// 短期过热特征明显，直接排除，不进入 AI 评审。
+	recommendationMaxRiskScore = 70.0
 )
 
 // RecommendationCandidate 包含确定性量化评分所需的最近 60 根日 K。
@@ -26,6 +30,7 @@ type RecommendationCandidate struct {
 	Popularity float64       `json:"popularity"`
 	SectorHeat float64       `json:"sector_heat"`
 	TrendScore float64       `json:"trend_score"`
+	RiskScore  float64       `json:"risk_score"`
 	Klines     []model.Kline `json:"klines"`
 }
 
@@ -144,7 +149,8 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 		return pool[i].Popularity > pool[j].Popularity
 	})
 
-	// 候选池通常约百只；只接受完整 60 根日 K 的证券，再按趋势评分统一取前 10。
+	// 候选池通常约百只；只接受完整 60 根日 K 的证券，先按趋势筛选，再剔除
+	// 风险过高（高波动/深回撤/短期过热）的股票，最后按趋势评分统一取前 10。
 	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
 	for _, candidate := range pool {
 		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, recommendationKlineDays)
@@ -155,8 +161,13 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 		if !ok {
 			continue
 		}
+		risk, ok := recommendationRiskScore(klines)
+		if !ok || risk > recommendationMaxRiskScore {
+			continue
+		}
 		candidate.Klines = klines
 		candidate.TrendScore = score
+		candidate.RiskScore = risk
 		trendCandidates = append(trendCandidates, candidate)
 	}
 	sort.Slice(trendCandidates, func(i, j int) bool {
@@ -181,7 +192,7 @@ func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName stri
 		return err
 	}
 	for i, item := range items {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO stock_recommendation (analysis_date,rank_no,symbol,sector_name,probability,reason,model_name) VALUES (?,?,?,?,?,?,?)`, date, i+1, item.Symbol, item.Sector, item.Probability, item.Reason, modelName); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO stock_recommendation (analysis_date,rank_no,symbol,sector_name,probability,risk_score,reason,model_name) VALUES (?,?,?,?,?,?,?,?)`, date, i+1, item.Symbol, item.Sector, item.Probability, item.RiskScore, item.Reason, modelName); err != nil {
 			return err
 		}
 	}
@@ -200,7 +211,7 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 		args = append(args, date)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT
-		DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.reason,r.model_name
+		DATE_FORMAT(r.analysis_date,'%Y-%m-%d'),r.rank_no,r.symbol,b.code,b.name,r.sector_name,r.probability,r.risk_score,r.reason,r.model_name
 		FROM stock_recommendation r INNER JOIN stock_basic b ON b.symbol=r.symbol WHERE `+where+` ORDER BY r.rank_no LIMIT 3`, args...)
 	if err != nil {
 		return nil, err
@@ -209,8 +220,12 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 	var out []model.StockRecommendation
 	for rows.Next() {
 		var item model.StockRecommendation
-		if err := rows.Scan(&item.Date, &item.Rank, &item.Symbol, &item.Code, &item.Name, &item.Sector, &item.Probability, &item.Reason, &item.Model); err != nil {
+		var risk sql.NullFloat64
+		if err := rows.Scan(&item.Date, &item.Rank, &item.Symbol, &item.Code, &item.Name, &item.Sector, &item.Probability, &risk, &item.Reason, &item.Model); err != nil {
 			return nil, err
+		}
+		if risk.Valid {
+			item.RiskScore = &risk.Float64
 		}
 		out = append(out, item)
 	}
@@ -231,7 +246,7 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 	return out, nil
 }
 
-// recommendationTrackWindow 是推荐收益追踪窗口：加入日起 5 个交易日。
+// recommendationTrackWindow 是推荐收益追踪窗口：推荐日后首个交易日起 5 个交易日。
 const recommendationTrackWindow = 5
 
 type recommendationWindow struct {
@@ -240,13 +255,14 @@ type recommendationWindow struct {
 	days      int
 }
 
-// recommendationWindow 读取加入日起最多 5 个交易日的日 K：
-// 买入基准为加入日开盘价，收益终点为窗口内最后一个交易日收盘价。
+// recommendationWindow 读取分析日之后（不含分析日）最多 5 个交易日的日 K：
+// 推荐在次日盘前 08:00 生成，最早只能以次一交易日开盘价建仓，因此买入基准为
+// 分析日后第一个交易日开盘价，收益终点为窗口内最后一个交易日收盘价。
 // 超过窗口的新行情不参与计算，因此满 5 个交易日后结果自然冻结。
 func (s *Store) recommendationWindow(ctx context.Context, symbol, analysisDate string) (recommendationWindow, error) {
 	var window recommendationWindow
 	rows, err := s.DB.QueryContext(ctx, `SELECT k.open,k.close FROM kline_daily k
-		WHERE k.symbol=? AND k.trade_date>=? ORDER BY k.trade_date ASC LIMIT ?`, symbol, analysisDate, recommendationTrackWindow)
+		WHERE k.symbol=? AND k.trade_date>? ORDER BY k.trade_date ASC LIMIT ?`, symbol, analysisDate, recommendationTrackWindow)
 	if err != nil {
 		return window, err
 	}
@@ -276,7 +292,7 @@ type RecommendationDailyPerformance struct {
 }
 
 // RecommendationRecentPerformance 汇总最近 days 个推荐日的窗口收益：
-// 假设每只推荐股按加入日开盘价等权买入，输出各日合计与平均涨跌点数。
+// 假设每只推荐股按建仓日（推荐日后首个交易日）开盘价等权买入，输出各日合计与平均涨跌点数。
 func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) ([]RecommendationDailyPerformance, error) {
 	if days <= 0 || days > 30 {
 		days = recommendationTrackWindow
@@ -315,8 +331,8 @@ func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) (
 	return out, nil
 }
 
-// recommendationPerformance 将加入日开盘价与追踪窗口内最后收盘价转换为展示数据。
-// 无历史行情或加入日价格无效时不计算收益率，前端据此显示“-”。
+// recommendationPerformance 将建仓日开盘价与追踪窗口内最后收盘价转换为展示数据。
+// 无历史行情或建仓日价格无效时不计算收益率，前端据此显示“-”。
 func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float64, *float64, *float64) {
 	var entry, latest, changePct *float64
 	if entryPrice.Valid && entryPrice.Float64 > 0 {
@@ -357,7 +373,7 @@ type RecommendationStats struct {
 }
 
 // RecommendationOverallStats 汇总最近 days 个推荐日的成功率评估。
-// 个股口径：加入日开盘价 → 第 5 个交易日收盘价；组合口径：单日 3 只求和。
+// 个股口径：建仓日开盘价 → 第 5 个交易日收盘价；组合口径：单日 3 只求和。
 func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (RecommendationStats, error) {
 	if days <= 0 || days > 365 {
 		days = 60
@@ -512,4 +528,63 @@ func recommendationTrendScore(klines []model.Kline) (float64, bool) {
 func isRecommendationUptrend(klines []model.Kline) bool {
 	_, ok := recommendationTrendScore(klines)
 	return ok
+}
+
+// recommendationRiskScore 用最近 60 根前复权日 K 计算 0-100 的确定性风险分：
+//   - 年化波动率（日收益率标准差 ×√244）：权重 40，波动 60% 记满
+//   - 60 日内最大回撤：权重 35，回撤 30% 记满
+//   - 短期过热（近 5 日涨幅）：权重 25，5 日涨 25% 记满
+//
+// 分数越高风险越高；数据不完整或价格非法时返回 false。
+func recommendationRiskScore(klines []model.Kline) (float64, bool) {
+	if len(klines) != recommendationKlineDays {
+		return 0, false
+	}
+	closes := make([]float64, len(klines))
+	for i, k := range klines {
+		if k.Close <= 0 {
+			return 0, false
+		}
+		closes[i] = k.Close
+	}
+
+	returns := make([]float64, 0, len(closes)-1)
+	var sum float64
+	for i := 1; i < len(closes); i++ {
+		r := closes[i]/closes[i-1] - 1
+		returns = append(returns, r)
+		sum += r
+	}
+	mean := sum / float64(len(returns))
+	var variance float64
+	for _, r := range returns {
+		variance += (r - mean) * (r - mean)
+	}
+	variance /= float64(len(returns))
+	annualVol := math.Sqrt(variance) * math.Sqrt(244)
+
+	var peak, maxDrawdown float64
+	for _, c := range closes {
+		if c > peak {
+			peak = c
+		}
+		if dd := (peak - c) / peak; dd > maxDrawdown {
+			maxDrawdown = dd
+		}
+	}
+
+	last := len(closes) - 1
+	gain5 := closes[last]/closes[last-5] - 1
+
+	clamp01 := func(v float64) float64 {
+		if v < 0 {
+			return 0
+		}
+		if v > 1 {
+			return 1
+		}
+		return v
+	}
+	score := clamp01(annualVol/0.60)*40 + clamp01(maxDrawdown/0.30)*35 + clamp01(gain5/0.25)*25
+	return score, true
 }

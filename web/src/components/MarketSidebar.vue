@@ -227,10 +227,10 @@ onUnmounted(() => {
       <header><strong class="reco-link" title="查看历史推荐回溯" @click="router.push('/recommendations')">AI 趋势推荐 ›</strong><div class="recommendation-tools"><select v-if="recommendationDates.length" v-model="recommendationDate" title="查看历史推荐" @change="selectRecommendationDate"><option v-for="date in recommendationDates" :key="date" :value="date" v-text="date"></option></select><button class="run-analysis" :disabled="recommendationRunning" title="手动生成今日趋势推荐" @click="runRecommendations">{{ recommendationRunning ? '分析中' : '生成' }}</button></div></header>
       <small v-if="recommendationMessage" class="recommendation-message">{{ recommendationMessage }}</small>
       <button v-for="item in recommendations" :key="item.symbol" :title="item.reason" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.sector }}</small></span><em>{{ item.probability.toFixed(0) }}%</em></button>
-      <p v-if="!recommendations.length">等待每日 05:00 分析结果</p>
+      <p v-if="!recommendations.length">等待交易日 08:10 盘前分析结果</p>
     </section>
     <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlistSymbols.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="watchlistMessage">{{ watchlistMessage }}</p></section>
-    <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>每日 05:00 生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
+    <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>交易日 08:10 盘前生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
   </aside>
 </template>
 

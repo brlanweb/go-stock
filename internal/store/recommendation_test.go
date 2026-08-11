@@ -33,6 +33,53 @@ func TestRecommendationTrendScoreRejectsFallingTrend(t *testing.T) {
 	}
 }
 
+func TestRecommendationRiskScore(t *testing.T) {
+	// 平稳缓涨：低波动、低回撤、无短期过热 → 低风险
+	calm := make([]model.Kline, recommendationKlineDays)
+	for i := range calm {
+		calm[i] = model.Kline{Close: 10.0 + float64(i)*0.01}
+	}
+	calmScore, ok := recommendationRiskScore(calm)
+	if !ok {
+		t.Fatal("calm series must produce a risk score")
+	}
+	if calmScore > recommendationMaxRiskScore {
+		t.Fatalf("calm series risk=%f exceeds threshold", calmScore)
+	}
+
+	// 剧烈波动 + 深回撤 + 近 5 日暴涨 → 高风险，超过阈值被剔除
+	risky := make([]model.Kline, recommendationKlineDays)
+	price := 10.0
+	for i := range risky {
+		if i%2 == 0 {
+			price *= 1.09
+		} else {
+			price *= 0.93
+		}
+		risky[i] = model.Kline{Close: price}
+	}
+	// 尾部 5 日连续暴涨制造短期过热
+	for i := recommendationKlineDays - 5; i < recommendationKlineDays; i++ {
+		price *= 1.08
+		risky[i] = model.Kline{Close: price}
+	}
+	riskyScore, ok := recommendationRiskScore(risky)
+	if !ok {
+		t.Fatal("risky series must produce a risk score")
+	}
+	if riskyScore <= recommendationMaxRiskScore {
+		t.Fatalf("risky series risk=%f should exceed threshold %f", riskyScore, recommendationMaxRiskScore)
+	}
+	if riskyScore <= calmScore {
+		t.Fatalf("risky=%f must be greater than calm=%f", riskyScore, calmScore)
+	}
+
+	// 数据不完整不给分
+	if _, ok := recommendationRiskScore(calm[:59]); ok {
+		t.Fatal("incomplete history must not produce a risk score")
+	}
+}
+
 func TestRecommendationPerformance(t *testing.T) {
 	entry, latest, changePct := recommendationPerformance(
 		sql.NullFloat64{Float64: 10, Valid: true},
