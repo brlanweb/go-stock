@@ -351,10 +351,10 @@ onUnmounted(() => window.clearInterval(statusTimer))
 .concept-result>header>b small { color:#8a95a3; font-size:10px; font-weight:400; }
 .concept-result>p { margin:0; padding:12px 18px; color:#43536a; font-size:12.5px; line-height:1.7; }
 .evidence-strip { display:grid; grid-template-columns:repeat(5,1fr); border-top:1px solid #eceff3; border-bottom:1px solid #eceff3; background:#f8f9fb; }
-.evidence-strip span { display:flex; min-height:56px; flex-direction:column; align-items:center; justify-content:center; gap:4px; }
+.evidence-strip span { display:grid; min-width:0; min-height:68px; grid-template-rows:auto minmax(20px,auto); align-content:center; justify-items:center; row-gap:5px; padding:8px 6px; }
 .evidence-strip span+span { border-left:1px solid #e8ebef; }
-.evidence-strip small { color:#8a95a4; font-size:10px; }
-.evidence-strip b { font-size:14px; font-variant-numeric:tabular-nums; }
+.evidence-strip small { display:block; color:#8a95a4; font-size:10px; line-height:1.3; white-space:nowrap; }
+.evidence-strip b { display:block; max-width:100%; font-size:14px; font-variant-numeric:tabular-nums; line-height:1.4; overflow:visible; white-space:nowrap; }
 .stock-strip { display:flex; min-width:0; gap:8px; padding:12px 18px; overflow:auto; }
 .stock-strip button { display:flex; min-width:112px; height:36px; flex:0 0 auto; align-items:center; justify-content:space-between; gap:8px; padding:0 11px; border:1px solid #dde2e9; border-radius:8px; background:#fbfcfd; cursor:pointer; transition:border-color .14s, background .14s; }
 .stock-strip button:hover { border-color:#d9b45c; background:#fffdf5; }
