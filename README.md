@@ -23,6 +23,7 @@
 - **历史K线**：不复权原始数据 + 累积复权因子完整入库（前复权随时重算，除权无需重刷）；日线存储，周/月线 SQL 聚合
 - **受控缺失补齐**：`sync_checkpoint` 表记录进度，历史为空或落后最近交易日时低速补齐；完整证券不重复请求上游。历史源按 `东方财富 → BaoStock → AKShare → 腾讯` 降级：BaoStock 覆盖沪深股票/ETF，AKShare（新浪源）覆盖 ETF 与北交所 `920` 代码，避免单一上游被限流时整批失败
 - **定时快照**：按 `Asia/Shanghai` 在工作日 `12:00` 采集上午快照，`16:00` 采集收盘快照并写入日K/每日指标
+- **每日收盘复盘闭环**：交易日 `17:00` 基于本地收盘指数、市场宽度、板块强弱、当日盘前热点兑现情况，以及最近 5 个推荐日的个股表现生成结构化复盘；推荐结果同时计算沪深300近似基准收益和超额收益，并逐条回验上次优化指令。历史运行可追溯，最多 5 条新指令自动注入次日 `08:10` 趋势推荐
 - **MCP Streamable HTTP**（`/mcp`）：本地 MySQL 分析工具 + 显式单股同步工具，供 LobeHub / Claude 等 MCP 客户端调用
 - **Vue3 前端**：全屏市场终端云图，一级行业和主要概念按流通市值映射面积、颜色按涨跌幅映射；个股日K/周K/月K 图、指标管理和策略回测
 - **低内存**：进程常驻约 20~40MB；扩展预留 US/CRYPTO market 字段与 Provider 接口
@@ -69,6 +70,7 @@ docker stats go-stock  # 观察内存
 | GOSTOCK_AI_PROMPT_FILE | config/ai_prompt.md | AI 趋势推荐提示词文件路径（长提示词放文件，配置只填路径） |
 | GOSTOCK_AI_PROMPT | 空 | 可选内联短提示词；留空则用提示词文件，再空则用内嵌默认 |
 | GOSTOCK_AI_HOTSPOT_PROMPT_FILE | config/hotspot_prompt.md | 热点漏斗的产业链分析提示词文件 |
+| GOSTOCK_AI_REVIEW_PROMPT_FILE | config/review_prompt.md | 每日 17:00 收盘复盘提示词文件；复盘指令自动注入次日推荐 |
 | GOSTOCK_HOTSPOT_BLACKLIST_FILE | config/hotspot_blacklist.txt | 泛概念过滤关键词文件，每行一个关键词 |
 
 ### AI 推荐配置示例
@@ -105,6 +107,8 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/indicator/{code}` | 每日指标历史 |
 | `GET /api/v1/market/heatmap?market=all&group_by=industry&metric=change_pct&period=1d&limit=31` | 本地日K与指标生成的一级行业/主要概念云图；板块和个股面积按流通市值，每板块最多 50 只 |
 | `GET /api/v1/hotspot`、`POST /api/v1/hotspot/run` | 查询或触发热点漏斗；按数据初筛、关系收敛、AI产业链分析、本地回验输出有效概念。配置 AI 后交易日 08:00 自动运行盘前分析 |
+| `GET /api/v1/review`、`GET /api/v1/review/history` | 查询最新或指定历史每日复盘；包含指数、市场宽度、板块、盘前热点回验、最近 5 个推荐日的基准/超额收益、上次指令回验、风控和次日优化指令 |
+| `GET /api/v1/review/status`、`POST /api/v1/review/run` | 查询或手动触发每日复盘；配置 AI 后交易日 17:00 自动运行 |
 | `GET/PUT /api/v1/indicators[/{id}]` | 指标与策略目录、启停及参数管理 |
 | `POST /api/v1/indicators/{id}/reset` | 恢复指标默认参数 |
 | `POST /api/v1/backtest` | 使用本地日 K 执行确定性 A 股策略回测 |

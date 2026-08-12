@@ -202,6 +202,7 @@ onUnmounted(() => {
 <template>
   <aside class="market-sidebar">
     <router-link to="/" class="brand">go-stock</router-link>
+    <button class="indicator-entry" title="查看每日收盘复盘" @click="router.push('/review')">每日复盘 ›</button>
     <button class="indicator-entry" title="管理技术指标与回测策略" @click="router.push('/indicators')">指标与回测 ›</button>
     <label class="side-field"><span>范围</span><select v-model="selectedMarket" @change="setOption"><option v-for="[value, label] in marketOptions" :key="value" :value="value">{{ label }}</option></select></label>
     <label class="side-field"><span>划分</span><select v-model="selectedGroup" @change="setOption"><option v-for="[value, label] in groupOptions" :key="value" :value="value">{{ label }}</option></select></label>
@@ -230,7 +231,7 @@ onUnmounted(() => {
       <p v-if="!recommendations.length">等待交易日 08:10 盘前分析结果</p>
     </section>
     <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlistSymbols.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="watchlistMessage">{{ watchlistMessage }}</p></section>
-    <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>交易日 08:10 盘前生成趋势分析</span><span>推荐仅供研究，不构成投资建议</span></div>
+    <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>交易日 08:10 盘前生成趋势分析</span><span>交易日 17:00 自动生成每日复盘</span><span>推荐仅供研究，不构成投资建议</span></div>
   </aside>
 </template>
 

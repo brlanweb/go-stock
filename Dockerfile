@@ -33,6 +33,7 @@ COPY python-provider/fetch_kline.py python-provider/fetch_kline.py
 COPY config/ai_prompt.md config/ai_prompt.md
 COPY config/hotspot_prompt.md config/hotspot_prompt.md
 COPY config/hotspot_blacklist.txt config/hotspot_blacklist.txt
+COPY config/review_prompt.md config/review_prompt.md
 ENV TZ=Asia/Shanghai
 USER gostock
 COPY --from=go-builder /go-stock /usr/local/bin/go-stock

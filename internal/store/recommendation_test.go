@@ -43,32 +43,32 @@ func TestRecommendationRiskScore(t *testing.T) {
 	if !ok {
 		t.Fatal("calm series must produce a risk score")
 	}
-	if calmScore > recommendationMaxRiskScore {
-		t.Fatalf("calm series risk=%f exceeds threshold", calmScore)
+	if calmScore > recommendationBaseMaxRisk {
+		t.Fatalf("calm series risk=%f exceeds base threshold", calmScore)
 	}
 
-	// 剧烈波动 + 深回撤 + 近 5 日暴涨 → 高风险，超过阈值被剔除
+	// 剧烈波动 + 深回撤 + 近 5 日暴涨 → 高风险，任何阶段上限下都被剔除
 	risky := make([]model.Kline, recommendationKlineDays)
 	price := 10.0
 	for i := range risky {
 		if i%2 == 0 {
-			price *= 1.09
+			price *= 1.10
 		} else {
-			price *= 0.93
+			price *= 0.82
 		}
 		risky[i] = model.Kline{Close: price}
 	}
 	// 尾部 5 日连续暴涨制造短期过热
 	for i := recommendationKlineDays - 5; i < recommendationKlineDays; i++ {
-		price *= 1.08
+		price *= 1.10
 		risky[i] = model.Kline{Close: price}
 	}
 	riskyScore, ok := recommendationRiskScore(risky)
 	if !ok {
 		t.Fatal("risky series must produce a risk score")
 	}
-	if riskyScore <= recommendationMaxRiskScore {
-		t.Fatalf("risky series risk=%f should exceed threshold %f", riskyScore, recommendationMaxRiskScore)
+	if riskyScore <= recommendationMaxRiskUp {
+		t.Fatalf("risky series risk=%f should exceed max threshold %f", riskyScore, recommendationMaxRiskUp)
 	}
 	if riskyScore <= calmScore {
 		t.Fatalf("risky=%f must be greater than calm=%f", riskyScore, calmScore)
@@ -77,6 +77,25 @@ func TestRecommendationRiskScore(t *testing.T) {
 	// 数据不完整不给分
 	if _, ok := recommendationRiskScore(calm[:59]); ok {
 		t.Fatal("incomplete history must not produce a risk score")
+	}
+}
+
+func TestRecommendationMaxRiskScoreByPhase(t *testing.T) {
+	cases := map[string]float64{
+		"up":    recommendationMaxRiskUp,
+		"range": recommendationMaxRiskRange,
+		"down":  recommendationMaxRiskDown,
+		"":      recommendationBaseMaxRisk,
+		"other": recommendationBaseMaxRisk,
+	}
+	for phase, want := range cases {
+		if got := RecommendationMaxRiskScore(phase); got != want {
+			t.Fatalf("phase=%q max risk=%f, want %f", phase, got, want)
+		}
+	}
+	// 上升阶段放宽、下降阶段收紧的方向不能反转
+	if !(recommendationMaxRiskUp > recommendationBaseMaxRisk && recommendationMaxRiskDown < recommendationBaseMaxRisk) {
+		t.Fatal("phase risk thresholds direction invalid")
 	}
 }
 

@@ -61,11 +61,17 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("GET /api/v1/recommendations/performance", s.handleRecommendationPerformance)
 	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
+	mux.HandleFunc("GET /api/v1/recommendations/risk-policy", s.handleRecommendationRiskPolicy)
+	mux.HandleFunc("GET /api/v1/recommendations/status", s.handleRecommendationsStatus)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
 	mux.HandleFunc("GET /api/v1/hotspot/history", s.handleHotspotHistory)
 	mux.HandleFunc("GET /api/v1/hotspot/status", s.handleHotspotStatus)
 	mux.HandleFunc("POST /api/v1/hotspot/run", s.handleHotspotRun)
+	mux.HandleFunc("GET /api/v1/review", s.handleDailyReview)
+	mux.HandleFunc("GET /api/v1/review/history", s.handleDailyReviewHistory)
+	mux.HandleFunc("GET /api/v1/review/status", s.handleDailyReviewStatus)
+	mux.HandleFunc("POST /api/v1/review/run", s.handleDailyReviewRun)
 
 	mux.HandleFunc("GET /api/v1/watchlist", s.handleWatchlistGet)
 	mux.HandleFunc("POST /api/v1/watchlist/{code}", s.handleWatchlistAdd)
@@ -728,6 +734,44 @@ func (s *Server) handleRecommendationStats(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, 200, stats)
 }
 
+// handleRecommendationRiskPolicy 返回下一次盘前推荐将采用的候选风险上限。
+// 该值由最近一次 AI 复盘的市场阶段自动决定（up=85/range=75/down=65，无复盘=70），
+// 仅供展示，不提供人工配置入口。
+func (s *Server) handleRecommendationRiskPolicy(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	guidance := store.LatestReviewGuidance{}
+	date, err := s.St.LatestKlineDate(ctx)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if date != "" {
+		if guidance, err = s.St.LatestReviewGuidanceForRecommendation(ctx, date); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"review_date":    guidance.ReviewDate,
+		"market_phase":   guidance.MarketPhase,
+		"max_risk_score": store.RecommendationMaxRiskScore(guidance.MarketPhase),
+	})
+}
+
+// handleRecommendationsStatus 返回 AI 推荐任务状态，供手动触发后轮询。
+func (s *Server) handleRecommendationsStatus(w http.ResponseWriter, r *http.Request) {
+	enabled, running, lastError := false, false, ""
+	if s.Analysis != nil {
+		enabled = s.Analysis.Enabled()
+		running = s.Analysis.Running()
+		lastError = s.Analysis.RecommendationLastError()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "running": running, "last_error": lastError})
+}
+
+// handleRecommendationsRun 异步触发 AI 推荐：AI 主请求可能耗时数分钟，
+// 与调度器同样给 5 分钟预算，结果通过 /recommendations/status 轮询。
 func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request) {
 	if s.Analysis == nil || !s.Analysis.Enabled() {
 		writeErr(w, http.StatusServiceUnavailable, "AI 推荐未配置")
@@ -737,13 +781,17 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusConflict, "AI 推荐任务正在执行")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if err := s.Analysis.RunDaily(ctx); err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "analysis completed"})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.Analysis.RunDaily(ctx); err != nil {
+			s.Analysis.SetRecommendationLastError(err)
+			slog.Warn("手动 AI 推荐失败", "err", err)
+		} else {
+			slog.Info("手动 AI 推荐完成")
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
 }
 
 func (s *Server) handleHotspot(w http.ResponseWriter, r *http.Request) {
@@ -814,6 +862,77 @@ func (s *Server) handleHotspotRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
+}
+
+func (s *Server) handleDailyReview(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	var report json.RawMessage
+	var err error
+	if idText := r.URL.Query().Get("id"); idText != "" {
+		id, parseErr := strconv.ParseInt(idText, 10, 64)
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, "无效的复盘 id")
+			return
+		}
+		report, err = s.St.DailyReviewByID(ctx, id)
+	} else {
+		report, err = s.St.LatestDailyReview(ctx)
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if report == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleDailyReviewHistory(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.DailyReviewHistory(ctx, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleDailyReviewStatus(w http.ResponseWriter, r *http.Request) {
+	enabled, running, lastError := false, false, ""
+	if s.Analysis != nil {
+		enabled = s.Analysis.Enabled()
+		running = s.Analysis.ReviewRunning()
+		lastError = s.Analysis.ReviewLastError()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "running": running, "last_error": lastError})
+}
+
+func (s *Server) handleDailyReviewRun(w http.ResponseWriter, r *http.Request) {
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 每日复盘未配置")
+		return
+	}
+	if s.Analysis.ReviewRunning() {
+		writeErr(w, http.StatusConflict, "每日复盘任务正在执行")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := s.Analysis.RunDailyReview(ctx); err != nil {
+			s.Analysis.SetReviewLastError(err)
+			slog.Warn("手动每日复盘失败", "err", err)
+		} else {
+			s.Analysis.SetReviewLastError(nil)
+			slog.Info("手动每日复盘完成")
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review started"})
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {

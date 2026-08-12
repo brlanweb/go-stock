@@ -172,6 +172,13 @@ export interface RecommendationStats {
   day_win_rate: number | null
 }
 
+// 下一次盘前推荐的候选风险上限：由最近一次 AI 复盘的市场阶段自动决定，仅展示。
+export interface RecommendationRiskPolicy {
+  review_date: string
+  market_phase: string
+  max_risk_score: number
+}
+
 export interface RecommendationPerformance {
   date: string
   stocks: number
@@ -329,6 +336,90 @@ export interface HotspotReport {
   concepts?: HotspotConcept[]
 }
 
+export interface DailyReviewRunSummary {
+  id: number
+  review_date: string
+  market_phase: 'up' | 'range' | 'down'
+  model: string
+  created_at: string
+}
+
+export interface DailyReviewSectorFact {
+  sector_code: string
+  sector_name: string
+  sector_type: string
+  stock_count: number
+  avg_change: number
+  avg_change_5d: number
+  up_ratio: number
+  amount_ratio: number
+  heat_score: number
+}
+
+export interface DailyReviewRecommendationFact {
+  date: string
+  symbol: string
+  code: string
+  name: string
+  sector: string
+  probability: number
+  risk_score: number | null
+  reason: string
+  entry_price: number | null
+  latest_price: number | null
+  change_pct: number | null
+  tracked_days: number
+  frozen: boolean
+  day_change_pct: number | null
+  benchmark_change_pct: number | null
+  excess_change_pct: number | null
+}
+
+export interface DailyReviewHotspotFact {
+  report_date: string
+  sector_code: string
+  sector_name: string
+  status: string
+  confidence: number
+  avg_change: number
+  up_ratio: number
+  amount_ratio: number
+  heat_score: number
+}
+
+export interface DailyReviewReport {
+  available?: boolean
+  review_date?: string
+  generated_at?: string
+  model?: string
+  market_phase?: 'up' | 'range' | 'down'
+  confidence?: number
+  market_summary?: string
+  index_review?: string
+  breadth_review?: string
+  sector_assessments?: Array<{ sector_code: string; sector_name: string; strength: 'strong' | 'neutral' | 'weak'; outlook: string; risk: string }>
+  hotspot_reviews?: Array<{ sector_code: string; verdict: 'hit' | 'miss' | 'mixed'; assessment: string }>
+  recommendation_reviews?: Array<{ recommendation_date: string; symbol: string; name: string; verdict: 'hit' | 'miss' | 'watching'; performance: string; attribution: string; next_action: string }>
+  previous_directive_reviews?: Array<{ action: string; verdict: 'effective' | 'ineffective' | 'unclear'; comment: string }>
+  what_worked?: string[]
+  what_failed?: string[]
+  directives?: Array<{ action: string; rationale: string }>
+  risk_controls?: { position_mode: 'aggressive' | 'balanced' | 'defensive'; max_position_pct: number; max_single_stock_pct: number; stop_loss_pct: number; avoid_conditions: string[] }
+  facts?: {
+    trade_date: string
+    indices: Array<{ symbol: string; name: string; price: number; change_pct: number; amount: number }>
+    breadth: { stock_count: number; up_count: number; flat_count: number; down_count: number; limit_up_count: number; limit_down_count: number; up_ratio: number; avg_change_pct: number; total_amount: number }
+    // 操作姿态：本地按近 20 日等权大盘历史数据确定性推演，不经 AI（旧记录可能缺失）
+    market_stance?: { stance: 'take_profit' | 'hold' | 'accumulate'; lookback_days: number; momentum_5d_pct: number; drawdown_pct: number; rebound_pct: number; up_ratio_today: number; up_ratio_5d: number; reason: string }
+    strong_sectors: DailyReviewSectorFact[]
+    weak_sectors: DailyReviewSectorFact[]
+    hotspot_checks: DailyReviewHotspotFact[]
+    latest_recommendations: DailyReviewRecommendationFact[]
+    previous_review: { review_date: string; market_phase: 'up' | 'range' | 'down' | ''; directives: Array<{ action: string; rationale: string }> }
+    recent_recommendation_stats: RecommendationStats
+  }
+}
+
 export interface HeatmapResponse {
   market: string
   group_by: string
@@ -362,11 +453,17 @@ export const api = {
   recommendationHistory: (limit = 90) => req<string[]>(`/recommendations/history?limit=${limit}`),
   recommendationPerformance: (days = 5) => req<RecommendationPerformance[]>(`/recommendations/performance?days=${days}`),
   recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
+  recommendationRiskPolicy: () => req<RecommendationRiskPolicy>('/recommendations/risk-policy'),
+  recommendationStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/recommendations/status'),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
   hotspot: (id?: number) => req<HotspotReport>(`/hotspot${id ? `?id=${id}` : ''}`),
   hotspotHistory: (limit = 30) => req<HotspotRunSummary[]>(`/hotspot/history?limit=${limit}`),
   hotspotStatus: () => req<{ enabled: boolean; running: boolean }>('/hotspot/status'),
   runHotspot: () => req<{ status: string }>('/hotspot/run', { method: 'POST' }),
+  dailyReview: (id?: number) => req<DailyReviewReport>(`/review${id ? `?id=${id}` : ''}`),
+  dailyReviewHistory: (limit = 30) => req<DailyReviewRunSummary[]>(`/review/history?limit=${limit}`),
+  dailyReviewStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/review/status'),
+  runDailyReview: () => req<{ status: string }>('/review/run', { method: 'POST' }),
   addWatch: (code: string) => req(`/watchlist/${code}`, { method: 'POST' }),
   delWatch: (code: string) => req(`/watchlist/${code}`, { method: 'DELETE' }),
   syncStatus: () => req<SyncStatus>('/sync/status'),

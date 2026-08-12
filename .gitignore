@@ -20,3 +20,6 @@ web/dist/
 .DS_Store
 *.log
 web/tsconfig.tsbuildinfo
+
+# 本地临时产物
+.codex-tmp/

@@ -13,6 +13,9 @@ import (
 //go:embed ai_prompt.md
 var embeddedAIPrompt string
 
+//go:embed review_prompt.md
+var embeddedReviewPrompt string
+
 // Config 全局配置。
 type Config struct {
 	Addr string // HTTP 监听地址
@@ -48,6 +51,8 @@ type Config struct {
 	AIPromptFile        string // 提示词文件路径（优先级高于 AIPrompt）
 	AIHotspotPrompt     string // 热点漏斗 AI 提示词
 	AIHotspotPromptFile string // 热点漏斗提示词文件路径
+	AIReviewPrompt      string // 每日收盘复盘 AI 提示词
+	AIReviewPromptFile  string // 每日收盘复盘提示词文件路径
 
 	LogLevel string
 }
@@ -89,6 +94,8 @@ func Load() (*Config, error) {
 		AIPromptFile:         getEnv("GOSTOCK_AI_PROMPT_FILE", "config/ai_prompt.md"),
 		AIHotspotPrompt:      getEnv("GOSTOCK_AI_HOTSPOT_PROMPT", ""),
 		AIHotspotPromptFile:  getEnv("GOSTOCK_AI_HOTSPOT_PROMPT_FILE", "config/hotspot_prompt.md"),
+		AIReviewPrompt:       getEnv("GOSTOCK_AI_REVIEW_PROMPT", ""),
+		AIReviewPromptFile:   getEnv("GOSTOCK_AI_REVIEW_PROMPT_FILE", "config/review_prompt.md"),
 		LogLevel:             getEnv("GOSTOCK_LOG_LEVEL", "info"),
 	}
 	if c.AIPromptFile != "" {
@@ -105,9 +112,19 @@ func Load() (*Config, error) {
 			}
 		}
 	}
+	if c.AIReviewPromptFile != "" {
+		if data, err := os.ReadFile(c.AIReviewPromptFile); err == nil {
+			if text := strings.TrimSpace(string(data)); text != "" {
+				c.AIReviewPrompt = text
+			}
+		}
+	}
 	// 外部文件与内联变量都为空时，使用内嵌的默认提示词，保证部署可用。
 	if strings.TrimSpace(c.AIPrompt) == "" {
 		c.AIPrompt = strings.TrimSpace(embeddedAIPrompt)
+	}
+	if strings.TrimSpace(c.AIReviewPrompt) == "" {
+		c.AIReviewPrompt = strings.TrimSpace(embeddedReviewPrompt)
 	}
 	if c.DBPassword == "" {
 		return nil, fmt.Errorf("GOSTOCK_DB_PASSWORD 未设置（请配置 .env 或环境变量）")

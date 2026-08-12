@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationStats } from '../api'
+import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationStats } from '../api'
 import MarketSidebar from '../components/MarketSidebar.vue'
 
 const router = useRouter()
@@ -13,6 +13,16 @@ const loading = ref(false)
 const message = ref('')
 const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
+const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
+
+const phaseLabel: Record<string, string> = { up: '上升', range: '震荡', down: '下降' }
+// 候选风险上限由最近一次 AI 复盘的市场阶段自动决定：up 85 / range 75 / down 65，无复盘 70。
+const riskPolicyText = computed(() => {
+  if (!riskPolicy.value) return ''
+  const p = riskPolicy.value
+  const phase = phaseLabel[p.market_phase] || '无复盘'
+  return `候选风险上限 ${p.max_risk_score.toFixed(0)} · 复盘阶段：${phase}${p.review_date ? `（${p.review_date}）` : ''}`
+})
 
 function fmtSigned(value: number | null | undefined, suffix = '%') {
   if (value == null) return '—'
@@ -93,6 +103,7 @@ async function loadDate(date: string) {
 }
 
 async function refreshDates() {
+  riskPolicy.value = await api.recommendationRiskPolicy().catch(() => null)
   stats.value = await api.recommendationStats(60).catch(() => null)
   performance.value = await api.recommendationPerformance(5).catch(() => [] as RecommendationPerformance[])
   chartData.value = await api.recommendationPerformance(30).catch(() => [] as RecommendationPerformance[])
@@ -100,25 +111,50 @@ async function refreshDates() {
   if (dates.value.length) await loadDate(dates.value[0])
 }
 
+let pollTimer: number | undefined
+
+// 手动生成为异步任务（AI 主请求可能耗时数分钟），通过状态接口轮询完成情况。
+async function pollRunStatus() {
+  try {
+    const status = await api.recommendationStatus()
+    if (status.running) return
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+    running.value = false
+    message.value = status.last_error ? `生成失败：${status.last_error}` : '生成完成'
+    await refreshDates()
+  } catch { /* 下一轮继续 */ }
+}
+
 async function runAnalysis() {
   running.value = true
-  message.value = ''
+  message.value = '正在生成推荐…'
   try {
     await api.runRecommendations()
-    message.value = '分析已启动，约 10 秒后自动刷新'
-    window.setTimeout(refreshDates, 10000)
+    window.clearInterval(pollTimer)
+    pollTimer = window.setInterval(pollRunStatus, 3000)
   } catch (e: any) {
-    message.value = e?.message || '分析启动失败'
-  } finally {
     running.value = false
+    message.value = e?.message || '分析启动失败'
   }
 }
+
+onUnmounted(() => window.clearInterval(pollTimer))
 
 function openStock(symbol: string) {
   router.push(`/stock/${symbol}`)
 }
 
-onMounted(refreshDates)
+onMounted(async () => {
+  await refreshDates()
+  // 页面加载时若已有推荐任务在执行（如刷新页面），继续轮询直至完成。
+  const status = await api.recommendationStatus().catch(() => null)
+  if (status?.running) {
+    running.value = true
+    message.value = '正在生成推荐…'
+    pollTimer = window.setInterval(pollRunStatus, 3000)
+  }
+})
 </script>
 
 <template>
@@ -203,7 +239,7 @@ onMounted(refreshDates)
               <span class="reason">{{ item.reason }}</span>
               <span class="sector">{{ item.sector }}</span>
             </button>
-            <p class="disclaimer">说明：推荐于交易日盘前 08:10 基于前一收盘数据生成，最早次日开盘建仓；涨跌幅按“推荐日后首个交易日开盘价买入，其后第 5 个交易日收盘价冻结”口径计算，推荐日当天涨幅不计入收益。动量分仅为历史价格动量相对排序；风险分（0-100）由本地波动率/回撤/短期过热确定性计算，超过 70 的候选已在进入 AI 评审前剔除。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：推荐于交易日盘前 08:10 基于前一收盘数据生成，最早次日开盘建仓；涨跌幅按“推荐日后首个交易日开盘价买入，其后第 5 个交易日收盘价冻结”口径计算，推荐日当天涨幅不计入收益。动量分仅为历史价格动量相对排序；风险分（0-100）由本地波动率/回撤/短期过热确定性计算，超过候选风险上限的股票已在进入 AI 评审前剔除；上限由最近一次 AI 复盘的市场阶段自动决定（上升 85 / 震荡 75 / 下降 65，无复盘 70）。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
@@ -217,6 +253,7 @@ onMounted(refreshDates)
 .reco-content { display:flex; min-width:0; min-height:0; flex-direction:column; padding:0 14px 14px; overflow:hidden; }
 .reco-header { display:flex; align-items:center; justify-content:space-between; padding:12px 2px; border-bottom:1px solid #26324a; }
 .reco-title strong { font-size:16px; }.reco-title small { margin-left:10px; color:#8895ab; font-size:12px; }
+.reco-title .risk-policy { color:#d8b967; }
 .run-btn { padding:6px 14px; border:1px solid #3a496a; border-radius:0; background:#233150; color:#e7ecf4; font-size:13px; cursor:pointer; }.run-btn:disabled { cursor:wait; opacity:.6; }
 .reco-message { margin:8px 2px 0; color:#d8b967; font-size:12px; }
 .stats-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(128px,1fr)); gap:8px; margin-top:12px; }

@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add a trading-day 17:00 daily review pipeline based only on local close data: indices, market breadth, strong and weak sectors, pre-market hotspot outcomes, and the latest five recommendation days.
+- Persist deterministic review facts and structured AI reports as append-only history with market phase, hotspot verification, recommendation attribution, previous-directive verification, risk controls, and optimization directives.
+- Compare recommendation-window returns with a CSI 300 close-based benchmark (falling back to the SSE Composite when unavailable) and expose benchmark, excess-return, and tracking-freeze status.
+- Automatically inject up to five validated directives from the latest review into the next 08:10 AI trend recommendation while preserving the fixed candidate pool and risk constraints.
+- Add daily review REST endpoints and a responsive Vue review workspace with history, manual runs, sector analysis, recommendation attribution, and risk controls.
+- Auto-adjust the recommendation candidate risk cap by the latest review market phase (up 85 / range 75 / down 65, base 70) with no manual configuration, and expose it via `GET /api/v1/recommendations/risk-policy` plus the Recommendations page header.
+- Feed review `risk_controls` (position mode and avoid conditions) into the next-day recommendation prompt as ranking preferences alongside directives.
+- Add a deterministic market stance indicator (take_profit 落袋 / hold 扛单 / accumulate 扫货) derived from a 20-day equal-weight market replay of local history — momentum, drawdown, rebound, and breadth — displayed prominently on the review page; the AI must reference it and cannot rewrite it.
+
+### Changed
+
+- Rebalance the deterministic risk score to stop over-penalizing strong trends: volatility 40, max drawdown 45 (was 35), short-term overheat 15 with a 35% five-day gain cap (was 25 at 25%).
+- Relax the recommendation candidate count from exactly 10 to 5-10 so risk filtering in weak markets no longer aborts the daily run; prompts now state the actual candidate count.
+- Run manual recommendation generation asynchronously with a five-minute budget and a `GET /api/v1/recommendations/status` polling endpoint (the previous synchronous handler timed out at 30 seconds); the Recommendations page now polls until completion and surfaces failures.
+- Give the recommendation AI request a dedicated four-minute HTTP timeout matching the scheduler budget.
+
+### Database
+
+- Add migration `016_daily_review.sql` and the `daily_review` history table.
+
 ## [1.1.1] - 2026-08-04
 
 ### Fixed

@@ -15,10 +15,33 @@ const (
 	recommendationSectorLimit    = 10
 	recommendationCandidateLimit = 10
 	recommendationKlineDays      = 60
-	// recommendationMaxRiskScore 是候选风险上限：超过该分值的股票波动/回撤/
-	// 短期过热特征明显，直接排除，不进入 AI 评审。
-	recommendationMaxRiskScore = 70.0
+
+	// RecommendationCandidateMin 是可分析候选下限：趋势与风险过滤后不足该数量
+	// 说明当日可选机会太少，跳过本次推荐而不是强行凑 3 只。
+	RecommendationCandidateMin = 5
+
+	// 候选风险上限由最近一次 AI 复盘的 market_phase 自动调节（不做人工配置）：
+	// up 放宽以保留强趋势机会，down 收紧以优先控制回撤，无复盘记录时取基准值。
+	recommendationBaseMaxRisk  = 70.0
+	recommendationMaxRiskUp    = 85.0
+	recommendationMaxRiskRange = 75.0
+	recommendationMaxRiskDown  = 65.0
 )
+
+// RecommendationMaxRiskScore 返回给定复盘市场阶段下的候选风险分上限：
+// up=85、range=75、down=65，其余（含尚无复盘）为基准 70。
+func RecommendationMaxRiskScore(marketPhase string) float64 {
+	switch marketPhase {
+	case "up":
+		return recommendationMaxRiskUp
+	case "range":
+		return recommendationMaxRiskRange
+	case "down":
+		return recommendationMaxRiskDown
+	default:
+		return recommendationBaseMaxRisk
+	}
+}
 
 // RecommendationCandidate 包含确定性量化评分所需的最近 60 根日 K。
 type RecommendationCandidate struct {
@@ -43,8 +66,13 @@ type recommendationSector struct {
 
 // RecommendationCandidates 从行业和概念的统一热度排名取前 10 个题材，收集其
 // 成分股并去重；对全部候选读取最近 60 根前复权日 K，按确定性趋势分排序后取前 10。
-// 所有排序均有稳定代码兜底，AI 只会接收这 10 只股票及其完整日 K 数据。
-func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationCandidate, error) {
+// maxRiskScore 是本次候选风险上限（由最近复盘 market_phase 决定，见
+// RecommendationMaxRiskScore）；非法值回退到基准值。所有排序均有稳定代码兜底，
+// AI 只会接收最终候选及其完整日 K 数据。
+func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float64) ([]RecommendationCandidate, error) {
+	if maxRiskScore <= 0 || maxRiskScore > 100 {
+		maxRiskScore = recommendationBaseMaxRisk
+	}
 	tradeDate, err := s.LatestKlineDate(ctx)
 	if err != nil {
 		return nil, err
@@ -162,7 +190,7 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 			continue
 		}
 		risk, ok := recommendationRiskScore(klines)
-		if !ok || risk > recommendationMaxRiskScore {
+		if !ok || risk > maxRiskScore {
 			continue
 		}
 		candidate.Klines = klines
@@ -532,10 +560,12 @@ func isRecommendationUptrend(klines []model.Kline) bool {
 
 // recommendationRiskScore 用最近 60 根前复权日 K 计算 0-100 的确定性风险分：
 //   - 年化波动率（日收益率标准差 ×√244）：权重 40，波动 60% 记满
-//   - 60 日内最大回撤：权重 35，回撤 30% 记满
-//   - 短期过热（近 5 日涨幅）：权重 25，5 日涨 25% 记满
+//   - 60 日内最大回撤：权重 45，回撤 30% 记满
+//   - 短期过热（近 5 日涨幅）：权重 15，5 日涨 35% 记满
 //
-// 分数越高风险越高；数据不完整或价格非法时返回 false。
+// 过热项权重与记满阈值刻意偏宽：趋势筛选已要求近 5/20/60 日收益全为正，
+// 过热惩罚过重会系统性误杀强趋势候选；回撤权重相应上调以保持对
+// 深回撤股票的排斥。分数越高风险越高；数据不完整或价格非法时返回 false。
 func recommendationRiskScore(klines []model.Kline) (float64, bool) {
 	if len(klines) != recommendationKlineDays {
 		return 0, false
@@ -585,6 +615,6 @@ func recommendationRiskScore(klines []model.Kline) (float64, bool) {
 		}
 		return v
 	}
-	score := clamp01(annualVol/0.60)*40 + clamp01(maxDrawdown/0.30)*35 + clamp01(gain5/0.25)*25
+	score := clamp01(annualVol/0.60)*40 + clamp01(maxDrawdown/0.30)*45 + clamp01(gain5/0.35)*15
 	return score, true
 }

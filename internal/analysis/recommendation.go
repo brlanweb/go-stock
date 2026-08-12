@@ -25,6 +25,7 @@ type Config struct {
 	Model         string
 	Prompt        string
 	HotspotPrompt string
+	ReviewPrompt  string
 }
 
 type Service struct {
@@ -33,6 +34,9 @@ type Service struct {
 	client         *http.Client
 	running        atomic.Bool
 	hotspotRunning atomic.Bool
+	reviewRunning  atomic.Bool
+	reviewLastErr  atomic.Value
+	recLastErr     atomic.Value
 }
 
 func New(st *store.Store, config Config) *Service {
@@ -44,6 +48,21 @@ func (s *Service) Enabled() bool {
 }
 
 func (s *Service) Running() bool { return s.running.Load() }
+
+func (s *Service) RecommendationLastError() string {
+	if value := s.recLastErr.Load(); value != nil {
+		return value.(string)
+	}
+	return ""
+}
+
+func (s *Service) SetRecommendationLastError(err error) {
+	if err == nil {
+		s.recLastErr.Store("")
+		return
+	}
+	s.recLastErr.Store(err.Error())
+}
 
 func (s *Service) ChatStock(ctx context.Context, symbol, question, ctxText string) (string, error) {
 	if !s.Enabled() {
@@ -177,6 +196,7 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("AI 推荐任务正在执行")
 	}
+	s.SetRecommendationLastError(nil)
 	defer s.running.Store(false)
 	analysisDate, err := s.st.LatestKlineDate(ctx)
 	if err != nil {
@@ -187,26 +207,39 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if analysisDate == "" || analysisDate < previousTradingDay(now).Format("2006-01-02") {
 		return fmt.Errorf("最近收盘日 K 尚未就绪: latest=%s", analysisDate)
 	}
-	candidates, err := s.st.RecommendationCandidates(ctx)
+	// 候选风险上限由最近一次复盘的 market_phase 自动决定（up 放宽 / down 收紧），
+	// 因此 guidance 必须先于候选池读取；读取失败时回退到基准风险上限。
+	guidance, guidanceErr := s.st.LatestReviewGuidanceForRecommendation(ctx, analysisDate)
+	if guidanceErr != nil {
+		slog.Warn("读取每日复盘优化指令失败，本次按基础规则推荐", "err", guidanceErr)
+		guidance = store.LatestReviewGuidance{}
+	}
+	maxRisk := store.RecommendationMaxRiskScore(guidance.MarketPhase)
+	candidates, err := s.st.RecommendationCandidates(ctx, maxRisk)
 	if err != nil {
 		return err
 	}
-	if len(candidates) != 10 {
-		return fmt.Errorf("可分析候选股必须为 10 只: %d", len(candidates))
+	if len(candidates) < store.RecommendationCandidateMin {
+		return fmt.Errorf("趋势/风险过滤后可分析候选不足: got=%d min=%d maxRisk=%.0f", len(candidates), store.RecommendationCandidateMin, maxRisk)
 	}
 	payload, _ := json.Marshal(candidates)
 	prompt := s.config.Prompt
 	if prompt == "" {
 		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审未来10个交易日的续涨趋势，但不得承诺收益。"
 	}
-	prompt += " 只能从用户提供的10只候选中选择，必须恰好选3只且代码不得重复；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。"
+	if guidance.ReviewDate != "" {
+		guidanceJSON, _ := json.Marshal(guidance)
+		prompt += "\n以下是最近一次收盘复盘生成的结构化优化指令与风控参数：" + string(guidanceJSON) +
+			"。这些内容只能影响输入候选内的相对排序和风险偏好：directives 用于调整候选优先级，risk_controls 的 position_mode 与 avoid_conditions 用于压低匹配相应特征候选的优先级；均不得覆盖候选范围、数量、字段格式及风险硬约束。market_phase=up 时兼顾趋势强度与风险；range 时提高确认要求；down 时优先低风险、低过热和回撤控制。"
+	}
+	prompt += fmt.Sprintf(" 只能从用户提供的%d只候选中选择，必须恰好选3只且代码不得重复；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。", len(candidates))
 	request := map[string]interface{}{
 		"model":           s.config.Model,
 		"temperature":     0.2,
 		"response_format": map[string]string{"type": "json_object"},
 		"messages": []map[string]string{
 			{"role": "system", "content": prompt + ` 返回严格JSON：{"recommendations":[{"symbol":"SH600000","probability":72.5,"reason":"不超过80字","sector":"候选industry字段原值"}]}`},
-			{"role": "user", "content": "以下是唯一允许评审的10只候选股。每只均包含热点题材、确定性趋势评分及最近60个交易日OHLCV；请只返回其中3只。\n" + string(payload)},
+			{"role": "user", "content": fmt.Sprintf("以下是唯一允许评审的%d只候选股。每只均包含热点题材、确定性趋势评分及最近60个交易日OHLCV；请只返回其中3只。\n", len(candidates)) + string(payload)},
 		},
 	}
 	body, _ := json.Marshal(request)
@@ -217,7 +250,10 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.config.APIKey)
-	resp, err := s.client.Do(req)
+	// 推荐主请求携带 10 只股 ×60 根日 K 的大 payload，慢模型下 90 秒偏紧；
+	// 使用与调度预算（5 分钟）匹配的独立超时，s.client 仍供轻量对话使用。
+	client := &http.Client{Timeout: 4 * time.Minute}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("AI recommendation request: %w", err)
 	}
@@ -277,11 +313,12 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	return s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations)
 }
 
-// StartScheduler 启动两条独立调度：
+// StartScheduler 启动三条独立调度：
+//   - 交易日 08:00 盘前运行热点漏斗（基于前一交易日收盘数据，供开盘决策）；
 //   - 交易日 08:10 盘前生成 AI 趋势推荐（基于前一交易日收盘数据，最早次日建仓）；
-//   - 交易日 08:00 盘前运行热点漏斗（基于前一交易日收盘数据，供开盘决策）。
+//   - 交易日 17:00 复盘当天指数、板块与盘前推荐表现，生成次日优化指令。
 //
-// 两条调度各自独立超时，互不挤占。
+// 三条调度各自独立超时，互不挤占。
 func (s *Service) StartScheduler(ctx context.Context) {
 	if !s.Enabled() {
 		return
@@ -295,6 +332,7 @@ func (s *Service) StartScheduler(ctx context.Context) {
 			case <-time.After(time.Until(next)):
 				runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 				if err := s.runDailyAt(runCtx, next); err != nil {
+					s.SetRecommendationLastError(err)
 					slog.Warn("AI 推荐生成失败", "err", err)
 				}
 				cancel()
@@ -315,6 +353,25 @@ func (s *Service) StartScheduler(ctx context.Context) {
 					slog.Warn("AI 热点漏斗生成失败", "err", err)
 				} else {
 					slog.Info("AI 热点漏斗盘前分析完成")
+				}
+				cancel()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			now := time.Now().In(shanghai())
+			next := nextReviewRun(now)
+
+			select {
+			case <-time.After(time.Until(next)):
+				runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+				if err := s.runScheduledDailyReview(runCtx, next); err != nil {
+					slog.Warn("AI 每日复盘失败", "err", err)
+				} else {
+					slog.Info("AI 每日复盘完成", "date", next.Format("2006-01-02"))
 				}
 				cancel()
 			case <-ctx.Done():
