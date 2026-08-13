@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from 'd3-hierarchy'
 import { api, fmtBig, fmtPct, type HeatmapGroup, type HeatmapItem } from '../api'
 import MarketSidebar from '../components/MarketSidebar.vue'
 import HotspotFunnel from '../components/HotspotFunnel.vue'
+import Review from './Review.vue'
+import Recommendations from './Recommendations.vue'
+import Indicators from './Indicators.vue'
 
 interface TreeDatum {
   name: string
@@ -15,7 +18,16 @@ interface TreeDatum {
 }
 
 const router = useRouter()
-const activeView = ref<'heatmap' | 'hotspot'>('heatmap')
+const route = useRoute()
+
+// 首页五个同级 Tab：默认热点漏斗；旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
+type HomeView = 'hotspot' | 'heatmap' | 'review' | 'reco' | 'indicators'
+const homeViews: HomeView[] = ['hotspot', 'heatmap', 'review', 'reco', 'indicators']
+function normalizeView(value: unknown): HomeView {
+  return homeViews.includes(value as HomeView) ? value as HomeView : 'hotspot'
+}
+const activeView = ref<HomeView>(normalizeView(route.query.view))
+watch(() => route.query.view, value => { if (value) activeView.value = normalizeView(value) })
 const groups = ref<HeatmapGroup[]>([])
 const notice = ref('')
 const error = ref('')
@@ -196,14 +208,17 @@ onUnmounted(() => {
   <main class="heatmap-workspace">
     <MarketSidebar :market="market" :group-by="groupBy" :metric="metric" :period="period" :controls="activeView === 'heatmap'" :security-count="itemCount" @change="options => { market = options.market; groupBy = options.groupBy; metric = options.metric; period = options.period; setOption() }" />
 
-    <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView === 'hotspot' }">
+    <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView !== 'heatmap' }">
       <header class="canvas-header">
         <nav class="workspace-tabs" aria-label="首页视图">
-          <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'"><span class="live-dot"></span>大盘云图</button>
-          <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'">热点漏斗</button>
+          <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'"><span class="live-dot"></span>热点漏斗</button>
+          <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'">大盘云图</button>
+          <button type="button" :class="{ active: activeView === 'review' }" @click="activeView = 'review'">每日复盘</button>
+          <button type="button" :class="{ active: activeView === 'reco' }" @click="activeView = 'reco'">趋势推荐</button>
+          <button type="button" :class="{ active: activeView === 'indicators' }" @click="activeView = 'indicators'">指标与回测</button>
         </nav>
         <div v-if="activeView === 'heatmap'" class="legend"><span>板块面积以成分市值为主，概念兼顾活跃度；个股面积代表市值，颜色代表涨跌幅</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
-        <div v-else class="hotspot-caption">数据初筛 → 关系收敛 → AI 产业链分析 → 本地数据回验</div>
+        <div v-else-if="activeView === 'hotspot'" class="hotspot-caption">数据初筛 → 关系收敛 → AI 产业链分析 → 本地数据回验</div>
       </header>
       <template v-if="activeView === 'heatmap'">
         <section v-if="notice || error" class="market-notice" :class="{ error }">{{ error || notice }}</section>
@@ -217,7 +232,10 @@ onUnmounted(() => {
           <span v-else-if="!notice && !error" class="loading">正在载入市场数据</span>
         </section>
       </template>
-      <HotspotFunnel v-else />
+      <HotspotFunnel v-else-if="activeView === 'hotspot'" />
+      <Review v-else-if="activeView === 'review'" />
+      <Recommendations v-else-if="activeView === 'reco'" />
+      <Indicators v-else-if="activeView === 'indicators'" />
     </section>
   </main>
 </template>

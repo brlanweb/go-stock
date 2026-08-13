@@ -3,19 +3,17 @@ import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
 import Dashboard from './views/Dashboard.vue'
 import StockDetail from './views/StockDetail.vue'
-import Recommendations from './views/Recommendations.vue'
 import SectorDetail from './views/SectorDetail.vue'
-import Indicators from './views/Indicators.vue'
-import Review from './views/Review.vue'
 import './style.css'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', component: Dashboard },
-    { path: '/recommendations', component: Recommendations },
-    { path: '/review', component: Review },
-    { path: '/indicators', component: Indicators },
+    // 三个视图已并入首页 Tab，旧路径重定向保持外部链接与书签有效
+    { path: '/recommendations', redirect: { path: '/', query: { view: 'reco' } } },
+    { path: '/review', redirect: { path: '/', query: { view: 'review' } } },
+    { path: '/indicators', redirect: { path: '/', query: { view: 'indicators' } } },
     { path: '/sector/:code', component: SectorDetail, props: true },
     { path: '/stock/:symbol', component: StockDetail, props: true }
   ]

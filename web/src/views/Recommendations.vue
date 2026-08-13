@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationStats } from '../api'
-import MarketSidebar from '../components/MarketSidebar.vue'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -158,9 +157,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="reco-shell">
-    <MarketSidebar :controls="false" />
-    <main class="reco-content">
+  <main class="reco-content">
       <header class="reco-header">
         <div class="reco-title"><strong>AI 趋势推荐 · 成功率评估</strong><small>口径：推荐日后首个交易日开盘价买入 → 第 5 个交易日收盘价冻结</small></div>
         <div class="reco-tools">
@@ -244,13 +241,12 @@ onMounted(async () => {
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
       </div>
-    </main>
-  </div>
+  </main>
 </template>
 
 <style scoped>
-.reco-shell { display:grid; grid-template-columns:212px minmax(0,1fr); width:100vw; height:100vh; overflow:hidden; background:#0f1826; color:#e7ecf4; }
-.reco-content { display:flex; min-width:0; min-height:0; flex-direction:column; padding:0 14px 14px; overflow:hidden; }
+/* 以首页 Tab 面板形式嵌入 Dashboard，自身不再带侧边栏外壳 */
+.reco-content { display:flex; min-width:0; min-height:0; flex-direction:column; padding:0 14px 14px; overflow:hidden; background:#0f1826; color:#e7ecf4; }
 .reco-header { display:flex; align-items:center; justify-content:space-between; padding:12px 2px; border-bottom:1px solid #26324a; }
 .reco-title strong { font-size:16px; }.reco-title small { margin-left:10px; color:#8895ab; font-size:12px; }
 .reco-title .risk-policy { color:#d8b967; }
@@ -318,7 +314,6 @@ onMounted(async () => {
 .disclaimer { padding:10px 4px; color:#6f7c92; font-size:11px; line-height:1.5; }
 .empty { padding:20px; color:#6f7c92; font-size:13px; }
 @media (max-width:900px) {
-  .reco-shell { grid-template-columns:1fr; height:auto; min-height:100vh; overflow:visible; }
   .reco-content { height:auto; overflow:visible; }
   .reco-body { grid-template-columns:1fr; }
   .date-list { flex-direction:row; flex-wrap:wrap; max-height:none; }

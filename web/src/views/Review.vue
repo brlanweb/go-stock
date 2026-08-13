@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, fmtBig, fmtPct, pctClass, type DailyReviewReport, type DailyReviewRunSummary } from '../api'
-import MarketSidebar from '../components/MarketSidebar.vue'
 
 const router = useRouter()
 const history = ref<DailyReviewRunSummary[]>([])
@@ -121,9 +120,7 @@ onUnmounted(() => window.clearInterval(pollTimer))
 </script>
 
 <template>
-  <div class="review-shell">
-    <MarketSidebar :controls="false" />
-    <main class="review-content">
+  <main class="review-content">
       <header class="review-header">
         <div class="title-block">
           <strong>每日复盘</strong>
@@ -273,13 +270,12 @@ onUnmounted(() => window.clearInterval(pollTimer))
           </section>
         </div>
       </template>
-    </main>
-  </div>
+  </main>
 </template>
 
 <style scoped>
-.review-shell { display:grid; grid-template-columns:212px minmax(0,1fr); width:100vw; height:100vh; overflow:hidden; background:#0f1826; color:#e7ecf4; }
-.review-content { min-width:0; overflow-y:auto; padding:0 16px 24px; }
+/* 以首页 Tab 面板形式嵌入 Dashboard，自身不再带侧边栏外壳 */
+.review-content { min-width:0; min-height:0; overflow-y:auto; padding:0 16px 24px; background:#0f1826; color:#e7ecf4; }
 .review-header { position:sticky; z-index:4; top:0; display:flex; align-items:center; justify-content:space-between; min-height:56px; border-bottom:1px solid #26324a; background:#0f1826; }
 .title-block { display:flex; align-items:baseline; gap:10px; }.title-block strong { font-size:17px; }.title-block small,.section-head small { color:#7f8ca2; font-size:11px; }
 .tools { display:flex; gap:8px; }.tools select,.tools button { height:31px; border:1px solid #3a496a; border-radius:0; background:#182338; color:#dce3ed; font-size:12px; }.tools select { padding:0 8px; }.tools button { padding:0 12px; cursor:pointer; }.tools button:disabled { cursor:wait; opacity:.55; }
@@ -301,6 +297,6 @@ onUnmounted(() => window.clearInterval(pollTimer))
 .directive-review-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.directive-review-item { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:start; gap:9px; padding:10px; background:#101a2b; }.directive-review-item p { margin:0; }.directive-review-item b,.directive-review-item span { display:block; }.directive-review-item b { font-size:11px; line-height:1.45; }.directive-review-item span { margin-top:4px; color:#8794a8; font-size:10px; line-height:1.45; }
 .decision-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.decision-grid .panel { margin-top:12px; }.risk-panel { grid-column:1/-1; }.lesson-cols { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.lesson-cols>div { padding:10px; background:#101a2b; }.lesson-cols small { color:#8592a7; }.lesson-cols p,.risk-panel>p { margin:7px 0 0; color:#b2bdcc; font-size:11px; line-height:1.5; }.directive-item { display:grid; grid-template-columns:24px 1fr; gap:8px; padding:8px 0; border-bottom:1px solid #202d43; }.directive-item i { display:flex; width:22px; height:22px; align-items:center; justify-content:center; background:#2a3a5c; color:#e9c16c; font-size:10px; font-style:normal; }.directive-item p { margin:0; }.directive-item b,.directive-item span { display:block; }.directive-item b { font-size:11px; }.directive-item span { margin-top:3px; color:#8794a8; font-size:10px; line-height:1.4; }.risk-numbers { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }.risk-numbers>span { display:flex; align-items:center; justify-content:space-between; padding:9px 12px; background:#101a2b; }.risk-numbers small { color:#8794a8; }.risk-numbers b { color:#e9c16c; }
 .up { color:#ef6a72!important; }.down { color:#46bd91!important; }.dim { color:#93a0b6!important; }
-@media (max-width:900px) { .review-shell { grid-template-columns:1fr; width:100%; height:auto; min-height:100vh; overflow:visible; }.review-content { overflow:visible; padding:0 10px 20px; }.review-header { top:0; }.market-band { grid-template-columns:100px 1fr; }.market-conclusion { grid-column:1/-1; border-top:1px solid #2b3850; }.breadth-row { grid-template-columns:repeat(2,1fr); }.pick-grid,.check-grid,.decision-grid { grid-template-columns:1fr; }.risk-panel { grid-column:auto; } }
+@media (max-width:900px) { .review-content { overflow:visible; padding:0 10px 20px; }.review-header { top:0; }.market-band { grid-template-columns:100px 1fr; }.market-conclusion { grid-column:1/-1; border-top:1px solid #2b3850; }.breadth-row { grid-template-columns:repeat(2,1fr); }.pick-grid,.check-grid,.decision-grid { grid-template-columns:1fr; }.risk-panel { grid-column:auto; } }
 @media (max-width:560px) { .review-header { align-items:flex-start; flex-direction:column; gap:8px; padding:10px 0; }.tools { width:100%; }.tools select { min-width:0; flex:1; }.market-band { grid-template-columns:1fr; }.phase,.stance { min-height:auto; border-right:0; border-bottom:1px solid #2b3850; }.market-conclusion { grid-column:auto; border-top:0; }.index-grid { grid-template-columns:repeat(2,1fr); }.lesson-cols,.risk-numbers,.directive-review-list { grid-template-columns:1fr; } }
 </style>
