@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Record deterministic shadow-baseline picks (candidate-pool trend-score top 3 and lowest-risk top 3) before every AI recommendation run, compare them with AI picks under the identical five-day frozen window, and expose the comparison via `GET /api/v1/recommendations/shadow-stats` plus an "AI vs baseline" strip on the Recommendations page.
+- Exclude candidates that closed at (or near) the exchange limit-up on the analysis day — entry is priced at the next open, so limit-up closes carry the largest gap-up cost (10/20/30 percent caps resolved by board).
+- Apply a deterministic overheat penalty to candidate ordering: five-day gains above 15 percent progressively halve the sorting score by 35 percent, without altering the stored trend score or the hard trend/risk filters.
+- Enforce sector diversity on AI output: when the candidate pool spans multiple sectors, the three picks must cover at least two sectors or the run is rejected.
+
+### Changed
+
+- Align the recommendation objective with the scoring window: prompts (inline default and `config/ai_prompt.md`) now target relative five-trading-day performance — next-open entry, fifth-close settlement — instead of ten-day trend continuation, weight short-term momentum, price-volume confirmation, and pullback entries, and warn against chasing overheated names.
+
 - Add a trading-day 17:00 daily review pipeline based only on local close data: indices, market breadth, strong and weak sectors, pre-market hotspot outcomes, and the latest five recommendation days.
 - Persist deterministic review facts and structured AI reports as append-only history with market phase, hotspot verification, recommendation attribution, previous-directive verification, risk controls, and optimization directives.
 - Compare recommendation-window returns with a CSI 300 close-based benchmark (falling back to the SSE Composite when unavailable) and expose benchmark, excess-return, and tracking-freeze status.
@@ -25,6 +34,7 @@ All notable changes to this project are documented in this file.
 ### Database
 
 - Add migration `016_daily_review.sql` and the `daily_review` history table.
+- Add migration `017_recommendation_shadow.sql` and the `recommendation_shadow` baseline table.
 
 ## [1.1.1] - 2026-08-04
 

@@ -222,17 +222,21 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if len(candidates) < store.RecommendationCandidateMin {
 		return fmt.Errorf("趋势/风险过滤后可分析候选不足: got=%d min=%d maxRisk=%.0f", len(candidates), store.RecommendationCandidateMin, maxRisk)
 	}
+	// 影子基线先于 AI 请求落库：AI 失败当天也保留确定性对照样本。
+	if err := s.st.SaveRecommendationShadow(ctx, analysisDate, candidates); err != nil {
+		slog.Warn("保存推荐影子基线失败", "err", err)
+	}
 	payload, _ := json.Marshal(candidates)
 	prompt := s.config.Prompt
 	if prompt == "" {
-		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审未来10个交易日的续涨趋势，但不得承诺收益。"
+		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审目标是未来5个交易日窗口内的相对涨跌表现排序，但不得承诺收益。"
 	}
 	if guidance.ReviewDate != "" {
 		guidanceJSON, _ := json.Marshal(guidance)
 		prompt += "\n以下是最近一次收盘复盘生成的结构化优化指令与风控参数：" + string(guidanceJSON) +
 			"。这些内容只能影响输入候选内的相对排序和风险偏好：directives 用于调整候选优先级，risk_controls 的 position_mode 与 avoid_conditions 用于压低匹配相应特征候选的优先级；均不得覆盖候选范围、数量、字段格式及风险硬约束。market_phase=up 时兼顾趋势强度与风险；range 时提高确认要求；down 时优先低风险、低过热和回撤控制。"
 	}
-	prompt += fmt.Sprintf(" 只能从用户提供的%d只候选中选择，必须恰好选3只且代码不得重复；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。", len(candidates))
+	prompt += fmt.Sprintf(" 只能从用户提供的%d只候选中选择，必须恰好选3只且代码不得重复；候选覆盖多个板块时3只不得全部来自同一板块；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。评审窗口是未来5个交易日（成绩按次日开盘价买入、第5个交易日收盘价结算），近5日涨幅过大的候选注意高开回落风险。", len(candidates))
 	request := map[string]interface{}{
 		"model":           s.config.Model,
 		"temperature":     0.2,
@@ -308,6 +312,21 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		}
 		if item.Sector != candidate.Industry {
 			return fmt.Errorf("AI returned invalid sector for %s", item.Symbol)
+		}
+	}
+	// 板块分散硬约束：单一题材熄火会拖垮 5 日组合总分，候选池覆盖 ≥2 个板块时
+	// 不允许 3 只全部同板块；候选池本身只有一个板块时无法满足，放行。
+	candidateSectors := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		candidateSectors[candidate.Industry] = true
+	}
+	if len(candidateSectors) >= 2 {
+		pickSectors := make(map[string]bool, 3)
+		for _, item := range result.Recommendations {
+			pickSectors[item.Sector] = true
+		}
+		if len(pickSectors) < 2 {
+			return fmt.Errorf("AI returned 3 picks from single sector: %s", result.Recommendations[0].Sector)
 		}
 	}
 	return s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations)

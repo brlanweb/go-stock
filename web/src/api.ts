@@ -172,6 +172,22 @@ export interface RecommendationStats {
   day_win_rate: number | null
 }
 
+// 影子基线对照：ai 与确定性规则（trend=趋势分前3 / low_risk=低风险前3）
+// 在共同分析日期集上的 5 日冻结口径统计，用于度量 AI 相对基线的超额。
+export interface RecommendationShadowStats {
+  strategy: string
+  total_days: number
+  frozen_picks: number
+  tracking_picks: number
+  wins: number
+  win_rate: number | null
+  avg_change_pct: number | null
+  sum_change_pct: number | null
+  day_wins: number
+  day_frozen: number
+  day_win_rate: number | null
+}
+
 // 下一次盘前推荐的候选风险上限：由最近一次 AI 复盘的市场阶段自动决定，仅展示。
 export interface RecommendationRiskPolicy {
   review_date: string
@@ -454,6 +470,7 @@ export const api = {
   recommendationPerformance: (days = 5) => req<RecommendationPerformance[]>(`/recommendations/performance?days=${days}`),
   recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
   recommendationRiskPolicy: () => req<RecommendationRiskPolicy>('/recommendations/risk-policy'),
+  recommendationShadowStats: (days = 60) => req<RecommendationShadowStats[]>(`/recommendations/shadow-stats?days=${days}`),
   recommendationStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/recommendations/status'),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
   hotspot: (id?: number) => req<HotspotReport>(`/hotspot${id ? `?id=${id}` : ''}`),

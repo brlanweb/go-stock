@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationStats } from '../api'
+import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationShadowStats, type RecommendationStats } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -13,6 +13,11 @@ const message = ref('')
 const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
 const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
+const shadowStats = ref<RecommendationShadowStats[]>([])
+
+const shadowStrategyLabels: Record<string, string> = { ai: 'AI 推荐', trend: '趋势基线', low_risk: '低风险基线' }
+// 至少一组策略有冻结样本才展示对照，避免上线初期一排空数据。
+const shadowVisible = computed(() => shadowStats.value.some(item => item.frozen_picks > 0))
 
 const phaseLabel: Record<string, string> = { up: '上升', range: '震荡', down: '下降' }
 // 候选风险上限由最近一次 AI 复盘的市场阶段自动决定：up 85 / range 75 / down 65，无复盘 70。
@@ -104,6 +109,7 @@ async function loadDate(date: string) {
 async function refreshDates() {
   riskPolicy.value = await api.recommendationRiskPolicy().catch(() => null)
   stats.value = await api.recommendationStats(60).catch(() => null)
+  shadowStats.value = await api.recommendationShadowStats(60).catch(() => [] as RecommendationShadowStats[])
   performance.value = await api.recommendationPerformance(5).catch(() => [] as RecommendationPerformance[])
   chartData.value = await api.recommendationPerformance(30).catch(() => [] as RecommendationPerformance[])
   dates.value = await api.recommendationHistory(365).catch(() => [] as string[])
@@ -183,6 +189,22 @@ onMounted(async () => {
         <div class="stat-cell"><small>累计收益点数</small><b :class="pctClass(stats.sum_change_pct)">{{ fmtSigned(stats.sum_change_pct, ' 点') }}</b><span>追踪中 {{ stats.tracking_picks }} 只未计入</span></div>
         <div class="stat-cell"><small>最佳</small><b class="up">{{ fmtSigned(stats.best_pct) }}</b><span>{{ stats.best_name || '—' }}</span></div>
         <div class="stat-cell"><small>最差</small><b class="down">{{ fmtSigned(stats.worst_pct) }}</b><span>{{ stats.worst_name || '—' }}</span></div>
+      </div>
+
+      <div v-if="shadowVisible" class="shadow-strip">
+        <div class="perf-caption"><b>AI vs 确定性基线</b><small>同一候选池、同一 5 日冻结口径：趋势基线=候选趋势分前3，低风险基线=候选风险分最低3；用于观测 AI 超额，非投资建议</small></div>
+        <div class="shadow-table">
+          <div class="shadow-row head"><span>策略</span><span>样本日</span><span>已冻结</span><span>个股胜率</span><span>日胜率</span><span>平均收益</span><span>累计点数</span></div>
+          <div v-for="item in shadowStats" :key="item.strategy" class="shadow-row" :class="{ hero: item.strategy === 'ai' }">
+            <span>{{ shadowStrategyLabels[item.strategy] || item.strategy }}</span>
+            <span>{{ item.total_days }}</span>
+            <span>{{ item.frozen_picks }}<small v-if="item.tracking_picks"> +{{ item.tracking_picks }}追踪</small></span>
+            <span :class="(item.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ item.win_rate == null ? '—' : item.win_rate.toFixed(1) + '%' }}</span>
+            <span :class="(item.day_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ item.day_win_rate == null ? '—' : item.day_win_rate.toFixed(1) + '%' }}</span>
+            <span :class="pctClass(item.avg_change_pct)">{{ item.avg_change_pct == null ? '—' : `${item.avg_change_pct >= 0 ? '+' : ''}${item.avg_change_pct.toFixed(2)}%` }}</span>
+            <span :class="pctClass(item.sum_change_pct)">{{ item.sum_change_pct == null ? '—' : `${item.sum_change_pct >= 0 ? '+' : ''}${item.sum_change_pct.toFixed(2)} 点` }}</span>
+          </div>
+        </div>
       </div>
 
       <div v-if="chart.bars.length" class="chart-strip">
@@ -279,6 +301,13 @@ onMounted(async () => {
 .perf-card>b em { font-size:10px; font-style:normal; font-weight:400; opacity:.7; }
 .perf-card>span { font-size:11px; font-variant-numeric:tabular-nums; }
 .perf-card .up { color:#ef6a72; }.perf-card .down { color:#55b996; }.perf-card .dim { color:#93a0b6; }
+.shadow-strip { margin-top:10px; padding:10px 12px; border:1px solid #26324a; background:#131e33; }
+.shadow-table { display:grid; gap:1px; }
+.shadow-row { display:grid; grid-template-columns:110px 70px 110px 90px 90px 100px minmax(90px,1fr); gap:10px; align-items:center; padding:7px 8px; background:#182338; font-size:12px; font-variant-numeric:tabular-nums; }
+.shadow-row.head { background:#101a2b; color:#8895ab; font-size:11px; }
+.shadow-row.hero { border-left:2px solid #e9c16c; background:#1c2a47; }
+.shadow-row small { margin-left:4px; color:#8895ab; font-size:9px; }
+.shadow-row .up { color:#ef6a72; }.shadow-row .down { color:#55b996; }.shadow-row .dim { color:#93a0b6; }
 .chart-strip { margin-top:10px; padding:10px 12px 6px; border:1px solid #26324a; background:#131e33; }
 .perf-chart { display:block; width:100%; height:150px; }
 .zero-line { stroke:#3a496a; stroke-width:1; stroke-dasharray:3 3; }
@@ -317,6 +346,8 @@ onMounted(async () => {
   .reco-content { height:auto; overflow:visible; }
   .reco-body { grid-template-columns:1fr; }
   .date-list { flex-direction:row; flex-wrap:wrap; max-height:none; }
+  .shadow-row { grid-template-columns:90px 50px 70px 70px 70px; }
+  .shadow-row span:nth-child(6), .shadow-row span:nth-child(7) { display:none; }
   .reco-row { grid-template-columns:36px minmax(90px,1fr) 76px 76px 70px; gap:6px; padding:10px 6px; }
   .reco-row .score, .reco-row .risk, .reco-row .reason, .reco-row .sector, .reco-row.head span:nth-child(6), .reco-row.head span:nth-child(7), .reco-row.head span:nth-child(8), .reco-row.head span:nth-child(9) { display:none; }
 }

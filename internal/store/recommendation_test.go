@@ -99,6 +99,81 @@ func TestRecommendationMaxRiskScoreByPhase(t *testing.T) {
 	}
 }
 
+func TestRecommendationLimitPctByBoard(t *testing.T) {
+	cases := map[string]float64{
+		"600519": 10, "000001": 10, "601988": 10,
+		"300750": 20, "688981": 20,
+		"920001": 30, "830799": 30, "430047": 30,
+	}
+	for code, want := range cases {
+		if got := recommendationLimitPct(code); got != want {
+			t.Fatalf("code=%s limit=%f, want %f", code, got, want)
+		}
+	}
+}
+
+func TestRecommendationGapRiskHigh(t *testing.T) {
+	build := func(lastChangePct float64) []model.Kline {
+		klines := make([]model.Kline, recommendationKlineDays)
+		for i := range klines {
+			klines[i] = model.Kline{Close: 10}
+		}
+		klines[len(klines)-1].ChangePct = lastChangePct
+		return klines
+	}
+	// 主板昨日涨停（≥ 10%×0.93）→ 剔除
+	if !recommendationGapRiskHigh(build(9.98), "600519") {
+		t.Fatal("main board limit-up must be flagged as gap risk")
+	}
+	// 主板昨日涨 5% → 保留
+	if recommendationGapRiskHigh(build(5), "600519") {
+		t.Fatal("moderate gain must not be flagged")
+	}
+	// 创业板涨 9.98% 未及 20% 限幅 → 保留
+	if recommendationGapRiskHigh(build(9.98), "300750") {
+		t.Fatal("GEM 9.98%% is not limit-up, must not be flagged")
+	}
+	// 创业板涨 19.9% → 剔除
+	if !recommendationGapRiskHigh(build(19.9), "300750") {
+		t.Fatal("GEM limit-up must be flagged")
+	}
+	// change_pct 缺失时用最后两根收盘价近似
+	missing := make([]model.Kline, recommendationKlineDays)
+	for i := range missing {
+		missing[i] = model.Kline{Close: 10}
+	}
+	missing[len(missing)-1] = model.Kline{Close: 11} // 收盘 +10%
+	if !recommendationGapRiskHigh(missing, "000001") {
+		t.Fatal("fallback close-to-close limit-up must be flagged")
+	}
+}
+
+func TestRecommendationSortScoreOverheatPenalty(t *testing.T) {
+	build := func(gain5 float64) []model.Kline {
+		klines := make([]model.Kline, recommendationKlineDays)
+		for i := range klines {
+			klines[i] = model.Kline{Close: 10}
+		}
+		klines[len(klines)-6].Close = 10
+		klines[len(klines)-1].Close = 10 * (1 + gain5)
+		return klines
+	}
+	const trendScore = 100.0
+	// 近 5 日涨 10% 在惩罚起点内 → 不降权
+	if got := recommendationSortScore(trendScore, build(0.10)); got != trendScore {
+		t.Fatalf("gain5=10%% score=%f, want %f", got, trendScore)
+	}
+	// 近 5 日涨 25% → 部分降权，介于 50 与 100 之间
+	mid := recommendationSortScore(trendScore, build(0.25))
+	if mid >= trendScore || mid <= trendScore*(1-recommendationOverheatMaxPenalty) {
+		t.Fatalf("gain5=25%% score=%f, want between %f and %f", mid, trendScore*(1-recommendationOverheatMaxPenalty), trendScore)
+	}
+	// 近 5 日涨 40% 超过封顶 → 打五折
+	if got := recommendationSortScore(trendScore, build(0.40)); got != trendScore*(1-recommendationOverheatMaxPenalty) {
+		t.Fatalf("gain5=40%% score=%f, want %f", got, trendScore*(1-recommendationOverheatMaxPenalty))
+	}
+}
+
 func TestRecommendationPerformance(t *testing.T) {
 	entry, latest, changePct := recommendationPerformance(
 		sql.NullFloat64{Float64: 10, Valid: true},

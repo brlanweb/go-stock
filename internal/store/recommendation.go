@@ -26,6 +26,14 @@ const (
 	recommendationMaxRiskUp    = 85.0
 	recommendationMaxRiskRange = 75.0
 	recommendationMaxRiskDown  = 65.0
+
+	// 计分口径的买入价是分析日后首个交易日开盘价，昨日封板/近端暴涨的候选
+	// 高开损耗最大：涨停判定按“昨日涨幅 ≥ 交易所涨跌幅上限 × 0.93”近似，
+	// 过热降权对近 5 日涨幅超过 15% 的候选做排序惩罚（35% 处惩罚封顶一半）。
+	recommendationLimitUpRatio       = 0.93
+	recommendationOverheatFloor      = 0.15
+	recommendationOverheatCeiling    = 0.35
+	recommendationOverheatMaxPenalty = 0.5
 )
 
 // RecommendationMaxRiskScore 返回给定复盘市场阶段下的候选风险分上限：
@@ -178,8 +186,10 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 	})
 
 	// 候选池通常约百只；只接受完整 60 根日 K 的证券，先按趋势筛选，再剔除
-	// 风险过高（高波动/深回撤/短期过热）的股票，最后按趋势评分统一取前 10。
+	// 风险过高（高波动/深回撤/短期过热）与昨日涨停（次日高开损耗大）的股票，
+	// 最后按“趋势分 × 过热惩罚”排序统一取前 10。TrendScore 字段保留原始趋势分。
 	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
+	sortScores := make(map[string]float64, len(pool))
 	for _, candidate := range pool {
 		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, recommendationKlineDays)
 		if err != nil {
@@ -193,21 +203,76 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		if !ok || risk > maxRiskScore {
 			continue
 		}
+		if recommendationGapRiskHigh(klines, candidate.Code) {
+			continue
+		}
 		candidate.Klines = klines
 		candidate.TrendScore = score
 		candidate.RiskScore = risk
+		sortScores[candidate.Symbol] = recommendationSortScore(score, klines)
 		trendCandidates = append(trendCandidates, candidate)
 	}
 	sort.Slice(trendCandidates, func(i, j int) bool {
-		if trendCandidates[i].TrendScore == trendCandidates[j].TrendScore {
+		si, sj := sortScores[trendCandidates[i].Symbol], sortScores[trendCandidates[j].Symbol]
+		if si == sj {
 			return trendCandidates[i].Symbol < trendCandidates[j].Symbol
 		}
-		return trendCandidates[i].TrendScore > trendCandidates[j].TrendScore
+		return si > sj
 	})
 	if len(trendCandidates) > recommendationCandidateLimit {
 		trendCandidates = trendCandidates[:recommendationCandidateLimit]
 	}
 	return trendCandidates, nil
+}
+
+// recommendationLimitPct 按交易代码近似涨跌幅上限：创业板/科创板 20%，
+// 北交所 30%，其余按主板 10%。ST 等特殊限幅不单独识别，宁可略偏严。
+func recommendationLimitPct(code string) float64 {
+	switch {
+	case strings.HasPrefix(code, "30"), strings.HasPrefix(code, "68"):
+		return 20
+	case strings.HasPrefix(code, "92"), strings.HasPrefix(code, "8"), strings.HasPrefix(code, "4"):
+		return 30
+	default:
+		return 10
+	}
+}
+
+// recommendationGapRiskHigh 判断昨日是否接近涨停收盘：计分买入价为次日开盘价，
+// 封板股次日大概率高开甚至一字，开盘建仓的期望损耗最大，直接剔除。
+// 优先使用交易所口径 change_pct；缺失时用最后两根收盘价近似。
+func recommendationGapRiskHigh(klines []model.Kline, code string) bool {
+	if len(klines) < 2 {
+		return false
+	}
+	last := klines[len(klines)-1]
+	changePct := last.ChangePct
+	if changePct == 0 {
+		prev := klines[len(klines)-2]
+		if prev.Close > 0 {
+			changePct = (last.Close/prev.Close - 1) * 100
+		}
+	}
+	return changePct >= recommendationLimitPct(code)*recommendationLimitUpRatio
+}
+
+// recommendationSortScore 在原始趋势分上做短期过热排序惩罚：近 5 日涨幅
+// 超过 15% 起惩罚，35% 处惩罚封顶（趋势分打五折）。仅影响候选排序，
+// 不改变 TrendScore 原值，也不改变趋势/风险硬过滤结果。
+func recommendationSortScore(trendScore float64, klines []model.Kline) float64 {
+	last := len(klines) - 1
+	if last < 5 || klines[last-5].Close <= 0 {
+		return trendScore
+	}
+	gain5 := klines[last].Close/klines[last-5].Close - 1
+	if gain5 <= recommendationOverheatFloor {
+		return trendScore
+	}
+	ratio := (gain5 - recommendationOverheatFloor) / (recommendationOverheatCeiling - recommendationOverheatFloor)
+	if ratio > 1 {
+		ratio = 1
+	}
+	return trendScore * (1 - recommendationOverheatMaxPenalty*ratio)
 }
 
 func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName string, items []model.StockRecommendation) error {
@@ -497,6 +562,216 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 		stats.DayWinRate = &value
 	}
 	return stats, nil
+}
+
+// ===== 影子基线（确定性规则对照组）=====
+//
+// 每次盘前推荐在调用 AI 之前，把候选池按两条确定性规则各选 3 只落库：
+//   - trend：原始趋势分最高的 3 只（AI 不存在时的朴素基线）
+//   - low_risk：风险分最低的 3 只（保守基线）
+//
+// 与 AI 推荐共用 5 日冻结口径统计，用于回答“AI 相对确定性规则有无超额”。
+// AI 请求失败时影子记录依然存在，因此基线样本天数 ≥ AI 样本天数。
+
+// SaveRecommendationShadow 以 REPLACE 语义保存分析日的影子基线选股。
+// 候选不足 3 只时跳过（当日推荐本身也会因候选不足而跳过）。
+func (s *Store) SaveRecommendationShadow(ctx context.Context, date string, candidates []RecommendationCandidate) error {
+	if len(candidates) < 3 {
+		return nil
+	}
+	pickTop3 := func(less func(a, b RecommendationCandidate) bool) []RecommendationCandidate {
+		sorted := make([]RecommendationCandidate, len(candidates))
+		copy(sorted, candidates)
+		sort.Slice(sorted, func(i, j int) bool { return less(sorted[i], sorted[j]) })
+		return sorted[:3]
+	}
+	shadow := map[string][]RecommendationCandidate{
+		"trend": pickTop3(func(a, b RecommendationCandidate) bool {
+			if a.TrendScore == b.TrendScore {
+				return a.Symbol < b.Symbol
+			}
+			return a.TrendScore > b.TrendScore
+		}),
+		"low_risk": pickTop3(func(a, b RecommendationCandidate) bool {
+			if a.RiskScore == b.RiskScore {
+				return a.Symbol < b.Symbol
+			}
+			return a.RiskScore < b.RiskScore
+		}),
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM recommendation_shadow WHERE analysis_date=?", date); err != nil {
+		return err
+	}
+	for strategy, picks := range shadow {
+		for i, pick := range picks {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO recommendation_shadow
+				(analysis_date,strategy,rank_no,symbol,sector_name,trend_score,risk_score) VALUES (?,?,?,?,?,?,?)`,
+				date, strategy, i+1, pick.Symbol, pick.Industry, pick.TrendScore, pick.RiskScore); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// RecommendationShadowStrategyStats 是单一策略在共同日期集上的 5 日冻结口径统计。
+type RecommendationShadowStrategyStats struct {
+	Strategy      string   `json:"strategy"`
+	TotalDays     int      `json:"total_days"`
+	FrozenPicks   int      `json:"frozen_picks"`
+	TrackingPicks int      `json:"tracking_picks"`
+	Wins          int      `json:"wins"`
+	WinRate       *float64 `json:"win_rate"`
+	AvgChangePct  *float64 `json:"avg_change_pct"`
+	SumChangePct  *float64 `json:"sum_change_pct"`
+	DayWins       int      `json:"day_wins"`
+	DayFrozen     int      `json:"day_frozen"`
+	DayWinRate    *float64 `json:"day_win_rate"`
+}
+
+// RecommendationShadowStats 在影子基线覆盖的最近 days 个分析日上，
+// 对 ai / trend / low_risk 三组用完全相同的窗口口径统计，保证可比。
+// ai 组只统计影子日期上存在的 AI 推荐（AI 失败日不计入 ai 组样本）。
+func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]RecommendationShadowStrategyStats, error) {
+	if days <= 0 || days > 365 {
+		days = 60
+	}
+	dateRows, err := s.DB.QueryContext(ctx, fmt.Sprintf(
+		"SELECT DATE_FORMAT(analysis_date,'%%Y-%%m-%%d') FROM recommendation_shadow GROUP BY analysis_date ORDER BY analysis_date DESC LIMIT %d", days))
+	if err != nil {
+		return nil, err
+	}
+	var dates []string
+	for dateRows.Next() {
+		var date string
+		if err := dateRows.Scan(&date); err != nil {
+			dateRows.Close()
+			return nil, err
+		}
+		dates = append(dates, date)
+	}
+	if err := dateRows.Close(); err != nil {
+		return nil, err
+	}
+
+	order := []string{"ai", "trend", "low_risk"}
+	stats := make(map[string]*RecommendationShadowStrategyStats, len(order))
+	for _, name := range order {
+		stats[name] = &RecommendationShadowStrategyStats{Strategy: name}
+	}
+	frozenSums := make(map[string]float64, len(order))
+
+	// accumulate 累计单个策略在单个分析日的三只表现；只统计已冻结（满窗）数据。
+	accumulate := func(strategy string, picks []struct {
+		changePct   *float64
+		trackedDays int
+	}) {
+		target := stats[strategy]
+		if len(picks) == 0 {
+			return
+		}
+		target.TotalDays++
+		var daySum float64
+		dayFrozen := true
+		dayCounted := 0
+		for _, pick := range picks {
+			if pick.changePct == nil {
+				continue
+			}
+			if pick.trackedDays < recommendationTrackWindow {
+				target.TrackingPicks++
+				dayFrozen = false
+				continue
+			}
+			pct := *pick.changePct
+			target.FrozenPicks++
+			frozenSums[strategy] += pct
+			daySum += pct
+			dayCounted++
+			if pct > 0 {
+				target.Wins++
+			}
+		}
+		if dayFrozen && dayCounted > 0 {
+			target.DayFrozen++
+			if daySum > 0 {
+				target.DayWins++
+			}
+		}
+	}
+
+	type pickResult = struct {
+		changePct   *float64
+		trackedDays int
+	}
+	for _, date := range dates {
+		aiItems, err := s.RecommendationsByDate(ctx, date)
+		if err != nil {
+			return nil, err
+		}
+		aiPicks := make([]pickResult, 0, len(aiItems))
+		for _, item := range aiItems {
+			aiPicks = append(aiPicks, pickResult{item.ChangePct, item.TrackedDays})
+		}
+		accumulate("ai", aiPicks)
+
+		shadowRows, err := s.DB.QueryContext(ctx,
+			"SELECT strategy,symbol FROM recommendation_shadow WHERE analysis_date=? ORDER BY strategy,rank_no", date)
+		if err != nil {
+			return nil, err
+		}
+		byStrategy := make(map[string][]string, 2)
+		for shadowRows.Next() {
+			var strategy, symbol string
+			if err := shadowRows.Scan(&strategy, &symbol); err != nil {
+				shadowRows.Close()
+				return nil, err
+			}
+			byStrategy[strategy] = append(byStrategy[strategy], symbol)
+		}
+		if err := shadowRows.Close(); err != nil {
+			return nil, err
+		}
+		for strategy, symbols := range byStrategy {
+			if stats[strategy] == nil {
+				continue
+			}
+			picks := make([]pickResult, 0, len(symbols))
+			for _, symbol := range symbols {
+				window, err := s.recommendationWindow(ctx, symbol, date)
+				if err != nil {
+					return nil, err
+				}
+				_, _, changePct := recommendationPerformance(window.entryOpen, window.lastClose)
+				picks = append(picks, pickResult{changePct, window.days})
+			}
+			accumulate(strategy, picks)
+		}
+	}
+
+	out := make([]RecommendationShadowStrategyStats, 0, len(order))
+	for _, name := range order {
+		target := stats[name]
+		if target.FrozenPicks > 0 {
+			sum := frozenSums[name]
+			avg := sum / float64(target.FrozenPicks)
+			winRate := float64(target.Wins) / float64(target.FrozenPicks) * 100
+			target.SumChangePct = &sum
+			target.AvgChangePct = &avg
+			target.WinRate = &winRate
+		}
+		if target.DayFrozen > 0 {
+			value := float64(target.DayWins) / float64(target.DayFrozen) * 100
+			target.DayWinRate = &value
+		}
+		out = append(out, *target)
+	}
+	return out, nil
 }
 
 func (s *Store) RecommendationHistory(ctx context.Context, limit int) ([]string, error) {

@@ -62,6 +62,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/performance", s.handleRecommendationPerformance)
 	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
 	mux.HandleFunc("GET /api/v1/recommendations/risk-policy", s.handleRecommendationRiskPolicy)
+	mux.HandleFunc("GET /api/v1/recommendations/shadow-stats", s.handleRecommendationShadowStats)
 	mux.HandleFunc("GET /api/v1/recommendations/status", s.handleRecommendationsStatus)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
@@ -727,6 +728,20 @@ func (s *Server) handleRecommendationStats(w http.ResponseWriter, r *http.Reques
 	defer cancel()
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	stats, err := s.St.RecommendationOverallStats(ctx, days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, stats)
+}
+
+// handleRecommendationShadowStats 返回 AI 与确定性影子基线（trend/low_risk）
+// 在共同分析日期集上的 5 日冻结口径对照统计，用于度量 AI 相对基线的超额。
+func (s *Server) handleRecommendationShadowStats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	stats, err := s.St.RecommendationShadowStats(ctx, days)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
