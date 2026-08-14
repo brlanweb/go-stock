@@ -2,10 +2,37 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/hoax/go-stock/internal/model"
 )
+
+func TestSelectRecommendationSectorsFiltersGenericConcepts(t *testing.T) {
+	sectors := []recommendationSector{
+		{Code: "BK0596", Type: "concept", Name: "融资融券", Popularity: 99},
+		{Code: "BK0804", Type: "concept", Name: "深股通", Popularity: 98},
+		{Code: "BK0500", Type: "concept", Name: "MSCI中国", Popularity: 97},
+		{Code: "BK0727", Type: "industry", Name: "医疗器械", Popularity: 90},
+		{Code: "BK1036", Type: "concept", Name: "减肥药", Popularity: 88},
+	}
+	selected := selectRecommendationSectors(sectors)
+	if len(selected) != 2 {
+		t.Fatalf("expected 2 sectors after filtering generic concepts, got %d: %+v", len(selected), selected)
+	}
+	if selected[0].Name != "医疗器械" || selected[1].Name != "减肥药" {
+		t.Fatalf("generic concepts must be filtered, got %+v", selected)
+	}
+
+	// 过滤后仍按热度序截断到题材上限
+	many := make([]recommendationSector, 0, recommendationSectorLimit+5)
+	for i := 0; i < recommendationSectorLimit+5; i++ {
+		many = append(many, recommendationSector{Code: fmt.Sprintf("BK%04d", i), Type: "concept", Name: fmt.Sprintf("题材%d", i), Popularity: float64(100 - i)})
+	}
+	if got := selectRecommendationSectors(many); len(got) != recommendationSectorLimit {
+		t.Fatalf("expected cap at %d sectors, got %d", recommendationSectorLimit, len(got))
+	}
+}
 
 func TestRecommendationTrendScoreRequiresCompleteRisingSixtyDays(t *testing.T) {
 	klines := make([]model.Kline, recommendationKlineDays)

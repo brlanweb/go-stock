@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"sort"
@@ -308,8 +309,10 @@ func (s *Store) RebuildSectorOverlaps(ctx context.Context) error {
 	return tx.Commit()
 }
 
+// genericConceptNames 是泛概念黑名单的内置兜底，需与 config/hotspot_blacklist.txt
+// 保持同步（有一致性测试守护）：外部文件读取失败时仅靠本列表过滤。
 var (
-	genericConceptNames  = []string{"融资融券", "深股通", "沪股通", "MSCI", "富时罗素", "标普", "机构重仓", "基金重仓", "证金持股", "转融券", "预盈预增", "昨日涨停", "昨日连板"}
+	genericConceptNames  = []string{"融资融券", "深股通", "沪股通", "MSCI", "富时罗素", "标普", "机构重仓", "基金重仓", "证金持股", "转融券", "预盈预增", "昨日涨停", "昨日连板", "AH股", "QFII重仓", "社保重仓", "参股新三板"}
 	hotspotBlacklistOnce sync.Once
 )
 
@@ -319,12 +322,16 @@ func hotspotBlacklist() []string {
 		if path == "" {
 			path = "config/hotspot_blacklist.txt"
 		}
-		if raw, err := os.ReadFile(path); err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" && !strings.HasPrefix(line, "#") {
-					genericConceptNames = append(genericConceptNames, line)
-				}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			// 工作目录不含 config/ 时静默降级到内置列表会掩盖配置失效，必须留痕。
+			slog.Warn("泛概念黑名单文件读取失败，仅使用内置兜底列表", "path", path, "err", err)
+			return
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				genericConceptNames = append(genericConceptNames, line)
 			}
 		}
 	})

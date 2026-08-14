@@ -72,6 +72,23 @@ type recommendationSector struct {
 	Popularity float64
 }
 
+// selectRecommendationSectors 从热度降序的题材列表中取前 N 个可用题材。
+// 融资融券/深股通等泛概念成分股数千只，成交额与市值求和后必然霸榜，但它们
+// 不代表真实题材、贴到个股上会误导决策，因此与热点漏斗共用黑名单剔除。
+func selectRecommendationSectors(sectors []recommendationSector) []recommendationSector {
+	selected := make([]recommendationSector, 0, recommendationSectorLimit)
+	for _, sector := range sectors {
+		if isGenericConcept(sector.Name) {
+			continue
+		}
+		selected = append(selected, sector)
+		if len(selected) == recommendationSectorLimit {
+			break
+		}
+	}
+	return selected
+}
+
 // RecommendationCandidates 从行业和概念的统一热度排名取前 10 个题材，收集其
 // 成分股并去重；对全部候选读取最近 60 根前复权日 K，按确定性趋势分排序后取前 10。
 // maxRiskScore 是本次候选风险上限（由最近复盘 market_phase 决定，见
@@ -117,14 +134,7 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 	if err := sectorRows.Close(); err != nil {
 		return nil, err
 	}
-	selected := make([]recommendationSector, 0, recommendationSectorLimit)
-	for _, sector := range sectors {
-		selected = append(selected, sector)
-		if len(selected) == recommendationSectorLimit {
-			break
-		}
-	}
-	sectors = selected
+	sectors = selectRecommendationSectors(sectors)
 	if len(sectors) == 0 {
 		return []RecommendationCandidate{}, nil
 	}
