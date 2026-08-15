@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationShadowStats, type RecommendationStats } from '../api'
+import { api, fmt, fmtPct, pctClass, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationShadowStats, type RecommendationStats } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -14,6 +14,106 @@ const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
 const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
 const shadowStats = ref<RecommendationShadowStats[]>([])
+
+// 盘中趋势持仓分析（30分钟8档，建仓与退出双阶段）
+const entryAdvice = ref<EntryAdviceResponse | null>(null)
+const positions = ref<Position[]>([])
+const entryRunning = ref(false)
+const entryMessage = ref('')
+
+// 蒙特卡洛模拟：按推荐股展开的路径分布统计
+const mcOpenSymbol = ref('')
+const mcResult = ref<MonteCarloResult | null>(null)
+const mcLoading = ref(false)
+const mcError = ref('')
+const mcDays = ref(10)
+
+const entryLatest = computed(() => {
+  const list = entryAdvice.value?.items ?? []
+  return list.find(item => item.action === 'entry') || null
+})
+const exitLatest = computed(() => {
+  const list = entryAdvice.value?.items ?? []
+  return list.find(item => item.action === 'exit') || null
+})
+const activePositions = computed(() => positions.value.filter(item => item.status === 'pending_entry' || item.status === 'holding'))
+const entryDailyPick = computed(() => {
+  const list = entryAdvice.value?.items ?? []
+  return list.find(item => item.source === 'daily_pick') || null
+})
+const entryLastWait = computed(() => {
+  const list = entryAdvice.value?.items ?? []
+  return list.find(item => item.action === 'wait') || null
+})
+
+async function loadEntryAdvice() {
+  const [advice, lifecycle] = await Promise.all([
+    api.entryAdvice().catch(() => null),
+    api.positions(40).catch(() => ({ items: [] as Position[] }))
+  ])
+  entryAdvice.value = advice
+  positions.value = lifecycle.items
+}
+
+let entryPollTimer: number | undefined
+async function pollEntryStatus() {
+  try {
+    const status = await api.entryStatus()
+    if (status.running) return
+    window.clearInterval(entryPollTimer)
+    entryPollTimer = undefined
+    entryRunning.value = false
+    entryMessage.value = status.last_error ? `分析结束：${status.last_error}` : '分析完成'
+    await loadEntryAdvice()
+  } catch { /* 下一轮继续 */ }
+}
+
+async function runEntryNow() {
+  entryRunning.value = true
+  entryMessage.value = '正在分析建仓机会…'
+  try {
+    await api.runEntryAnalysis()
+    window.clearInterval(entryPollTimer)
+    entryPollTimer = window.setInterval(pollEntryStatus, 3000)
+  } catch (e: any) {
+    entryRunning.value = false
+    entryMessage.value = e?.message || '建仓分析启动失败'
+  }
+}
+
+async function toggleMonteCarlo(item: Recommendation, event: Event) {
+  event.stopPropagation()
+  if (mcOpenSymbol.value === item.symbol) {
+    mcOpenSymbol.value = ''
+    mcResult.value = null
+    return
+  }
+  mcOpenSymbol.value = item.symbol
+  mcResult.value = null
+  mcError.value = ''
+  mcLoading.value = true
+  try {
+    mcResult.value = await api.recommendationMonteCarlo(item.symbol, mcDays.value)
+  } catch (e: any) {
+    mcError.value = e?.message || '模拟失败'
+  } finally {
+    mcLoading.value = false
+  }
+}
+
+async function reloadMonteCarlo() {
+  if (!mcOpenSymbol.value) return
+  mcResult.value = null
+  mcError.value = ''
+  mcLoading.value = true
+  try {
+    mcResult.value = await api.recommendationMonteCarlo(mcOpenSymbol.value, mcDays.value)
+  } catch (e: any) {
+    mcError.value = e?.message || '模拟失败'
+  } finally {
+    mcLoading.value = false
+  }
+}
 
 const shadowStrategyLabels: Record<string, string> = { ai: 'AI 推荐', trend: '趋势基线', low_risk: '低风险基线' }
 // 至少一组策略有冻结样本才展示对照，避免上线初期一排空数据。
@@ -41,8 +141,7 @@ function riskClass(value: number | null | undefined) {
   return 'risk-high'
 }
 
-// 最近 5 个推荐日全部推荐股（通常 15 只）的总口径：
-// 每只按建仓日（推荐日后首个交易日）开盘价买入、追踪窗口收盘价（未满 5 个交易日为当前收盘）计算后求和。
+// 最近推荐日的有效收益样本：未建仓标的不计入，AI 退出后按退出价冻结。
 const overall = computed(() => {
   let stocks = 0
   let sum = 0
@@ -96,6 +195,8 @@ const chart = computed(() => {
 async function loadDate(date: string) {
   activeDate.value = date
   loading.value = true
+  mcOpenSymbol.value = ''
+  mcResult.value = null
   try {
     items.value = await api.recommendations(date)
   } catch (e: any) {
@@ -144,7 +245,10 @@ async function runAnalysis() {
   }
 }
 
-onUnmounted(() => window.clearInterval(pollTimer))
+onUnmounted(() => {
+  window.clearInterval(pollTimer)
+  window.clearInterval(entryPollTimer)
+})
 
 function openStock(symbol: string) {
   router.push(`/stock/${symbol}`)
@@ -152,6 +256,7 @@ function openStock(symbol: string) {
 
 onMounted(async () => {
   await refreshDates()
+  await loadEntryAdvice()
   // 页面加载时若已有推荐任务在执行（如刷新页面），继续轮询直至完成。
   const status = await api.recommendationStatus().catch(() => null)
   if (status?.running) {
@@ -165,12 +270,49 @@ onMounted(async () => {
 <template>
   <main class="reco-content">
       <header class="reco-header">
-        <div class="reco-title"><strong>AI 趋势推荐 · 成功率评估</strong><small>口径：推荐日后首个交易日开盘价买入 → 第 5 个交易日收盘价冻结</small></div>
+        <div class="reco-title"><strong>AI 趋势推荐 · 持仓闭环</strong><small>实际建仓价 → AI 趋势退出价；退出后收益立即冻结，未建仓不计收益</small></div>
         <div class="reco-tools">
           <button class="run-btn" :disabled="running" @click="runAnalysis">{{ running ? '分析中…' : '立即生成' }}</button>
         </div>
       </header>
       <p v-if="message" class="reco-message">{{ message }}</p>
+
+      <div class="entry-strip">
+        <div class="perf-caption">
+          <b>盘中趋势持仓分析</b>
+          <small>10只自选按生命周期管理：入池后 D0+2 个交易日寻找建仓点；建仓后每30分钟综合大盘、板块、个股寻找退出机会；退出即移出自选并冻结收益</small>
+          <button class="run-btn small" :disabled="entryRunning" @click="runEntryNow">{{ entryRunning ? '分析中…' : '立即分析' }}</button>
+        </div>
+        <p v-if="entryMessage" class="reco-message">{{ entryMessage }}</p>
+        <div class="entry-cards">
+          <div v-if="exitLatest" class="entry-card exit">
+            <small>最近退出 · {{ exitLatest.created_at.slice(11) }} · {{ exitLatest.urgency }}</small>
+            <b>{{ exitLatest.name || exitLatest.symbol }}<em v-if="exitLatest.code">{{ exitLatest.code }}</em></b>
+            <span>{{ exitLatest.reason }}</span>
+            <i v-if="exitLatest.price_low != null">建议退出区间 {{ fmt(exitLatest.price_low) }} - {{ fmt(exitLatest.price_high) }}</i>
+          </div>
+          <div v-if="entryLatest" class="entry-card hit">
+            <small>最近建仓 · {{ entryLatest.created_at.slice(11) }}</small>
+            <b>{{ entryLatest.name || entryLatest.symbol }}<em v-if="entryLatest.code">{{ entryLatest.code }}</em></b>
+            <span>{{ entryLatest.reason }}</span>
+            <i v-if="entryLatest.price_low != null">建议建仓区间 {{ fmt(entryLatest.price_low) }} - {{ fmt(entryLatest.price_high) }}</i>
+          </div>
+          <div v-else-if="entryLastWait" class="entry-card">
+            <small>最近等待 · {{ entryLastWait.created_at.slice(11) }}</small>
+            <b>暂无合适建仓机会</b><span>{{ entryLastWait.reason }}</span>
+          </div>
+          <div v-if="entryDailyPick" class="entry-card pick">
+            <small>今日首选（已加入生命周期）</small>
+            <b>{{ entryDailyPick.name || entryDailyPick.symbol }}<em v-if="entryDailyPick.code">{{ entryDailyPick.code }}</em></b>
+            <span>{{ entryDailyPick.reason }}</span>
+          </div>
+        </div>
+        <div v-if="activePositions.length" class="position-list">
+          <button v-for="position in activePositions" :key="position.id" type="button" class="position-chip" @click="openStock(position.symbol)">
+            <b>{{ position.name || position.symbol }}</b><span :class="position.status">{{ position.status === 'holding' ? `持有 ${position.hold_days} 天` : '等待建仓' }}</span><small>{{ position.entry_price == null ? '尚未建仓' : `成本 ${fmt(position.entry_price)}` }}</small>
+          </button>
+        </div>
+      </div>
 
       <div v-if="stats && stats.frozen_picks > 0" class="stats-bar">
         <div class="stat-cell hero">
@@ -192,7 +334,7 @@ onMounted(async () => {
       </div>
 
       <div v-if="shadowVisible" class="shadow-strip">
-        <div class="perf-caption"><b>AI vs 确定性基线</b><small>同一候选池、同一 5 日冻结口径：趋势基线=候选趋势分前3，低风险基线=候选风险分最低3；用于观测 AI 超额，非投资建议</small></div>
+        <div class="perf-caption"><b>AI vs 确定性基线</b><small>同一候选池、同一趋势退出冻结口径；用于观测 AI 超额，非投资建议</small></div>
         <div class="shadow-table">
           <div class="shadow-row head"><span>策略</span><span>样本日</span><span>已冻结</span><span>个股胜率</span><span>日胜率</span><span>平均收益</span><span>累计点数</span></div>
           <div v-for="item in shadowStats" :key="item.strategy" class="shadow-row" :class="{ hero: item.strategy === 'ai' }">
@@ -222,7 +364,7 @@ onMounted(async () => {
       </div>
 
       <div v-if="performance.length" class="perf-strip">
-        <div class="perf-caption"><b>近 5 个推荐日组合表现</b><small>每只按建仓日开盘价买入，追踪 5 个交易日后冻结</small></div>
+        <div class="perf-caption"><b>近 5 个推荐日组合表现</b><small>只汇总已实际/模拟建仓的有效样本；AI 标记退出后收益冻结</small></div>
         <div class="perf-cards">
           <div class="perf-card total">
             <small>合计 {{ overall.stocks }} 只<i class="tracking">近 5 个推荐日</i></small>
@@ -230,7 +372,7 @@ onMounted(async () => {
             <span :class="pctClass(overall.avg)">均 {{ fmtPct(overall.avg) }}</span>
           </div>
           <button v-for="p in performance" :key="p.date" class="perf-card" :class="{ active: p.date === activeDate }" @click="loadDate(p.date)">
-            <small>{{ p.date.slice(5) }}<i v-if="p.finished" class="frozen">已冻结</i><i v-else class="tracking">第 {{ p.tracked_days }} 天</i></small>
+            <small>{{ p.date.slice(5) }}<i v-if="p.finished" class="frozen">已退出</i><i v-else class="tracking">第 {{ p.tracked_days }} 天</i></small>
             <b :class="pctClass(p.sum_change_pct)">{{ p.sum_change_pct == null ? '—' : `${p.sum_change_pct >= 0 ? '+' : ''}${p.sum_change_pct.toFixed(2)}` }}<em> 点</em></b>
             <span :class="pctClass(p.avg_change_pct)">均 {{ fmtPct(p.avg_change_pct) }}</span>
           </button>
@@ -246,19 +388,47 @@ onMounted(async () => {
         <section class="reco-table">
           <div v-if="loading" class="empty">加载中…</div>
           <template v-else-if="items.length">
-            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓日开盘</span><span>窗口收盘</span><span>涨跌幅</span><span>动量分</span><span>风险分</span><span>核心依据</span><span>板块</span></div>
-            <button v-for="item in items" :key="item.symbol" class="reco-row" @click="openStock(item.symbol)">
-              <span class="rank">{{ item.rank }}</span>
-              <span class="stock"><b>{{ item.name }}</b><small>{{ item.code }}</small></span>
-              <span>{{ fmt(item.entry_price) }}</span>
-              <span>{{ fmt(item.latest_price) }}<small v-if="item.tracked_days > 0" class="track-tag">{{ item.tracked_days >= 5 ? '已冻结' : `第${item.tracked_days}天` }}</small></span>
-              <span :class="pctClass(item.change_pct)">{{ fmtPct(item.change_pct) }}</span>
-              <span class="score">{{ item.probability.toFixed(1) }}</span>
-              <span class="risk" :class="riskClass(item.risk_score)">{{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</span>
-              <span class="reason">{{ item.reason }}</span>
-              <span class="sector">{{ item.sector }}</span>
-            </button>
-            <p class="disclaimer">说明：推荐于交易日盘前 08:10 基于前一收盘数据生成，最早次日开盘建仓；涨跌幅按“推荐日后首个交易日开盘价买入，其后第 5 个交易日收盘价冻结”口径计算，推荐日当天涨幅不计入收益。动量分仅为历史价格动量相对排序；风险分（0-100）由本地波动率/回撤/短期过热确定性计算，超过候选风险上限的股票已在进入 AI 评审前剔除；上限由最近一次 AI 复盘的市场阶段自动决定（上升 85 / 震荡 75 / 下降 65，无复盘 70）。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓价</span><span>当前/退出价</span><span>涨跌幅</span><span>动量分</span><span>风险分</span><span>核心依据</span><span>板块</span><span>模拟</span></div>
+            <template v-for="item in items" :key="item.symbol">
+              <button class="reco-row" @click="openStock(item.symbol)">
+                <span class="rank">{{ item.rank }}</span>
+                <span class="stock"><b>{{ item.name }}</b><small>{{ item.code }}</small></span>
+                <span>{{ fmt(item.entry_price) }}</span>
+                <span>{{ fmt(item.latest_price) }}<small class="track-tag" :title="item.exit_reason || ''">{{ item.position_status === 'expired' ? '未建仓过期' : item.position_status === 'pending_entry' ? '等待建仓' : item.exited ? 'AI已退出' : item.position_status === 'holding' ? `持有${item.tracked_days}天` : `模拟第${item.tracked_days}天` }}</small></span>
+                <span :class="pctClass(item.change_pct)">{{ fmtPct(item.change_pct) }}</span>
+                <span class="score">{{ item.probability.toFixed(1) }}</span>
+                <span class="risk" :class="riskClass(item.risk_score)">{{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</span>
+                <span class="reason">{{ item.reason }}</span>
+                <span class="sector">{{ item.sector }}</span>
+                <span><button class="mc-btn" :class="{ active: mcOpenSymbol === item.symbol }" @click="toggleMonteCarlo(item, $event)">蒙特卡洛</button></span>
+              </button>
+              <div v-if="mcOpenSymbol === item.symbol" class="mc-panel">
+                <div class="mc-head">
+                  <b>{{ item.name }} · 蒙特卡洛模拟</b>
+                  <label>推演
+                    <select v-model.number="mcDays" @change="reloadMonteCarlo">
+                      <option :value="5">5 日</option>
+                      <option :value="10">10 日</option>
+                      <option :value="20">20 日</option>
+                    </select>
+                  </label>
+                </div>
+                <div v-if="mcLoading" class="empty">模拟中…</div>
+                <div v-else-if="mcError" class="empty">{{ mcError }}</div>
+                <div v-else-if="mcResult" class="mc-grid">
+                  <div class="mc-cell hero"><small>上涨概率</small><b :class="mcResult.win_rate >= 50 ? 'up' : 'down'">{{ mcResult.win_rate.toFixed(1) }}%</b></div>
+                  <div class="mc-cell"><small>期望收益</small><b :class="pctClass(mcResult.avg_return_pct)">{{ fmtSigned(mcResult.avg_return_pct) }}</b></div>
+                  <div class="mc-cell"><small>中位数</small><b :class="pctClass(mcResult.median_pct)">{{ fmtSigned(mcResult.median_pct) }}</b></div>
+                  <div class="mc-cell"><small>涨超 +5%</small><b class="up">{{ mcResult.prob_gain_5_pct.toFixed(1) }}%</b></div>
+                  <div class="mc-cell"><small>跌超 -5%</small><b class="down">{{ mcResult.prob_loss_5_pct.toFixed(1) }}%</b></div>
+                  <div class="mc-cell"><small>悲观 P5</small><b class="down">{{ fmtSigned(mcResult.p5_pct) }}</b></div>
+                  <div class="mc-cell"><small>P25 ~ P75</small><b>{{ fmtSigned(mcResult.p25_pct) }} ~ {{ fmtSigned(mcResult.p75_pct) }}</b></div>
+                  <div class="mc-cell"><small>乐观 P95</small><b class="up">{{ fmtSigned(mcResult.p95_pct) }}</b></div>
+                </div>
+                <p v-if="mcResult" class="mc-note">基于最近 {{ mcResult.sample_days }} 个真实日收益率有放回抽样，模拟 {{ mcResult.paths }} 条未来 {{ mcResult.days }} 个交易日路径（基准价 {{ mcResult.base_price.toFixed(2) }}，确定性种子可复现）。模拟不构成投资建议。</p>
+              </div>
+            </template>
+            <p class="disclaimer">说明：每日盘前从趋势推荐中选出一只首选加入自选生命周期。入池后 D0+2 个交易日内由 AI 寻找建仓区间；建仓后每 30 分钟综合大盘、板块、个股判断趋势是否可持续，并给出持有、减仓或退出区间。AI 标记退出后立即移出自选，收益按退出参考价冻结且继续保留在推荐历史中；从未建仓的标的不计收益。没有生命周期记录的历史推荐沿用次日开盘建仓、MA10 趋势破位退出的模拟口径。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
@@ -326,7 +496,7 @@ onMounted(async () => {
 .date-list button.active { border-left-color:#e9c16c; background:#22314e; color:#fff; }
 .date-list .empty { padding:8px; color:#6f7c92; font-size:11px; }
 .reco-table { display:flex; min-height:0; flex-direction:column; overflow-y:auto; }
-.reco-row { display:grid; grid-template-columns:48px 135px 86px 86px 78px 64px 56px minmax(160px,1fr) 90px; gap:10px; align-items:center; padding:11px 10px; border:0; border-bottom:1px solid #1e2a40; background:transparent; color:#e7ecf4; text-align:left; cursor:pointer; }
+.reco-row { display:grid; grid-template-columns:48px 135px 86px 86px 78px 64px 56px minmax(140px,1fr) 90px 78px; gap:10px; align-items:center; padding:11px 10px; border:0; border-bottom:1px solid #1e2a40; background:transparent; color:#e7ecf4; text-align:left; cursor:pointer; }
 .reco-row.head { position:sticky; top:0; background:#101a2b; color:#8895ab; font-size:12px; cursor:default; }
 .reco-row:not(.head):hover { background:#1a2540; }
 .reco-row .rank { display:inline-flex; width:26px; height:26px; align-items:center; justify-content:center; background:#2a3a5c; color:#e9c16c; font-weight:700; }
@@ -342,6 +512,41 @@ onMounted(async () => {
 .track-tag { display:block; margin-top:2px; color:#8895ab; font-size:10px; }
 .disclaimer { padding:10px 4px; color:#6f7c92; font-size:11px; line-height:1.5; }
 .empty { padding:20px; color:#6f7c92; font-size:13px; }
+/* 盘中建仓建议 */
+.entry-strip { margin-top:12px; padding:10px 12px; border:1px solid #26324a; background:#131e33; }
+.entry-strip .perf-caption { align-items:center; }
+.entry-strip .perf-caption small { flex:1; }
+.run-btn.small { padding:4px 10px; font-size:12px; }
+.entry-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:8px; }
+.entry-card { display:flex; flex-direction:column; gap:4px; padding:10px 12px; border:1px solid #26324a; background:#182338; }
+.entry-card.hit { border-color:#3d5c3f; background:#1b2f22; }
+.entry-card.exit { border-color:#70434a; background:#2b1e27; }
+.entry-card.pick { border-color:#3d4f77; background:#1c2a47; }
+.entry-card>small { color:#8895ab; font-size:11px; }
+.entry-card>b { font-size:16px; }
+.entry-card>b em { margin-left:6px; color:#8895ab; font-size:11px; font-style:normal; font-weight:400; }
+.entry-card>span { color:#c4cddc; font-size:12px; line-height:1.5; }
+.entry-card>i { color:#d8b967; font-size:11px; font-style:normal; }
+.position-list { display:flex; gap:6px; margin-top:8px; overflow-x:auto; }
+.position-chip { display:grid; min-width:150px; grid-template-columns:1fr auto; gap:3px 8px; padding:7px 9px; border:1px solid #26324a; background:#101a2b; color:#e7ecf4; text-align:left; cursor:pointer; }
+.position-chip b { overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.position-chip span { font-size:9px; }.position-chip span.holding { color:#ef8b91; }.position-chip span.pending_entry { color:#e9c16c; }
+.position-chip small { grid-column:1/-1; color:#8895ab; font-size:9px; }
+/* 蒙特卡洛 */
+.mc-btn { padding:4px 8px; border:1px solid #3a496a; border-radius:0; background:#233150; color:#c4cddc; font-size:11px; cursor:pointer; }
+.mc-btn:hover, .mc-btn.active { border-color:#e9c16c; color:#e9c16c; }
+.mc-panel { padding:10px 12px; border-bottom:1px solid #1e2a40; background:#101a2b; }
+.mc-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.mc-head b { font-size:13px; }
+.mc-head label { color:#8895ab; font-size:12px; }
+.mc-head select { margin-left:6px; padding:2px 6px; border:1px solid #3a496a; background:#182338; color:#e7ecf4; font-size:12px; }
+.mc-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; }
+.mc-cell { display:flex; flex-direction:column; gap:3px; padding:8px 10px; border:1px solid #26324a; background:#182338; }
+.mc-cell.hero { border-color:#3d4f77; background:#1c2a47; }
+.mc-cell small { color:#8895ab; font-size:10px; }
+.mc-cell b { font-size:15px; font-variant-numeric:tabular-nums; }
+.mc-cell .up { color:#ef6a72; }.mc-cell .down { color:#55b996; }
+.mc-note { margin:8px 0 0; color:#6f7c92; font-size:11px; line-height:1.5; }
 @media (max-width:900px) {
   .reco-content { height:auto; overflow:visible; }
   .reco-body { grid-template-columns:1fr; }
@@ -349,6 +554,6 @@ onMounted(async () => {
   .shadow-row { grid-template-columns:90px 50px 70px 70px 70px; }
   .shadow-row span:nth-child(6), .shadow-row span:nth-child(7) { display:none; }
   .reco-row { grid-template-columns:36px minmax(90px,1fr) 76px 76px 70px; gap:6px; padding:10px 6px; }
-  .reco-row .score, .reco-row .risk, .reco-row .reason, .reco-row .sector, .reco-row.head span:nth-child(6), .reco-row.head span:nth-child(7), .reco-row.head span:nth-child(8), .reco-row.head span:nth-child(9) { display:none; }
+  .reco-row .score, .reco-row .risk, .reco-row .reason, .reco-row .sector, .reco-row span:nth-child(10), .reco-row.head span:nth-child(6), .reco-row.head span:nth-child(7), .reco-row.head span:nth-child(8), .reco-row.head span:nth-child(9), .reco-row.head span:nth-child(10) { display:none; }
 }
 </style>

@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // WatchlistSymbols 自选股列表（按排序）。
 func (s *Store) WatchlistSymbols(ctx context.Context) ([]string, error) {
@@ -18,6 +21,20 @@ func (s *Store) WatchlistSymbols(ctx context.Context) ([]string, error) {
 		out = append(out, sym)
 	}
 	return out, rows.Err()
+}
+
+// AddLifecycleWatchlist 为 AI 生命周期标的预留自选位。它不会淘汰仍在
+// pending_entry/holding 的旧持仓；自选已满 10 只时拒绝新增，等待盘中退出或
+// 建仓过期腾位，避免“数据库仍持有但实时自选已被挤掉”的失联状态。
+func (s *Store) AddLifecycleWatchlist(ctx context.Context, symbol string) error {
+	var count int
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM watchlist WHERE symbol<>?", symbol).Scan(&count); err != nil {
+		return err
+	}
+	if count >= 10 {
+		return fmt.Errorf("自选生命周期已满10只，等待退出或过期后再加入")
+	}
+	return s.AddWatchlist(ctx, symbol)
 }
 
 // AddWatchlist 添加自选股，并只保留最近加入的 10 只。

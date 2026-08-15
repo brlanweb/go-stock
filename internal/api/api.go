@@ -65,6 +65,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/shadow-stats", s.handleRecommendationShadowStats)
 	mux.HandleFunc("GET /api/v1/recommendations/status", s.handleRecommendationsStatus)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
+	mux.HandleFunc("GET /api/v1/recommendations/montecarlo/{code}", s.handleRecommendationMonteCarlo)
+	mux.HandleFunc("GET /api/v1/entry/advice", s.handleEntryAdvice)
+	mux.HandleFunc("GET /api/v1/positions", s.handlePositions)
+	mux.HandleFunc("GET /api/v1/entry/status", s.handleEntryStatus)
+	mux.HandleFunc("POST /api/v1/entry/run", s.handleEntryRun)
 	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
 	mux.HandleFunc("GET /api/v1/hotspot/history", s.handleHotspotHistory)
 	mux.HandleFunc("GET /api/v1/hotspot/status", s.handleHotspotStatus)
@@ -736,7 +741,7 @@ func (s *Server) handleRecommendationStats(w http.ResponseWriter, r *http.Reques
 }
 
 // handleRecommendationShadowStats 返回 AI 与确定性影子基线（trend/low_risk）
-// 在共同分析日期集上的 5 日冻结口径对照统计，用于度量 AI 相对基线的超额。
+// 在共同分析日期集上的趋势退出冻结口径对照统计，用于度量 AI 相对基线的超额。
 func (s *Server) handleRecommendationShadowStats(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqCtx(r)
 	defer cancel()
@@ -807,6 +812,105 @@ func (s *Server) handleRecommendationsRun(w http.ResponseWriter, r *http.Request
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analysis started"})
+}
+
+// handleRecommendationMonteCarlo 对指定股票执行蒙特卡洛路径模拟：
+// 基于最近 250 个真实日收益率有放回抽样，模拟未来 N 个交易日的价格分布。
+// 结果为确定性输出（种子由 symbol+最后交易日派生），仅供风险参考。
+func (s *Server) handleRecommendationMonteCarlo(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	klines, err := s.St.QueryKlines(ctx, symbol, "day", "qfq", "", "", 251)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result, err := analysis.RunMonteCarlo(symbol, klines, days)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleEntryAdvice 返回指定交易日（默认今天）的盘中趋势建议记录，
+// 同时包含建仓与退出阶段；分析不会在首次建仓后暂停。
+func (s *Server) handleEntryAdvice(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	date := r.URL.Query().Get("date")
+	if date == "" {
+		date = time.Now().In(shanghaiLoc()).Format("2006-01-02")
+	}
+	items, err := s.St.EntryAdviceByDate(ctx, date, 80)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"date": date, "paused": false, "items": items})
+}
+
+// handlePositions 返回最近 AI 趋势标的的完整生命周期。已退出标的仍保留，
+// 供推荐页回看退出原因与冻结收益；默认最近 30 条。
+func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.RecentPositions(ctx, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+}
+
+// handleEntryStatus 返回盘中建仓分析任务状态，供手动触发后轮询。
+func (s *Server) handleEntryStatus(w http.ResponseWriter, r *http.Request) {
+	enabled, running, lastError := false, false, ""
+	if s.Analysis != nil {
+		enabled = s.Analysis.Enabled()
+		running = s.Analysis.EntryRunning()
+		lastError = s.Analysis.EntryLastError()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "running": running, "last_error": lastError})
+}
+
+// handleEntryRun 手动触发一次盘中建仓分析（异步）；当日已给出建仓建议时
+// 由任务内部拒绝并通过 status 返回原因。
+func (s *Server) handleEntryRun(w http.ResponseWriter, r *http.Request) {
+	if s.Analysis == nil || !s.Analysis.Enabled() {
+		writeErr(w, http.StatusServiceUnavailable, "AI 建仓分析未配置")
+		return
+	}
+	if s.Analysis.EntryRunning() {
+		writeErr(w, http.StatusConflict, "建仓分析任务正在执行")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := s.Analysis.RunEntryAnalysis(ctx, time.Now().In(shanghaiLoc())); err != nil {
+			slog.Warn("手动建仓分析未产生建议", "err", err)
+		} else {
+			slog.Info("手动建仓分析完成")
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "entry analysis started"})
+}
+
+// shanghaiLoc 返回 A 股交易时区。
+func shanghaiLoc() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*3600)
+	}
+	return loc
 }
 
 func (s *Server) handleHotspot(w http.ResponseWriter, r *http.Request) {

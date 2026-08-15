@@ -4,16 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-15
+
 ### Added
 
-- Record deterministic shadow-baseline picks (candidate-pool trend-score top 3 and lowest-risk top 3) before every AI recommendation run, compare them with AI picks under the identical five-day frozen window, and expose the comparison via `GET /api/v1/recommendations/shadow-stats` plus an "AI vs baseline" strip on the Recommendations page.
+- Record deterministic shadow-baseline picks (candidate-pool trend-score top 3 and lowest-risk top 3) before every AI recommendation run, compare them with AI picks under the same trend-exit window, and expose the comparison via `GET /api/v1/recommendations/shadow-stats` plus an "AI vs baseline" strip on the Recommendations page.
+- Add a persisted recommendation lifecycle (`pending_entry` / `holding` / `exited` / `expired`): one top-ranked pick enters the watchlist each trading day, gets up to two following trading days to find an AI entry range, then receives 30-minute market/sector/stock exit analysis until the trend breaks. Exits free the watchlist slot immediately while remaining visible in recommendation history with frozen realized performance.
+- Add `GET /api/v1/positions` and extend intraday advice with stage, price range, urgency, and reference-price fields; the Home and Recommendations views now show active positions, entry/exit signals, and lifecycle-aware statistics.
 - Exclude candidates that closed at (or near) the exchange limit-up on the analysis day — entry is priced at the next open, so limit-up closes carry the largest gap-up cost (10/20/30 percent caps resolved by board).
 - Apply a deterministic overheat penalty to candidate ordering: five-day gains above 15 percent progressively halve the sorting score by 35 percent, without altering the stored trend score or the hard trend/risk filters.
 - Enforce sector diversity on AI output: when the candidate pool spans multiple sectors, the three picks must cover at least two sectors or the run is rejected.
 
 ### Changed
 
-- Align the recommendation objective with the scoring window: prompts (inline default and `config/ai_prompt.md`) now target relative five-trading-day performance — next-open entry, fifth-close settlement — instead of ten-day trend continuation, weight short-term momentum, price-volume confirmation, and pullback entries, and warn against chasing overheated names.
+- Align the recommendation objective with lifecycle trend trading: rank candidates for sustainable structure and executable intraday entry space, then use actual AI entry/exit reference prices for the selected pick. Unentered picks do not affect performance; AI exits freeze performance instead of continuing to accrue.
 
 - Add a trading-day 17:00 daily review pipeline based only on local close data: indices, market breadth, strong and weak sectors, pre-market hotspot outcomes, and the latest five recommendation days.
 - Persist deterministic review facts and structured AI reports as append-only history with market phase, hotspot verification, recommendation attribution, previous-directive verification, risk controls, and optimization directives.
@@ -35,6 +39,8 @@ All notable changes to this project are documented in this file.
 
 - Add migration `016_daily_review.sql` and the `daily_review` history table.
 - Add migration `017_recommendation_shadow.sql` and the `recommendation_shadow` baseline table.
+- Add migration `018_entry_advice.sql` for persisted intraday AI entry advice.
+- Add migration `019_position_lifecycle.sql` for position lifecycle state and entry/exit advice fields.
 
 ## [1.1.1] - 2026-08-04
 
@@ -70,5 +76,7 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/brlanweb/go-stock/releases/tag/v1.1.0

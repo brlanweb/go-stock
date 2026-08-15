@@ -150,6 +150,72 @@ export interface Recommendation {
   latest_price: number | null
   change_pct: number | null
   tracked_days: number
+  // AI 实际退出优先；历史无生命周期记录时才使用 MA10/最大追踪天数模拟退出
+  exited: boolean
+  exit_reason?: string
+  position_status?: 'pending_entry' | 'holding' | 'exited' | 'expired'
+  settled: boolean
+}
+
+// 蒙特卡洛模拟：基于最近 250 个真实日收益率有放回抽样的价格路径分布（确定性种子）。
+export interface MonteCarloResult {
+  symbol: string
+  days: number
+  paths: number
+  sample_days: number
+  base_price: number
+  win_rate: number
+  avg_return_pct: number
+  median_pct: number
+  p5_pct: number
+  p25_pct: number
+  p75_pct: number
+  p95_pct: number
+  prob_gain_5_pct: number
+  prob_loss_5_pct: number
+}
+
+// 趋势建议：daily_pick=盘前首选；hourly_ai=盘中30分钟分析；rule=本地硬风控。
+export interface EntryAdvice {
+  id: number
+  trade_date: string
+  symbol: string
+  name: string
+  code: string
+  source: 'daily_pick' | 'hourly_ai' | 'rule'
+  stage: 'entry' | 'exit'
+  action: 'pick' | 'entry' | 'wait' | 'hold' | 'reduce' | 'exit' | 'expired'
+  reason: string
+  price_low: number | null
+  price_high: number | null
+  urgency: 'normal' | 'warn' | 'urgent'
+  ref_price: number | null
+  model: string
+  created_at: string
+}
+
+export interface Position {
+  id: number
+  symbol: string
+  code: string
+  name: string
+  pick_date: string
+  analysis_date: string
+  status: 'pending_entry' | 'holding' | 'exited' | 'expired'
+  entry_date?: string
+  entry_price: number | null
+  exit_date?: string
+  exit_price: number | null
+  exit_reason?: string
+  hold_days: number
+  created_at: string
+  updated_at: string
+}
+
+export interface EntryAdviceResponse {
+  date: string
+  paused: boolean
+  items: EntryAdvice[]
 }
 
 export interface RecommendationStats {
@@ -173,7 +239,7 @@ export interface RecommendationStats {
 }
 
 // 影子基线对照：ai 与确定性规则（trend=趋势分前3 / low_risk=低风险前3）
-// 在共同分析日期集上的 5 日冻结口径统计，用于度量 AI 相对基线的超额。
+// 在共同分析日期集上的趋势退出冻结口径统计，用于度量 AI 相对基线的超额。
 export interface RecommendationShadowStats {
   strategy: string
   total_days: number
@@ -473,6 +539,11 @@ export const api = {
   recommendationShadowStats: (days = 60) => req<RecommendationShadowStats[]>(`/recommendations/shadow-stats?days=${days}`),
   recommendationStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/recommendations/status'),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
+  recommendationMonteCarlo: (code: string, days = 10) => req<MonteCarloResult>(`/recommendations/montecarlo/${encodeURIComponent(code)}?days=${days}`),
+  entryAdvice: (date = '') => req<EntryAdviceResponse>(`/entry/advice${date ? `?date=${encodeURIComponent(date)}` : ''}`),
+  positions: (limit = 30) => req<{ items: Position[] }>(`/positions?limit=${limit}`),
+  entryStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/entry/status'),
+  runEntryAnalysis: () => req<{ status: string }>('/entry/run', { method: 'POST' }),
   hotspot: (id?: number) => req<HotspotReport>(`/hotspot${id ? `?id=${id}` : ''}`),
   hotspotHistory: (limit = 30) => req<HotspotRunSummary[]>(`/hotspot/history?limit=${limit}`),
   hotspotStatus: () => req<{ enabled: boolean; running: boolean }>('/hotspot/status'),

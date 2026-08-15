@@ -230,7 +230,7 @@ func (s *Store) DailyReviewFacts(ctx context.Context, tradeDate string) (DailyRe
 				Date: item.Date, Symbol: item.Symbol, Code: item.Code, Name: item.Name, Sector: item.Sector,
 				Probability: item.Probability, RiskScore: item.RiskScore, Reason: item.Reason,
 				EntryPrice: item.EntryPrice, LatestPrice: item.LatestPrice, ChangePct: item.ChangePct,
-				TrackedDays: item.TrackedDays, Frozen: item.TrackedDays >= recommendationTrackWindow,
+				TrackedDays: item.TrackedDays, Frozen: item.Exited,
 			}
 			var dayChange sql.NullFloat64
 			err := s.DB.QueryRowContext(ctx, `SELECT change_pct FROM kline_daily WHERE symbol=? AND trade_date=?`, item.Symbol, tradeDate).Scan(&dayChange)
@@ -271,9 +271,10 @@ func (s *Store) fillReviewBenchmark(ctx context.Context, fact *ReviewRecommendat
 		return nil
 	}
 	var lastDate string
+	// 趋势跟踪口径下追踪天数不固定，用该股实际已追踪的天数对齐基准窗口。
 	err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(DATE_FORMAT(MAX(t.trade_date),'%Y-%m-%d'),'') FROM (
 		SELECT trade_date FROM kline_daily WHERE symbol=? AND trade_date>? ORDER BY trade_date ASC LIMIT ?
-	) t`, fact.Symbol, fact.Date, recommendationTrackWindow).Scan(&lastDate)
+	) t`, fact.Symbol, fact.Date, fact.TrackedDays).Scan(&lastDate)
 	if err != nil || lastDate == "" {
 		return err
 	}

@@ -56,6 +56,7 @@ func main() {
 	watchlistSyncer := realtime.NewWatchlistSyncer(st, mgr, queryCache, time.Duration(cfg.WatchlistSyncSeconds)*time.Second)
 	watchlistSyncer.Start(rootCtx)
 	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt, HotspotPrompt: cfg.AIHotspotPrompt, ReviewPrompt: cfg.AIReviewPrompt})
+	analysisService.SetMarketProvider(mgr)
 	analysisService.StartScheduler(rootCtx)
 	if os.Getenv("GOSTOCK_AUTO_BACKFILL") != "false" {
 		if err := engine.StartBackfill(rootCtx); err != nil {

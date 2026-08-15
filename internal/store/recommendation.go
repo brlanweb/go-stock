@@ -36,6 +36,21 @@ const (
 	recommendationOverheatMaxPenalty = 0.5
 )
 
+// isBrokerCandidate 判断候选是否为券商类股票（或所属板块为证券类题材）。
+// 券商股受市场 beta 与政策驱动，个股趋势持续性差，按产品要求全量排除推荐。
+func isBrokerCandidate(industry, name string) bool {
+	for _, keyword := range []string{"证券", "券商"} {
+		if strings.Contains(industry, keyword) || strings.Contains(name, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// recommendationExcludeBrokerSQL 是成分股查询共用的券商排除条件（东财口径下
+// 券商的申万/东财行业名均含“证券”，个别互金券商用名称兜底）。
+const recommendationExcludeBrokerSQL = " AND b.industry NOT LIKE '%证券%' AND b.name NOT LIKE '%证券%' "
+
 // RecommendationMaxRiskScore 返回给定复盘市场阶段下的候选风险分上限：
 // up=85、range=75、down=65，其余（含尚无复盘）为基准 70。
 func RecommendationMaxRiskScore(marketPhase string) float64 {
@@ -153,7 +168,7 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		INNER JOIN sector_constituent sc ON sc.symbol=b.symbol
 		INNER JOIN sector_basic sb ON sb.sector_code=sc.sector_code
 		INNER JOIN kline_daily k ON k.symbol=b.symbol AND k.trade_date=?
-		WHERE b.status='listed' AND b.sec_type='stock' AND sb.sector_code IN (`+placeholders+`)
+		WHERE b.status='listed' AND b.sec_type='stock'`+recommendationExcludeBrokerSQL+`AND sb.sector_code IN (`+placeholders+`)
 		ORDER BY k.amount DESC,b.symbol ASC,sb.sector_code ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query popular recommendation stocks: %w", err)
@@ -195,12 +210,20 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		return pool[i].Popularity > pool[j].Popularity
 	})
 
-	// 候选池通常约百只；只接受完整 60 根日 K 的证券，先按趋势筛选，再剔除
-	// 风险过高（高波动/深回撤/短期过热）与昨日涨停（次日高开损耗大）的股票，
-	// 最后按“趋势分 × 过热惩罚”排序统一取前 10。TrendScore 字段保留原始趋势分。
+	return s.rankRecommendationPool(ctx, tradeDate, pool, maxRiskScore)
+}
+
+// rankRecommendationPool 是候选池的统一收口：只接受完整 60 根日 K 的证券，
+// 先按趋势筛选，再剔除风险过高（高波动/深回撤/短期过热）与昨日涨停（次日
+// 高开损耗大）的股票，最后按“趋势分 × 过热惩罚”排序统一取前 10。
+// TrendScore 字段保留原始趋势分。券商候选在此兜底剔除（SQL 层已过滤一次）。
+func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, pool []RecommendationCandidate, maxRiskScore float64) ([]RecommendationCandidate, error) {
 	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
 	sortScores := make(map[string]float64, len(pool))
 	for _, candidate := range pool {
+		if isBrokerCandidate(candidate.Industry, candidate.Name) {
+			continue
+		}
 		klines, err := s.QueryKlines(ctx, candidate.Symbol, "day", "qfq", "", tradeDate, recommendationKlineDays)
 		if err != nil {
 			return nil, err
@@ -233,6 +256,95 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		trendCandidates = trendCandidates[:recommendationCandidateLimit]
 	}
 	return trendCandidates, nil
+}
+
+// RecommendationHotspotConcept 是热点漏斗 final 报告中一个已回验概念的最小引用，
+// 由 analysis 层解析报告后传入，避免 store 反向依赖 analysis 的报告结构。
+type RecommendationHotspotConcept struct {
+	SectorCode string
+	SectorName string
+	Confidence float64
+}
+
+// RecommendationCandidatesFromHotspot 直接复用热点漏斗产出的概念作为候选来源：
+// 以漏斗卡点概念的成分股为唯一候选池（Industry 记为概念名、SectorHeat 记为
+// AI 置信度），再走与旧逻辑完全一致的趋势/风险统一收口。漏斗结果为空或
+// 过滤后候选不足时由调用方回退 RecommendationCandidates。
+func (s *Store) RecommendationCandidatesFromHotspot(ctx context.Context, maxRiskScore float64, concepts []RecommendationHotspotConcept) ([]RecommendationCandidate, error) {
+	if maxRiskScore <= 0 || maxRiskScore > 100 {
+		maxRiskScore = recommendationBaseMaxRisk
+	}
+	if len(concepts) == 0 {
+		return []RecommendationCandidate{}, nil
+	}
+	tradeDate, err := s.LatestKlineDate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if tradeDate == "" {
+		return []RecommendationCandidate{}, nil
+	}
+	codes := make([]string, 0, len(concepts))
+	conceptByCode := make(map[string]RecommendationHotspotConcept, len(concepts))
+	for _, concept := range concepts {
+		if concept.SectorCode == "" || conceptByCode[concept.SectorCode].SectorCode != "" {
+			continue
+		}
+		conceptByCode[concept.SectorCode] = concept
+		codes = append(codes, concept.SectorCode)
+	}
+	if len(codes) == 0 {
+		return []RecommendationCandidate{}, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(codes)), ",")
+	args := make([]any, 0, len(codes)+1)
+	args = append(args, tradeDate)
+	for _, code := range codes {
+		args = append(args, code)
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT b.symbol,b.code,b.name,sc.sector_code,k.amount
+		FROM stock_basic b
+		INNER JOIN sector_constituent sc ON sc.symbol=b.symbol
+		INNER JOIN kline_daily k ON k.symbol=b.symbol AND k.trade_date=?
+		WHERE b.status='listed' AND b.sec_type='stock'`+recommendationExcludeBrokerSQL+`AND sc.sector_code IN (`+placeholders+`)
+		ORDER BY k.amount DESC,b.symbol ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query hotspot recommendation stocks: %w", err)
+	}
+	defer rows.Close()
+
+	// 同一股票可能属于多个漏斗概念，保留 AI 置信度更高的概念归属。
+	bySymbol := make(map[string]RecommendationCandidate)
+	for rows.Next() {
+		var candidate RecommendationCandidate
+		var sectorCode string
+		if err := rows.Scan(&candidate.Symbol, &candidate.Code, &candidate.Name, &sectorCode, &candidate.Popularity); err != nil {
+			return nil, err
+		}
+		concept := conceptByCode[sectorCode]
+		candidate.Industry = concept.SectorName
+		candidate.SectorType = "concept"
+		candidate.SectorHeat = concept.Confidence
+		current, exists := bySymbol[candidate.Symbol]
+		if !exists || candidate.SectorHeat > current.SectorHeat {
+			bySymbol[candidate.Symbol] = candidate
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pool := make([]RecommendationCandidate, 0, len(bySymbol))
+	for _, candidate := range bySymbol {
+		pool = append(pool, candidate)
+	}
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].Popularity == pool[j].Popularity {
+			return pool[i].Symbol < pool[j].Symbol
+		}
+		return pool[i].Popularity > pool[j].Popularity
+	})
+	return s.rankRecommendationPool(ctx, tradeDate, pool, maxRiskScore)
 }
 
 // recommendationLimitPct 按交易代码近似涨跌幅上限：创业板/科创板 20%，
@@ -335,13 +447,16 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for i := range out {
-		window, err := s.recommendationWindow(ctx, out[i].Symbol, out[i].Date)
+	if len(out) > 0 {
+		settlements, err := s.PositionSettlementsByAnalysisDate(ctx, out[0].Date)
 		if err != nil {
 			return nil, err
 		}
-		out[i].EntryPrice, out[i].LatestPrice, out[i].ChangePct = recommendationPerformance(window.entryOpen, window.lastClose)
-		out[i].TrackedDays = window.days
+		for i := range out {
+			if err := s.applyRecommendationPerformance(ctx, &out[i], settlements); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if out == nil {
 		out = []model.StockRecommendation{}
@@ -349,27 +464,125 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 	return out, nil
 }
 
-// recommendationTrackWindow 是推荐收益追踪窗口：推荐日后首个交易日起 5 个交易日。
-const recommendationTrackWindow = 5
+// applyRecommendationPerformance 填充单只推荐股的收益追踪结果。
+// 真实持仓记录优先于技术规则模拟：AI 判定退出后收益冻结在退出价，
+// 未建仓的标的不产生收益样本（Settled=false，不计入胜率统计）。
+func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.StockRecommendation, settlements map[string]PositionSettlement) error {
+	settlement, hasPosition := settlements[item.Symbol]
+	if hasPosition {
+		item.PositionStatus = settlement.Status
+		switch settlement.Status {
+		// 宽限期内未等到建仓点：从未持有，不产生收益样本。
+		case PositionExpired:
+			item.ExitReason = settlement.ExitReason
+			return nil
+		// 盘前入池、盘中尚未给出建仓建议：还没有真实成本，暂不统计收益。
+		case PositionPendingEntry:
+			return nil
+		// AI 已建议退出：收益按真实建仓价与退出价冻结，不再跟随后续行情。
+		case PositionExited:
+			if settlement.EntryPrice != nil && settlement.ExitPrice != nil && *settlement.EntryPrice > 0 {
+				entry, exit := *settlement.EntryPrice, *settlement.ExitPrice
+				pct := (exit/entry - 1) * 100
+				item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, &exit, &pct
+				item.Exited, item.Settled = true, true
+				item.ExitReason = settlement.ExitReason
+				startDate := item.Date
+				if settlement.EntryDate != "" {
+					startDate = settlement.EntryDate
+				}
+				days, err := s.TradingDaysSince(ctx, startDate, settlement.ExitDate)
+				if err != nil {
+					return err
+				}
+				item.TrackedDays = days + 1
+				return nil
+			}
+		}
+	}
 
-type recommendationWindow struct {
-	entryOpen sql.NullFloat64
-	lastClose sql.NullFloat64
-	days      int
+	window, err := s.recommendationWindow(ctx, item.Symbol, item.Date)
+	if err != nil {
+		return err
+	}
+	item.EntryPrice, item.LatestPrice, item.ChangePct = recommendationPerformance(window.entryOpen, window.lastClose)
+	item.TrackedDays = window.days
+	item.Exited = window.exited
+	item.ExitReason = window.exitReason
+	// 已实际建仓且仍持有：用真实建仓成本替换“次日开盘价”假设，
+	// 浮动收益随最新收盘价更新，退出前不冻结。
+	if hasPosition && settlement.Status == PositionHolding && settlement.EntryPrice != nil && *settlement.EntryPrice > 0 {
+		entry := *settlement.EntryPrice
+		item.EntryPrice = &entry
+		if item.LatestPrice != nil {
+			pct := (*item.LatestPrice/entry - 1) * 100
+			item.ChangePct = &pct
+		}
+	}
+	item.Settled = item.ChangePct != nil
+	return nil
 }
 
-// recommendationWindow 读取分析日之后（不含分析日）最多 5 个交易日的日 K：
-// 推荐在次日盘前 08:00 生成，最早只能以次一交易日开盘价建仓，因此买入基准为
-// 分析日后第一个交易日开盘价，收益终点为窗口内最后一个交易日收盘价。
-// 超过窗口的新行情不参与计算，因此满 5 个交易日后结果自然冻结。
+// 趋势跟踪退出参数：核心是趋势交易——趋势可持续就继续持有，收盘跌破 10 日
+// 均线视为趋势不再可持续，按当日收盘价结算退出；不再采用固定 5 个交易日
+// 强制冻结。recommendationTrackMaxDays 是防御性上限，避免单笔无限期追踪。
+const (
+	recommendationExitMAPeriod  = 10
+	recommendationTrackMaxDays  = 30
+	recommendationPerfDefault   = 5
+	RecommendationExitReasonMA  = "收盘跌破10日线，趋势不再可持续"
+	RecommendationExitReasonCap = "达到最大追踪天数"
+)
+
+type recommendationWindow struct {
+	entryOpen  sql.NullFloat64
+	lastClose  sql.NullFloat64
+	days       int
+	exited     bool
+	exitReason string
+}
+
+// recommendationWindow 按趋势跟踪口径追踪推荐表现：推荐在交易日盘前生成，
+// 最早以分析日后首个交易日开盘价建仓；此后逐日检查趋势可持续性，收盘跌破
+// 10 日均线当日即以收盘价结算退出（exited=true），结果随之冻结；趋势始终
+// 未破位时最多追踪 recommendationTrackMaxDays 个交易日后强制冻结兜底。
 func (s *Store) recommendationWindow(ctx context.Context, symbol, analysisDate string) (recommendationWindow, error) {
 	var window recommendationWindow
+
+	// MA10 需要建仓日之前的收盘价做种子：取分析日（含）往前 9 根收盘。
+	seedRows, err := s.DB.QueryContext(ctx, `SELECT k.close FROM kline_daily k
+		WHERE k.symbol=? AND k.trade_date<=? ORDER BY k.trade_date DESC LIMIT ?`,
+		symbol, analysisDate, recommendationExitMAPeriod-1)
+	if err != nil {
+		return window, err
+	}
+	var seed []float64
+	for seedRows.Next() {
+		var close sql.NullFloat64
+		if err := seedRows.Scan(&close); err != nil {
+			seedRows.Close()
+			return window, err
+		}
+		if close.Valid {
+			seed = append(seed, close.Float64)
+		}
+	}
+	if err := seedRows.Close(); err != nil {
+		return window, err
+	}
+	// 倒序取出，翻转为时间正序。
+	for i, j := 0, len(seed)-1; i < j; i, j = i+1, j-1 {
+		seed[i], seed[j] = seed[j], seed[i]
+	}
+
 	rows, err := s.DB.QueryContext(ctx, `SELECT k.open,k.close FROM kline_daily k
-		WHERE k.symbol=? AND k.trade_date>? ORDER BY k.trade_date ASC LIMIT ?`, symbol, analysisDate, recommendationTrackWindow)
+		WHERE k.symbol=? AND k.trade_date>? ORDER BY k.trade_date ASC LIMIT ?`,
+		symbol, analysisDate, recommendationTrackMaxDays)
 	if err != nil {
 		return window, err
 	}
 	defer rows.Close()
+	closes := seed
 	for rows.Next() {
 		var open, close sql.NullFloat64
 		if err := rows.Scan(&open, &close); err != nil {
@@ -380,8 +593,34 @@ func (s *Store) recommendationWindow(ctx context.Context, symbol, analysisDate s
 		}
 		window.lastClose = close
 		window.days++
+		if close.Valid {
+			closes = append(closes, close.Float64)
+		}
+		// 收盘跌破 MA10 → 趋势不再可持续，当日收盘结算退出。
+		if ma, ok := trailingAverage(closes, recommendationExitMAPeriod); ok && close.Valid && close.Float64 < ma {
+			window.exited = true
+			window.exitReason = RecommendationExitReasonMA
+			return window, rows.Err()
+		}
+	}
+	if window.days >= recommendationTrackMaxDays {
+		window.exited = true
+		window.exitReason = RecommendationExitReasonCap
 	}
 	return window, rows.Err()
+}
+
+// trailingAverage 计算序列末尾 period 个值的均值；样本不足时返回 false
+// （新股/停牌导致历史不足，趋势破位判断顺延到样本充足之后）。
+func trailingAverage(values []float64, period int) (float64, bool) {
+	if len(values) < period {
+		return 0, false
+	}
+	var sum float64
+	for _, value := range values[len(values)-period:] {
+		sum += value
+	}
+	return sum / float64(period), true
 }
 
 // RecommendationDailyPerformance 是“最近 N 个推荐日全部买入”的组合口径统计。
@@ -398,7 +637,7 @@ type RecommendationDailyPerformance struct {
 // 假设每只推荐股按建仓日（推荐日后首个交易日）开盘价等权买入，输出各日合计与平均涨跌点数。
 func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) ([]RecommendationDailyPerformance, error) {
 	if days <= 0 || days > 30 {
-		days = recommendationTrackWindow
+		days = recommendationPerfDefault
 	}
 	dates, err := s.RecommendationHistory(ctx, days)
 	if err != nil {
@@ -410,19 +649,29 @@ func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) (
 		if err != nil {
 			return nil, err
 		}
-		summary := RecommendationDailyPerformance{Date: date, Stocks: len(items)}
+		summary := RecommendationDailyPerformance{Date: date}
 		var sum float64
 		var counted int
+		// 趋势跟踪口径：只统计已建仓的有效样本；全部有效样本退出后完结。
+		allExited := true
 		for _, item := range items {
+			// 未建仓的标的不参与当日组合收益与完结判定。
+			if !item.Settled {
+				continue
+			}
+			summary.Stocks++
 			if item.TrackedDays > summary.TrackedDays {
 				summary.TrackedDays = item.TrackedDays
+			}
+			if !item.Exited {
+				allExited = false
 			}
 			if item.ChangePct != nil {
 				sum += *item.ChangePct
 				counted++
 			}
 		}
-		summary.Finished = summary.TrackedDays >= recommendationTrackWindow
+		summary.Finished = allExited && counted > 0
 		if counted > 0 {
 			total := sum
 			avg := sum / float64(counted)
@@ -454,7 +703,7 @@ func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float6
 }
 
 // RecommendationStats 是 AI 趋势推荐的整体成功率评估，仅统计已冻结
-// （满 5 个交易日窗口）的推荐，避免追踪中的浮动数据污染胜率。
+// （趋势退出结算，或达最大追踪天数）的推荐，避免追踪中的浮动数据污染胜率。
 type RecommendationStats struct {
 	TotalDays     int      `json:"total_days"`
 	FrozenPicks   int      `json:"frozen_picks"`
@@ -476,7 +725,8 @@ type RecommendationStats struct {
 }
 
 // RecommendationOverallStats 汇总最近 days 个推荐日的成功率评估。
-// 个股口径：建仓日开盘价 → 第 5 个交易日收盘价；组合口径：单日 3 只求和。
+// 个股口径：优先采用实际建仓/退出价；无持仓生命周期的历史推荐沿用
+// “次日开盘建仓、趋势破位退出”的模拟口径。组合口径为单日有效收益样本求和。
 func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (RecommendationStats, error) {
 	if days <= 0 || days > 365 {
 		days = 60
@@ -499,10 +749,12 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 		dayFrozen := true
 		dayCounted := 0
 		for _, item := range items {
-			if item.ChangePct == nil {
+			// 未产生有效收益样本（盘前入池未建仓、宽限期满未建仓）的标的
+			// 既不计入追踪中也不计入冻结，避免用从未持有的仓位污染胜率。
+			if !item.Settled || item.ChangePct == nil {
 				continue
 			}
-			if item.TrackedDays < recommendationTrackWindow {
+			if !item.Exited {
 				stats.TrackingPicks++
 				dayFrozen = false
 				continue
@@ -580,7 +832,7 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 //   - trend：原始趋势分最高的 3 只（AI 不存在时的朴素基线）
 //   - low_risk：风险分最低的 3 只（保守基线）
 //
-// 与 AI 推荐共用 5 日冻结口径统计，用于回答“AI 相对确定性规则有无超额”。
+// 与 AI 推荐共用趋势跟踪冻结口径统计，用于回答“AI 相对确定性规则有无超额”。
 // AI 请求失败时影子记录依然存在，因此基线样本天数 ≥ AI 样本天数。
 
 // SaveRecommendationShadow 以 REPLACE 语义保存分析日的影子基线选股。
@@ -629,7 +881,7 @@ func (s *Store) SaveRecommendationShadow(ctx context.Context, date string, candi
 	return tx.Commit()
 }
 
-// RecommendationShadowStrategyStats 是单一策略在共同日期集上的 5 日冻结口径统计。
+// RecommendationShadowStrategyStats 是单一策略在共同日期集上的趋势退出冻结口径统计。
 type RecommendationShadowStrategyStats struct {
 	Strategy      string   `json:"strategy"`
 	TotalDays     int      `json:"total_days"`
@@ -676,10 +928,10 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 	}
 	frozenSums := make(map[string]float64, len(order))
 
-	// accumulate 累计单个策略在单个分析日的三只表现；只统计已冻结（满窗）数据。
+	// accumulate 累计单个策略在单个分析日的三只表现；只统计已冻结（趋势退出）数据。
 	accumulate := func(strategy string, picks []struct {
-		changePct   *float64
-		trackedDays int
+		changePct *float64
+		exited    bool
 	}) {
 		target := stats[strategy]
 		if len(picks) == 0 {
@@ -693,7 +945,7 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 			if pick.changePct == nil {
 				continue
 			}
-			if pick.trackedDays < recommendationTrackWindow {
+			if !pick.exited {
 				target.TrackingPicks++
 				dayFrozen = false
 				continue
@@ -716,8 +968,8 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 	}
 
 	type pickResult = struct {
-		changePct   *float64
-		trackedDays int
+		changePct *float64
+		exited    bool
 	}
 	for _, date := range dates {
 		aiItems, err := s.RecommendationsByDate(ctx, date)
@@ -726,7 +978,7 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 		}
 		aiPicks := make([]pickResult, 0, len(aiItems))
 		for _, item := range aiItems {
-			aiPicks = append(aiPicks, pickResult{item.ChangePct, item.TrackedDays})
+			aiPicks = append(aiPicks, pickResult{item.ChangePct, item.Exited})
 		}
 		accumulate("ai", aiPicks)
 
@@ -758,7 +1010,7 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 					return nil, err
 				}
 				_, _, changePct := recommendationPerformance(window.entryOpen, window.lastClose)
-				picks = append(picks, pickResult{changePct, window.days})
+				picks = append(picks, pickResult{changePct, window.exited})
 			}
 			accumulate(strategy, picks)
 		}

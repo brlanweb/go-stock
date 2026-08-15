@@ -177,7 +177,7 @@ func (e *Eastmoney) batchQuotesBySecids(ctx context.Context, secids string) ([]*
 		return nil, err
 	}
 	// ulist.np/get：f1-f31 常用字段
-	fields := "f2,f3,f4,f5,f6,f8,f10,f12,f13,f14,f15,f16,f17,f18,f9,f23,f20,f21"
+	fields := "f2,f3,f4,f5,f6,f8,f10,f12,f13,f14,f15,f16,f17,f18,f9,f23,f20,f21,f124"
 	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2&fields=%s&secids=%s",
 		fields, secids)
 	body, err := httpGet(ctx, url, map[string]string{"Referer": "https://quote.eastmoney.com/"})
@@ -241,6 +241,9 @@ func (e *Eastmoney) batchQuotesBySecids(ctx context.Context, secids string) ([]*
 			PBRatio:      f("f23").Ptr(),
 			TotalMV:      f("f20").Ptr(),
 			CircMV:       f("f21").Ptr(),
+		}
+		if ts := f("f124"); ts.Valid && ts.Value > 0 {
+			q.ProviderTimestamp = time.Unix(int64(ts.Value), 0).Format(time.RFC3339)
 		}
 		if v := f("f5"); v.Valid {
 			vol := int64(v.Value) * 100

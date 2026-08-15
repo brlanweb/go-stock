@@ -5,6 +5,7 @@ import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } fr
 import { api, fmtBig, fmtPct, type HeatmapGroup, type HeatmapItem } from '../api'
 import MarketSidebar from '../components/MarketSidebar.vue'
 import HotspotFunnel from '../components/HotspotFunnel.vue'
+import Home from './Home.vue'
 import Review from './Review.vue'
 import Recommendations from './Recommendations.vue'
 import Indicators from './Indicators.vue'
@@ -20,11 +21,12 @@ interface TreeDatum {
 const router = useRouter()
 const route = useRoute()
 
-// 首页五个同级 Tab：默认热点漏斗；旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
-type HomeView = 'hotspot' | 'heatmap' | 'review' | 'reco' | 'indicators'
-const homeViews: HomeView[] = ['hotspot', 'heatmap', 'review', 'reco', 'indicators']
+// 首页六个同级 Tab：默认统计总览；热点漏斗后移至趋势推荐之后。
+// 旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
+type HomeView = 'home' | 'heatmap' | 'review' | 'reco' | 'hotspot' | 'indicators'
+const homeViews: HomeView[] = ['home', 'heatmap', 'review', 'reco', 'hotspot', 'indicators']
 function normalizeView(value: unknown): HomeView {
-  return homeViews.includes(value as HomeView) ? value as HomeView : 'hotspot'
+  return homeViews.includes(value as HomeView) ? value as HomeView : 'home'
 }
 const activeView = ref<HomeView>(normalizeView(route.query.view))
 watch(() => route.query.view, value => { if (value) activeView.value = normalizeView(value) })
@@ -211,16 +213,18 @@ onUnmounted(() => {
     <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView !== 'heatmap' }">
       <header class="canvas-header">
         <nav class="workspace-tabs" aria-label="首页视图">
-          <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'"><span class="live-dot"></span>热点漏斗</button>
+          <button type="button" :class="{ active: activeView === 'home' }" @click="activeView = 'home'">首页</button>
           <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'">大盘云图</button>
           <button type="button" :class="{ active: activeView === 'review' }" @click="activeView = 'review'">每日复盘</button>
           <button type="button" :class="{ active: activeView === 'reco' }" @click="activeView = 'reco'">趋势推荐</button>
+          <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'"><span class="live-dot"></span>热点漏斗</button>
           <button type="button" :class="{ active: activeView === 'indicators' }" @click="activeView = 'indicators'">指标与回测</button>
         </nav>
         <div v-if="activeView === 'heatmap'" class="legend"><span>板块面积以成分市值为主，概念兼顾活跃度；个股面积代表市值，颜色代表涨跌幅</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
         <div v-else-if="activeView === 'hotspot'" class="hotspot-caption">数据初筛 → 关系收敛 → AI 产业链分析 → 本地数据回验</div>
       </header>
-      <template v-if="activeView === 'heatmap'">
+      <Home v-if="activeView === 'home'" />
+      <template v-else-if="activeView === 'heatmap'">
         <section v-if="notice || error" class="market-notice" :class="{ error }">{{ error || notice }}</section>
         <section ref="mapHost" class="treemap-stage" :class="{ empty: !layout.stocks.length }">
           <template v-if="layout.stocks.length">
