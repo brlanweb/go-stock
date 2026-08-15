@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/hoax/go-stock/internal/model"
@@ -238,17 +239,41 @@ func TestApplyRecommendationPerformanceFreezesExitedLifecycle(t *testing.T) {
 	settlements := map[string]PositionSettlement{
 		item.Symbol: {
 			Status: PositionExited, EntryDate: "2026-08-03", EntryPrice: &entry,
-			ExitDate: "2026-08-06", ExitPrice: &exit, ExitReason: "AI exit", HoldDays: 4,
+			ExitDate: "2026-08-06", ExitReason: "AI exit", ExitPrice: &exit, HoldDays: 4,
+			PositionPct: 100,
 		},
 	}
 
 	if err := (&Store{}).applyRecommendationPerformance(context.Background(), &item, settlements); err != nil {
 		t.Fatal(err)
 	}
-	if !item.Settled || !item.Exited || item.ChangePct == nil || *item.ChangePct != 12.5 {
-		t.Fatalf("exited lifecycle must freeze realized performance: %+v", item)
+	// 毛收益 12.5%，扣除往返交易成本后才是可比的真实收益。
+	want := PositionNetChangePct(12.5)
+	if !item.Settled || !item.Exited || item.ChangePct == nil || math.Abs(*item.ChangePct-want) > 1e-9 {
+		t.Fatalf("exited lifecycle must freeze net-of-cost performance (want %.4f): %+v", want, item)
 	}
 	if item.TrackedDays != 4 || item.ExitReason != "AI exit" || item.PositionStatus != PositionExited {
 		t.Fatalf("unexpected exited lifecycle metadata: %+v", item)
+	}
+}
+
+// 分批减仓后，已退出交易的收益必须按仓位加权：
+// +12% 时减半仓锁定 6 个点，剩余半仓在 +4% 退出贡献 2 个点，合计毛收益 8 个点。
+func TestApplyRecommendationPerformanceBlendsReducedPosition(t *testing.T) {
+	entry, exit := 100.0, 104.0
+	item := model.StockRecommendation{Date: "2026-08-01", Symbol: "SH600000"}
+	settlements := map[string]PositionSettlement{
+		item.Symbol: {
+			Status: PositionExited, EntryDate: "2026-08-03", EntryPrice: &entry,
+			ExitDate: "2026-08-06", ExitPrice: &exit, ExitReason: "trailing stop", HoldDays: 3,
+			PositionPct: 50, RealizedPct: 6,
+		},
+	}
+	if err := (&Store{}).applyRecommendationPerformance(context.Background(), &item, settlements); err != nil {
+		t.Fatal(err)
+	}
+	want := PositionNetChangePct(8)
+	if item.ChangePct == nil || math.Abs(*item.ChangePct-want) > 1e-9 {
+		t.Fatalf("blended performance want %.4f, got %+v", want, item.ChangePct)
 	}
 }

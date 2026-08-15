@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-15
+
+### Fixed
+
+- Fix an index-out-of-range panic in `fillPositionIndicators` when a symbol has exactly 20 daily candles; because intraday analysis processes all positions in one batch, a single newly listed stock could abort risk management for every open position in that slot.
+- Make position exits atomic: the state transition and watchlist removal now share one transaction, removing the window where a position was recorded as exited while still occupying a watchlist slot.
+- Determine the provider trading date by majority vote across index quotes instead of trusting the first timestamp, so one stale index feed can no longer make a live session look like a market holiday.
+
+### Added
+
+- Add a deterministic risk-control engine (`internal/analysis/risk.go`) that runs before the AI review, with a fixed precedence: hard stop-loss, systemic risk, trailing stop, take-profit, time stop, tail-slot trend break, and a maximum holding cap.
+- Add an ATR-adaptive hard stop-loss anchored to the entry price (6% floor, `ATR14 × 1.8` adaptive, 10% cap), so a single position can no longer lose an unbounded amount while trend structure stays technically intact.
+- Add trailing take-profit: once unrealized gain reaches 5%, a 4% giveback from the position's peak locks in the trade, preventing winners from decaying into losses.
+- Add a time stop aligned with the entry edge's 1–5 day half-life: positions failing to reach 3% within 3 trading days are released instead of drifting without an edge.
+- Implement `reduce` as a real partial exit that halves the position and locks in that share of the return; previously the AI's reduce intent was recorded but silently discarded, leaving the position fully exposed.
+- Track `highest_price` / `lowest_price` per position for trailing stops and MAE review, plus `exit_kind` attribution across the AI and each deterministic rule.
+- Diversify daily entries to two cross-sector candidates so portfolio return no longer equals a single stock's path.
+- Add migration `021_position_risk_control.sql` and a `position_reduction` audit table.
+
+### Changed
+
+- Deduct estimated round-trip trading cost (0.25%) from lifecycle performance and weight returns by remaining position size, so partially reduced trades and marginal winners are no longer overstated.
+- Enforce the AI's suggested entry range as a real execution constraint: when price trades above the range's upper bound, the position stays pending instead of being booked at an inflated market price.
+- Confirm trend breaks against MA10 with a 1% buffer and only in the 14:52 tail slot, replacing intraday MA20 checks that were routinely triggered by wicks.
+- Trigger systemic-risk exits when two thirds of tracked indices fall with a −1.5% average, replacing a unanimous-decline condition that almost never fired.
+- Extend the intraday prompt with `profit_pct`, `peak_profit_pct`, `stop_loss_price`, `position_pct`, and `atr_pct`, and state that deterministic discipline already ran, so the model only makes discretionary calls.
+- Show position size and exit attribution in the Home lifecycle table.
+
+### Database
+
+- Adds `highest_price`, `lowest_price`, `position_pct`, `realized_pct`, and `exit_kind` to `position`, backfills existing rows, and creates `position_reduction`.
+
 ## [1.3.2] - 2026-08-15
 
 ### Changed
@@ -163,7 +195,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/brlanweb/go-stock/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/brlanweb/go-stock/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/brlanweb/go-stock/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/brlanweb/go-stock/compare/v1.2.5...v1.3.0

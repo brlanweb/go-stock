@@ -206,12 +206,18 @@ export interface Position {
   status: 'pending_entry' | 'holding' | 'exited' | 'expired'
   entry_date?: string
   entry_price: number | null
+  highest_price: number | null
+  lowest_price: number | null
   exit_date?: string
   exit_price: number | null
   exit_reason?: string
+  exit_kind?: 'ai' | 'stop_loss' | 'trailing_stop' | 'take_profit' | 'time_stop' | 'trend_break' | 'systemic' | ''
   hold_days: number
+  position_pct: number
+  realized_pct: number
   reference_price: number | null
   change_pct: number | null
+  gross_change_pct: number | null
   created_at: string
   updated_at: string
 }

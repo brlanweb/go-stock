@@ -354,53 +354,111 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// selectBestEntryPick 从当日 3 只推荐中确定性选出最适合建仓的一只：
-// AI 概率最高者优先；概率持平取风险分更低者；再持平按 AI 排名兜底。
-func selectBestEntryPick(items []model.StockRecommendation) *model.StockRecommendation {
-	var best *model.StockRecommendation
-	for i := range items {
-		item := &items[i]
-		if best == nil {
-			best = item
+// DailyEntryPickCount 是每个推荐日纳入生命周期的标的数量。
+//
+// 原实现每日只建 1 只，组合收益完全等于单票波动，没有任何分散化：
+// 一次 -10% 就能抹掉此前多笔盈利，方差极大。趋势/动量策略的正期望依赖
+// 大数定律，必须靠多笔独立样本摊平个股特异风险。取 2 只是在「分散」与
+// 「自选 10 只容量 + 每只都要有足够仓位」之间的平衡。
+const DailyEntryPickCount = 2
+
+// selectEntryPicks 按确定性规则排序当日推荐并取前 N 只作为建仓候选：
+// AI 概率降序 → 风险分升序 → AI 排名升序。同时保证板块分散：
+// 已选中某板块后，优先选择其他板块的候选，避免单一题材熄火拖累整个组合。
+func selectEntryPicks(items []model.StockRecommendation, limit int) []model.StockRecommendation {
+	if limit <= 0 || len(items) == 0 {
+		return nil
+	}
+	ranked := make([]model.StockRecommendation, len(items))
+	copy(ranked, items)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, b := ranked[i], ranked[j]
+		if a.Probability != b.Probability {
+			return a.Probability > b.Probability
+		}
+		if a.RiskScore != nil && b.RiskScore != nil && *a.RiskScore != *b.RiskScore {
+			return *a.RiskScore < *b.RiskScore
+		}
+		if a.RiskScore == nil && b.RiskScore != nil {
+			return false
+		}
+		if a.RiskScore != nil && b.RiskScore == nil {
+			return true
+		}
+		return a.Rank < b.Rank
+	})
+
+	picks := make([]model.StockRecommendation, 0, limit)
+	usedSectors := make(map[string]bool, limit)
+	// 第一轮：每个板块最多取一只，优先保证分散。
+	for _, item := range ranked {
+		if len(picks) == limit {
+			break
+		}
+		if usedSectors[item.Sector] {
 			continue
 		}
-		if item.Probability > best.Probability {
-			best = item
-			continue
+		usedSectors[item.Sector] = true
+		picks = append(picks, item)
+	}
+	// 第二轮：板块数不足时用剩余高分候选补齐。
+	if len(picks) < limit {
+		chosen := make(map[string]bool, len(picks))
+		for _, p := range picks {
+			chosen[p.Symbol] = true
 		}
-		if item.Probability == best.Probability && item.RiskScore != nil && best.RiskScore != nil && *item.RiskScore < *best.RiskScore {
-			best = item
+		for _, item := range ranked {
+			if len(picks) == limit {
+				break
+			}
+			if !chosen[item.Symbol] {
+				picks = append(picks, item)
+			}
 		}
 	}
-	return best
+	return picks
 }
 
-// autoWatchBestEntryPick 把最佳建仓候选加入自选并记录为当日 daily_pick。
-// now 是推荐运行日（交易日盘前），自选与建仓记录都挂在当天。
-func (s *Service) autoWatchBestEntryPick(ctx context.Context, now time.Time, analysisDate string, items []model.StockRecommendation) {
-	best := selectBestEntryPick(items)
-	if best == nil {
-		return
+// selectBestEntryPick 返回最适合建仓的单只（保留给需要唯一首选的场景）。
+func selectBestEntryPick(items []model.StockRecommendation) *model.StockRecommendation {
+	picks := selectEntryPicks(items, 1)
+	if len(picks) == 0 {
+		return nil
 	}
-	if err := s.st.AddLifecycleWatchlist(ctx, best.Symbol); err != nil {
-		slog.Warn("最佳建仓股加入自选失败", "symbol", best.Symbol, "err", err)
+	return &picks[0]
+}
+
+// autoWatchBestEntryPick 把当日最佳建仓候选加入自选并记录为 daily_pick。
+// now 是推荐运行日（交易日盘前），自选与建仓记录都挂在当天。
+// 自选容量不足时逐只降级跳过，不影响已成功入池的标的。
+func (s *Service) autoWatchBestEntryPick(ctx context.Context, now time.Time, analysisDate string, items []model.StockRecommendation) {
+	picks := selectEntryPicks(items, DailyEntryPickCount)
+	if len(picks) == 0 {
 		return
 	}
 	tradeDate := now.Format("2006-01-02")
-	reason := fmt.Sprintf("当日推荐中最适合建仓（概率 %.1f）：%s", best.Probability, best.Reason)
-	if err := s.st.OpenPosition(ctx, best.Symbol, tradeDate, analysisDate); err != nil {
-		slog.Warn("建立趋势持仓生命周期失败", "symbol", best.Symbol, "err", err)
-		return
+	opened := 0
+	for _, best := range picks {
+		if err := s.st.AddLifecycleWatchlist(ctx, best.Symbol); err != nil {
+			slog.Warn("建仓候选加入自选失败", "symbol", best.Symbol, "err", err)
+			continue
+		}
+		reason := fmt.Sprintf("当日推荐建仓候选（概率 %.1f）：%s", best.Probability, best.Reason)
+		if err := s.st.OpenPosition(ctx, best.Symbol, tradeDate, analysisDate); err != nil {
+			slog.Warn("建立趋势持仓生命周期失败", "symbol", best.Symbol, "err", err)
+			continue
+		}
+		if err := s.st.SaveEntryAdvice(ctx, store.EntryAdviceInput{
+			TradeDate: tradeDate, Symbol: best.Symbol, Source: store.EntrySourceDailyPick,
+			Stage: store.EntryStageEntry, Action: store.EntryActionPick, Reason: reason,
+			Urgency: store.EntryUrgencyNormal, Model: s.config.Model,
+		}); err != nil {
+			slog.Warn("记录当日建仓候选失败", "symbol", best.Symbol, "err", err)
+			continue
+		}
+		opened++
 	}
-	if err := s.st.SaveEntryAdvice(ctx, store.EntryAdviceInput{
-		TradeDate: tradeDate, Symbol: best.Symbol, Source: store.EntrySourceDailyPick,
-		Stage: store.EntryStageEntry, Action: store.EntryActionPick, Reason: reason,
-		Urgency: store.EntryUrgencyNormal, Model: s.config.Model,
-	}); err != nil {
-		slog.Warn("记录当日最佳建仓股失败", "symbol", best.Symbol, "err", err)
-		return
-	}
-	slog.Info("最佳建仓股已自动加入自选", "symbol", best.Symbol, "date", tradeDate)
+	slog.Info("建仓候选已加入自选", "count", opened, "date", tradeDate)
 }
 
 // candidatesReusingHotspot 优先复用当日热点漏斗 final 报告生成候选池；

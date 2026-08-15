@@ -492,7 +492,10 @@ func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.
 			return nil
 		}
 		entry, exit := *settlement.EntryPrice, *settlement.ExitPrice
-		pct := (exit/entry - 1) * 100
+		// 分批减仓后单笔收益必须按仓位加权，并扣除往返交易成本，
+		// 否则会高估收益、把「微盈实亏」的交易统计成盈利单。
+		gross := positionBlendedChangePct(settlement.RealizedPct, settlement.PositionPct, (exit/entry-1)*100)
+		pct := PositionNetChangePct(gross)
 		item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, &exit, &pct
 		item.Exited, item.Settled = true, true
 		item.ExitReason = settlement.ExitReason
@@ -521,7 +524,8 @@ func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.
 			return nil
 		}
 		entry := *settlement.EntryPrice
-		pct := (*latest/entry - 1) * 100
+		gross := positionBlendedChangePct(settlement.RealizedPct, settlement.PositionPct, (*latest/entry-1)*100)
+		pct := PositionNetChangePct(gross)
 		item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, latest, &pct
 		item.TrackedDays = settlement.HoldDays
 		item.Exited, item.Settled = false, true
