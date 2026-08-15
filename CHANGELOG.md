@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-15
+
+### Changed
+
+- Replace the daily three-pick basket bar chart with a full-width line chart whose first and last observations reach the plot edges.
+- Use data-driven vertical bounds and compact gain/loss markers so daily changes remain readable without wasting horizontal space.
+
+### Database
+
+- No database schema or DML changes relative to v1.3.0.
+
 ## [1.3.0] - 2026-08-15
 
 ### Added
@@ -140,7 +151,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/brlanweb/go-stock/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/brlanweb/go-stock/compare/v1.2.5...v1.3.0
 [1.2.5]: https://github.com/brlanweb/go-stock/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/brlanweb/go-stock/compare/v1.2.3...v1.2.4

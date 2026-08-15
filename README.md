@@ -2,7 +2,7 @@
 
 > 低内存 A 股数据底座：Go 单二进制集成 REST API、MCP Streamable HTTP、Vue 3 市场云图和 MySQL 历史数据同步。
 
-**当前稳定版本：v1.3.0**
+**当前稳定版本：v1.3.1**
 
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![Vue](https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs)](https://vuejs.org/) [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-4479A1?logo=mysql)](https://www.mysql.com/)
 
