@@ -731,6 +731,74 @@ func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) (
 	return out, nil
 }
 
+// RecommendationBasketDailyPerformance 把每日 3 只趋势推荐视为等权参考组合。
+// 它独立于真实 position 生命周期，仅用于回答“当日推荐集合后来表现如何”。
+type RecommendationBasketDailyPerformance struct {
+	Date           string   `json:"date"`
+	Stocks         int      `json:"stocks"`
+	FrozenStocks   int      `json:"frozen_stocks"`
+	TrackingStocks int      `json:"tracking_stocks"`
+	TrackedDays    int      `json:"tracked_days"`
+	Finished       bool     `json:"finished"`
+	SumChangePct   *float64 `json:"sum_change_pct"`
+	AvgChangePct   *float64 `json:"avg_change_pct"`
+}
+
+func summarizeRecommendationBasket(date string, items []model.StockRecommendation) RecommendationBasketDailyPerformance {
+	summary := RecommendationBasketDailyPerformance{Date: date}
+	var sum float64
+	for _, item := range items {
+		if item.ChangePct == nil {
+			continue
+		}
+		summary.Stocks++
+		sum += *item.ChangePct
+		if item.TrackedDays > summary.TrackedDays {
+			summary.TrackedDays = item.TrackedDays
+		}
+		if item.ExitReason == "" {
+			summary.TrackingStocks++
+		} else {
+			summary.FrozenStocks++
+		}
+	}
+	if summary.Stocks > 0 {
+		total := sum
+		avg := sum / float64(summary.Stocks)
+		summary.SumChangePct = &total
+		summary.AvgChangePct = &avg
+		summary.Finished = summary.FrozenStocks == summary.Stocks
+	}
+	return summary
+}
+
+// RecommendationBasketPerformance 返回最近若干推荐日的每日 3 只等权参考表现。
+// 每只均按“下一交易日开盘作为参考起点，趋势规则退出后冻结，否则跟随最新收盘”
+// 重新计算，因此即使排名第一已进入真实生命周期，也仍保留在推荐集合图表中。
+func (s *Store) RecommendationBasketPerformance(ctx context.Context, days int) ([]RecommendationBasketDailyPerformance, error) {
+	if days <= 0 || days > 90 {
+		days = 30
+	}
+	dates, err := s.RecommendationHistory(ctx, days)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RecommendationBasketDailyPerformance, 0, len(dates))
+	for _, date := range dates {
+		items, err := s.RecommendationsByDate(ctx, date)
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			if err := s.applyReferencePerformance(ctx, &items[i]); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, summarizeRecommendationBasket(date, items))
+	}
+	return out, nil
+}
+
 // recommendationPerformance 将两个有效价格转换为收益展示数据。
 // 该函数仍供影子策略研究使用，不参与真实持仓生命周期统计。
 func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float64, *float64, *float64) {

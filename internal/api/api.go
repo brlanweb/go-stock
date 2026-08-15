@@ -60,6 +60,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations", s.handleRecommendations)
 	mux.HandleFunc("GET /api/v1/recommendations/history", s.handleRecommendationHistory)
 	mux.HandleFunc("GET /api/v1/recommendations/performance", s.handleRecommendationPerformance)
+	mux.HandleFunc("GET /api/v1/recommendations/basket-performance", s.handleRecommendationBasketPerformance)
 	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
 	mux.HandleFunc("GET /api/v1/recommendations/risk-policy", s.handleRecommendationRiskPolicy)
 	mux.HandleFunc("GET /api/v1/recommendations/shadow-stats", s.handleRecommendationShadowStats)
@@ -721,6 +722,18 @@ func (s *Server) handleRecommendationPerformance(w http.ResponseWriter, r *http.
 	defer cancel()
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	summaries, err := s.St.RecommendationRecentPerformance(ctx, days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, summaries)
+}
+
+func (s *Server) handleRecommendationBasketPerformance(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	summaries, err := s.St.RecommendationBasketPerformance(ctx, days)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

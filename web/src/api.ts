@@ -295,6 +295,17 @@ export interface RecommendationPerformance {
   avg_change_pct: number | null
 }
 
+export interface RecommendationBasketPerformance {
+  date: string
+  stocks: number
+  frozen_stocks: number
+  tracking_stocks: number
+  tracked_days: number
+  finished: boolean
+  sum_change_pct: number | null
+  avg_change_pct: number | null
+}
+
 export interface SectorListItem {
   sector_code: string
   sector_name: string
@@ -559,6 +570,7 @@ export const api = {
   recommendations: (date = '') => req<Recommendation[]>(`/recommendations${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   recommendationHistory: (limit = 90) => req<string[]>(`/recommendations/history?limit=${limit}`),
   recommendationPerformance: (days = 5) => req<RecommendationPerformance[]>(`/recommendations/performance?days=${days}`),
+  recommendationBasketPerformance: (days = 30) => req<RecommendationBasketPerformance[]>(`/recommendations/basket-performance?days=${days}`),
   recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
   recommendationRiskPolicy: () => req<RecommendationRiskPolicy>('/recommendations/risk-policy'),
   recommendationShadowStats: (days = 60) => req<RecommendationShadowStats[]>(`/recommendations/shadow-stats?days=${days}`),

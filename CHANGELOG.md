@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-15
+
+### Added
+
+- Add a Home dashboard chart that treats each recommendation day’s three AI picks as an equal-weight reference basket and plots the daily average return.
+- Add `GET /api/v1/recommendations/basket-performance`, returning per-day sample, frozen, tracking, sum, and equal-weight average values independently of actual position lifecycles.
+- Keep all three daily picks in the basket chart, including the top-ranked pick when it also has a real `position` lifecycle.
+
+### Database
+
+- No database schema or DML changes relative to v1.2.5.
+
 ## [1.2.5] - 2026-08-15
 
 ### Fixed
@@ -128,7 +140,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/brlanweb/go-stock/compare/v1.2.5...v1.3.0
 [1.2.5]: https://github.com/brlanweb/go-stock/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/brlanweb/go-stock/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/brlanweb/go-stock/compare/v1.2.2...v1.2.3
