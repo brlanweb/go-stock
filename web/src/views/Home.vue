@@ -31,6 +31,7 @@ function recommendationStatus(item: Recommendation) {
   if (item.position_status === 'holding') return `持有 ${item.tracked_days} 天`
   if (item.position_status === 'exited') return '已退出'
   if (item.position_status === 'expired') return '未建仓过期'
+  if (item.reference_only && item.change_pct != null) return `参考走势 ${item.tracked_days} 天`
   return '仅推荐记录'
 }
 const latestEntry = computed(() => entryAdvice.value?.items.find(item => item.action === 'entry') || null)

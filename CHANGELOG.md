@@ -88,6 +88,14 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/brlanweb/go-stock/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/brlanweb/go-stock/releases/tag/v1.1.0
+document MCP setup.
+
 [Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.1...HEAD
 [1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0

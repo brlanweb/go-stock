@@ -284,7 +284,7 @@ onMounted(async () => {
                 <span class="rank">{{ item.rank }}</span>
                 <span class="stock"><b>{{ item.name }}</b><small>{{ item.code }}</small></span>
                 <span>{{ fmt(item.entry_price) }}</span>
-                <span>{{ fmt(item.latest_price) }}<small class="track-tag" :title="item.exit_reason || ''">{{ item.position_status === 'expired' ? '未建仓过期' : item.position_status === 'pending_entry' ? '等待建仓' : item.exited ? 'AI已退出' : item.position_status === 'holding' ? `持有${item.tracked_days}天` : '仅推荐记录' }}</small></span>
+                <span>{{ fmt(item.latest_price) }}<small class="track-tag" :title="item.exit_reason || ''">{{ item.position_status === 'expired' ? '未建仓过期' : item.position_status === 'pending_entry' ? '等待建仓' : item.position_status === 'exited' ? 'AI已退出' : item.position_status === 'holding' ? `持有${item.tracked_days}天` : item.reference_only && item.change_pct != null ? `参考${item.tracked_days}天` : '仅推荐记录' }}</small></span>
                 <span :class="pctClass(item.change_pct)">{{ fmtPct(item.change_pct) }}</span>
                 <span class="score">{{ item.probability.toFixed(1) }}</span>
                 <span class="risk" :class="riskClass(item.risk_score)">{{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</span>
@@ -318,7 +318,7 @@ onMounted(async () => {
                 <p v-if="mcResult" class="mc-note">基于最近 {{ mcResult.sample_days }} 个真实日收益率有放回抽样，模拟 {{ mcResult.paths }} 条未来 {{ mcResult.days }} 个交易日路径（基准价 {{ mcResult.base_price.toFixed(2) }}，确定性种子可复现）。模拟不构成投资建议。</p>
               </div>
             </template>
-            <p class="disclaimer">说明：每日盘前从趋势推荐中选出一只首选加入自选生命周期。入池后 D0+2 个交易日内由 AI 寻找建仓区间；建仓后每 30 分钟综合大盘、板块、个股判断趋势是否可持续，并给出持有、减仓或退出区间。AI 或确定性硬风控标记退出后立即移出自选，收益按退出参考价冻结且继续保留在推荐历史中；从未建仓的标的不计收益。没有生命周期记录的旧推荐仅供历史复盘，不进入胜率、已实现收益或持仓浮盈统计。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：每日盘前从趋势推荐中选出一只首选加入自选生命周期。入池后 D0+2 个交易日内由 AI 寻找建仓区间；建仓后每 30 分钟综合大盘、板块、个股判断趋势是否可持续，并给出持有、减仓或退出区间。AI 或确定性硬风控标记退出后立即移出自选，收益按退出参考价冻结且继续保留在推荐历史中；从未建仓的标的不计收益。没有生命周期记录的旧推荐仅按“次日开盘参考走势”展示涨跌供复盘，不进入胜率、已实现收益或持仓浮盈统计。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>

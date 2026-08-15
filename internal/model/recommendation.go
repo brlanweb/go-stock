@@ -8,8 +8,9 @@ package model
 //     参考价冻结（Exited=true），后续行情不再改变结果。
 //  2. pending_entry / expired 从未建仓，不产生收益样本；holding 只展示按最新
 //     市场快照计算的浮动收益，不进入胜率和已实现累计收益。
-//  3. 没有 position 记录的历史推荐只作为候选历史展示，不再用次日开盘、MA10
-//     或固定天数伪造交易结果。
+//  3. 没有 position 记录的历史推荐仅补充“参考走势”（ReferenceOnly=true）：
+//     按推荐日后首个交易日开盘与趋势退出规则展示涨跌，供复盘参考，
+//     Settled 恒为 false，不进入胜率、已实现收益或浮盈统计。
 type StockRecommendation struct {
 	Date        string  `json:"date"`
 	Rank        int     `json:"rank"`
@@ -35,4 +36,7 @@ type StockRecommendation struct {
 	// Settled 表示该股产生了有效收益样本并计入统计。
 	// 未建仓（pending_entry/expired）时为 false，收益字段不参与胜率与合计。
 	Settled bool `json:"settled"`
+	// ReferenceOnly 表示收益字段来自无生命周期记录的“参考走势”口径，
+	// 仅供历史复盘展示，不代表实际交易结果。
+	ReferenceOnly bool `json:"reference_only,omitempty"`
 }

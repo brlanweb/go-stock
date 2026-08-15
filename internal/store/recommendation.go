@@ -456,6 +456,13 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 			if err := s.applyRecommendationPerformance(ctx, &out[i], settlements); err != nil {
 				return nil, err
 			}
+			// 无生命周期记录的推荐补充参考口径展示（Settled=false，不进统计），
+			// 让推荐历史仍能看到推荐后的实际走势。
+			if out[i].PositionStatus == "" {
+				if err := s.applyReferencePerformance(ctx, &out[i]); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if out == nil {
@@ -522,6 +529,23 @@ func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.
 	default:
 		return nil
 	}
+}
+
+// applyReferencePerformance 为没有生命周期记录的推荐补充“参考走势”展示：
+// 按推荐日后首个交易日开盘价与趋势退出规则计算涨跌，仅供历史复盘参考。
+// 该结果保持 Settled=false，不进入胜率、已实现收益或浮盈统计。
+func (s *Store) applyReferencePerformance(ctx context.Context, item *model.StockRecommendation) error {
+	window, err := s.recommendationWindow(ctx, item.Symbol, item.Date)
+	if err != nil {
+		return err
+	}
+	item.EntryPrice, item.LatestPrice, item.ChangePct = recommendationPerformance(window.entryOpen, window.lastClose)
+	item.TrackedDays = window.days
+	item.ReferenceOnly = true
+	if window.exited {
+		item.ExitReason = window.exitReason
+	}
+	return nil
 }
 
 func (s *Store) latestPositionReferencePrice(ctx context.Context, symbol string) (*float64, error) {

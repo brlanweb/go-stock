@@ -150,11 +150,13 @@ export interface Recommendation {
   latest_price: number | null
   change_pct: number | null
   tracked_days: number
-  // AI 实际退出优先；历史无生命周期记录时才使用 MA10/最大追踪天数模拟退出
+  // 真实生命周期：AI/硬风控退出后冻结；无生命周期记录时收益为参考走势口径
   exited: boolean
   exit_reason?: string
   position_status?: 'pending_entry' | 'holding' | 'exited' | 'expired'
   settled: boolean
+  // 参考走势口径（无生命周期记录），仅供复盘展示，不进统计
+  reference_only?: boolean
 }
 
 // 蒙特卡洛模拟：基于最近 250 个真实日收益率有放回抽样的价格路径分布（确定性种子）。
