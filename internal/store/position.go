@@ -22,21 +22,23 @@ const PositionEntryGraceDays = 2
 
 // Position 是一只 AI 推荐股的完整生命周期记录。
 type Position struct {
-	ID           int64    `json:"id"`
-	Symbol       string   `json:"symbol"`
-	Code         string   `json:"code"`
-	Name         string   `json:"name"`
-	PickDate     string   `json:"pick_date"`
-	AnalysisDate string   `json:"analysis_date"`
-	Status       string   `json:"status"`
-	EntryDate    string   `json:"entry_date,omitempty"`
-	EntryPrice   *float64 `json:"entry_price"`
-	ExitDate     string   `json:"exit_date,omitempty"`
-	ExitPrice    *float64 `json:"exit_price"`
-	ExitReason   string   `json:"exit_reason,omitempty"`
-	HoldDays     int      `json:"hold_days"`
-	CreatedAt    string   `json:"created_at"`
-	UpdatedAt    string   `json:"updated_at"`
+	ID             int64    `json:"id"`
+	Symbol         string   `json:"symbol"`
+	Code           string   `json:"code"`
+	Name           string   `json:"name"`
+	PickDate       string   `json:"pick_date"`
+	AnalysisDate   string   `json:"analysis_date"`
+	Status         string   `json:"status"`
+	EntryDate      string   `json:"entry_date,omitempty"`
+	EntryPrice     *float64 `json:"entry_price"`
+	ExitDate       string   `json:"exit_date,omitempty"`
+	ExitPrice      *float64 `json:"exit_price"`
+	ExitReason     string   `json:"exit_reason,omitempty"`
+	HoldDays       int      `json:"hold_days"`
+	ReferencePrice *float64 `json:"reference_price"`
+	ChangePct      *float64 `json:"change_pct"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
 }
 
 const positionSelectColumns = `p.id,p.symbol,COALESCE(b.code,''),COALESCE(b.name,''),
@@ -88,7 +90,11 @@ func (s *Store) ActivePositions(ctx context.Context) ([]Position, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scanPositions(rows)
+	items, err := scanPositions(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichPositionPerformance(ctx, items)
 }
 
 // RecentPositions 返回最近的持仓记录（含已退出与已过期），供前端复盘展示。
@@ -102,7 +108,35 @@ func (s *Store) RecentPositions(ctx context.Context, limit int) ([]Position, err
 	if err != nil {
 		return nil, err
 	}
-	return scanPositions(rows)
+	items, err := scanPositions(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichPositionPerformance(ctx, items)
+}
+
+func (s *Store) enrichPositionPerformance(ctx context.Context, items []Position) ([]Position, error) {
+	for i := range items {
+		item := &items[i]
+		if item.EntryPrice == nil || *item.EntryPrice <= 0 {
+			continue
+		}
+		var err error
+		switch item.Status {
+		case PositionExited:
+			item.ReferencePrice = item.ExitPrice
+		case PositionHolding:
+			item.ReferencePrice, err = s.latestPositionReferencePrice(ctx, item.Symbol)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if item.ReferencePrice != nil && *item.ReferencePrice > 0 {
+			value := (*item.ReferencePrice / *item.EntryPrice - 1) * 100
+			item.ChangePct = &value
+		}
+	}
+	return items, nil
 }
 
 // MarkPositionEntered 把持仓从 pending_entry 推进到 holding，并记录建仓日与建仓参考价。
@@ -165,6 +199,7 @@ type PositionSettlement struct {
 	ExitPrice  *float64
 	ExitDate   string
 	ExitReason string
+	HoldDays   int
 }
 
 // PositionSettlementsByAnalysisDate 返回某个推荐日对应的持仓结算结果（按 symbol 索引）。
@@ -172,7 +207,7 @@ type PositionSettlement struct {
 // 不再按技术规则继续追踪；expired（未建仓）标的不参与收益统计。
 func (s *Store) PositionSettlementsByAnalysisDate(ctx context.Context, analysisDate string) (map[string]PositionSettlement, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT symbol,status,COALESCE(DATE_FORMAT(entry_date,'%Y-%m-%d'),''),entry_price,exit_price,COALESCE(DATE_FORMAT(exit_date,'%Y-%m-%d'),''),exit_reason
+		`SELECT symbol,status,COALESCE(DATE_FORMAT(entry_date,'%Y-%m-%d'),''),entry_price,exit_price,COALESCE(DATE_FORMAT(exit_date,'%Y-%m-%d'),''),exit_reason,hold_days
 		 FROM position WHERE analysis_date=?`, analysisDate)
 	if err != nil {
 		return nil, err
@@ -183,7 +218,7 @@ func (s *Store) PositionSettlementsByAnalysisDate(ctx context.Context, analysisD
 		var symbol string
 		var item PositionSettlement
 		var entryPrice, exitPrice sql.NullFloat64
-		if err := rows.Scan(&symbol, &item.Status, &item.EntryDate, &entryPrice, &exitPrice, &item.ExitDate, &item.ExitReason); err != nil {
+		if err := rows.Scan(&symbol, &item.Status, &item.EntryDate, &entryPrice, &exitPrice, &item.ExitDate, &item.ExitReason, &item.HoldDays); err != nil {
 			return nil, err
 		}
 		if entryPrice.Valid {

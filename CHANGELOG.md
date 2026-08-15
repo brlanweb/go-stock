@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-15
+
+### Fixed
+
+- Restrict official trend-trading performance to persisted position lifecycles: legacy recommendations without a position no longer enter win rate, realized return, floating return, or equity-curve statistics.
+- Separate exited realized performance from holding unrealized performance, add lifecycle status counts and detailed position rows, and label summed trade-return points as a strategy diagnostic rather than an account return.
+- Remove mixed actual/simulated performance panels from the Home and Recommendations views; legacy recommendation rows remain available for historical review and are explicitly marked as recommendation-only records.
+
+### Database
+
+- No database schema or DML changes relative to v1.2.0.
+
 ## [1.2.0] - 2026-08-15
 
 ### Added
@@ -76,7 +88,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/brlanweb/go-stock/releases/tag/v1.1.0

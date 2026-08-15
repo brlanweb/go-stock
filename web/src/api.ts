@@ -208,6 +208,8 @@ export interface Position {
   exit_price: number | null
   exit_reason?: string
   hold_days: number
+  reference_price: number | null
+  change_pct: number | null
   created_at: string
   updated_at: string
 }
@@ -220,15 +222,28 @@ export interface EntryAdviceResponse {
 
 export interface RecommendationStats {
   total_days: number
+  lifecycle_picks: number
+  pending_picks: number
+  holding_picks: number
+  exited_picks: number
+  expired_picks: number
   frozen_picks: number
   tracking_picks: number
   wins: number
+  losses: number
+  breakeven: number
   win_rate: number | null
   avg_change_pct: number | null
   sum_change_pct: number | null
   median_pct: number | null
   avg_win_pct: number | null
   avg_loss_pct: number | null
+  gross_profit_pct: number | null
+  gross_loss_pct: number | null
+  profit_factor: number | null
+  unrealized_sum_pct: number | null
+  unrealized_avg_pct: number | null
+  avg_hold_days: number | null
   best_pct: number | null
   best_name: string
   worst_pct: number | null

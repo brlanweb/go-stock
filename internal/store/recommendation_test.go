@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -216,5 +217,38 @@ func TestRecommendationPerformance(t *testing.T) {
 	entry, latest, changePct = recommendationPerformance(sql.NullFloat64{}, sql.NullFloat64{Float64: 12.5, Valid: true})
 	if entry != nil || latest == nil || changePct != nil {
 		t.Fatalf("expected incomplete performance data: entry=%v latest=%v change=%v", entry, latest, changePct)
+	}
+}
+
+func TestApplyRecommendationPerformanceIgnoresRecommendationWithoutLifecycle(t *testing.T) {
+	store := &Store{}
+	item := model.StockRecommendation{Date: "2026-07-29", Symbol: "SZ301536"}
+
+	if err := store.applyRecommendationPerformance(context.Background(), &item, map[string]PositionSettlement{}); err != nil {
+		t.Fatalf("legacy recommendation without lifecycle must be ignored: %v", err)
+	}
+	if item.Settled || item.Exited || item.ChangePct != nil || item.EntryPrice != nil || item.LatestPrice != nil {
+		t.Fatalf("recommendation without lifecycle must not become a trading result: %+v", item)
+	}
+}
+
+func TestApplyRecommendationPerformanceFreezesExitedLifecycle(t *testing.T) {
+	entry, exit := 100.0, 112.5
+	item := model.StockRecommendation{Date: "2026-08-01", Symbol: "SH600000"}
+	settlements := map[string]PositionSettlement{
+		item.Symbol: {
+			Status: PositionExited, EntryDate: "2026-08-03", EntryPrice: &entry,
+			ExitDate: "2026-08-06", ExitPrice: &exit, ExitReason: "AI exit", HoldDays: 4,
+		},
+	}
+
+	if err := (&Store{}).applyRecommendationPerformance(context.Background(), &item, settlements); err != nil {
+		t.Fatal(err)
+	}
+	if !item.Settled || !item.Exited || item.ChangePct == nil || *item.ChangePct != 12.5 {
+		t.Fatalf("exited lifecycle must freeze realized performance: %+v", item)
+	}
+	if item.TrackedDays != 4 || item.ExitReason != "AI exit" || item.PositionStatus != PositionExited {
+		t.Fatalf("unexpected exited lifecycle metadata: %+v", item)
 	}
 }

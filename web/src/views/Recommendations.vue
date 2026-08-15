@@ -1,19 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationPerformance, type RecommendationRiskPolicy, type RecommendationShadowStats, type RecommendationStats } from '../api'
+import { api, fmt, fmtPct, pctClass, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationRiskPolicy, type RecommendationStats } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
 const activeDate = ref('')
 const items = ref<Recommendation[]>([])
-const performance = ref<RecommendationPerformance[]>([])
 const loading = ref(false)
 const message = ref('')
 const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
 const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
-const shadowStats = ref<RecommendationShadowStats[]>([])
 
 // 盘中趋势持仓分析（30分钟8档，建仓与退出双阶段）
 const entryAdvice = ref<EntryAdviceResponse | null>(null)
@@ -115,10 +113,6 @@ async function reloadMonteCarlo() {
   }
 }
 
-const shadowStrategyLabels: Record<string, string> = { ai: 'AI 推荐', trend: '趋势基线', low_risk: '低风险基线' }
-// 至少一组策略有冻结样本才展示对照，避免上线初期一排空数据。
-const shadowVisible = computed(() => shadowStats.value.some(item => item.frozen_picks > 0))
-
 const phaseLabel: Record<string, string> = { up: '上升', range: '震荡', down: '下降' }
 // 候选风险上限由最近一次 AI 复盘的市场阶段自动决定：up 85 / range 75 / down 65，无复盘 70。
 const riskPolicyText = computed(() => {
@@ -141,57 +135,6 @@ function riskClass(value: number | null | undefined) {
   return 'risk-high'
 }
 
-// 最近推荐日的有效收益样本：未建仓标的不计入，AI 退出后按退出价冻结。
-const overall = computed(() => {
-  let stocks = 0
-  let sum = 0
-  let counted = 0
-  for (const p of performance.value) {
-    stocks += p.stocks
-    if (p.sum_change_pct != null) {
-      sum += p.sum_change_pct
-      counted += p.stocks
-    }
-  }
-  return { stocks, counted, sum: counted > 0 ? sum : null, avg: counted > 0 ? sum / counted : null }
-})
-
-// 30 个交易日图表：每个推荐日 3 只股票按同一追踪口径的涨跌幅求和。
-const chartData = ref<RecommendationPerformance[]>([])
-
-const chart = computed(() => {
-  const rows = [...chartData.value].reverse().filter(p => p.sum_change_pct != null)
-  const values = rows.map(p => p.sum_change_pct as number)
-  const max = Math.max(...values, 0.5)
-  const min = Math.min(...values, -0.5)
-  const span = max - min
-  const width = 940
-  const height = 180
-  const padTop = 14
-  const padBottom = 24
-  const plotH = height - padTop - padBottom
-  const zeroY = padTop + (max / span) * plotH
-  const step = rows.length > 0 ? width / rows.length : width
-  const barW = Math.max(4, Math.min(26, step * 0.55))
-  const bars = rows.map((p, i) => {
-    const value = p.sum_change_pct as number
-    const h = Math.max(1, (Math.abs(value) / span) * plotH)
-    return {
-      date: p.date,
-      label: p.date.slice(5),
-      value,
-      finished: p.finished,
-      x: step * i + (step - barW) / 2,
-      y: value >= 0 ? zeroY - h : zeroY,
-      w: barW,
-      h,
-      up: value >= 0
-    }
-  })
-  const labelEvery = Math.max(1, Math.ceil(rows.length / 10))
-  return { width, height, zeroY, bars, step, labelEvery, max, min }
-})
-
 async function loadDate(date: string) {
   activeDate.value = date
   loading.value = true
@@ -210,9 +153,6 @@ async function loadDate(date: string) {
 async function refreshDates() {
   riskPolicy.value = await api.recommendationRiskPolicy().catch(() => null)
   stats.value = await api.recommendationStats(60).catch(() => null)
-  shadowStats.value = await api.recommendationShadowStats(60).catch(() => [] as RecommendationShadowStats[])
-  performance.value = await api.recommendationPerformance(5).catch(() => [] as RecommendationPerformance[])
-  chartData.value = await api.recommendationPerformance(30).catch(() => [] as RecommendationPerformance[])
   dates.value = await api.recommendationHistory(365).catch(() => [] as string[])
   if (dates.value.length) await loadDate(dates.value[0])
 }
@@ -314,69 +254,19 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div v-if="stats && stats.frozen_picks > 0" class="stats-bar">
+      <div v-if="stats" class="stats-bar">
         <div class="stat-cell hero">
-          <small>个股胜率<em>近 {{ stats.total_days }} 个推荐日</em></small>
+          <small>已退出胜率<em>仅真实生命周期</em></small>
           <b :class="(stats.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats.win_rate == null ? '—' : stats.win_rate.toFixed(1) + '%' }}</b>
-          <span>{{ stats.wins }} 胜 / {{ stats.frozen_picks }} 只已冻结</span>
+          <span>{{ stats.wins || 0 }} 胜 / {{ stats.losses || 0 }} 负 / {{ stats.breakeven || 0 }} 平</span>
         </div>
-        <div class="stat-cell hero">
-          <small>单日组合胜率<em>3 只求和为正</em></small>
-          <b :class="(stats.day_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats.day_win_rate == null ? '—' : stats.day_win_rate.toFixed(1) + '%' }}</b>
-          <span>{{ stats.day_wins }} 胜 / {{ stats.day_frozen }} 日已冻结</span>
-        </div>
-        <div class="stat-cell"><small>平均收益</small><b :class="pctClass(stats.avg_change_pct)">{{ fmtSigned(stats.avg_change_pct) }}</b></div>
-        <div class="stat-cell"><small>中位数</small><b :class="pctClass(stats.median_pct)">{{ fmtSigned(stats.median_pct) }}</b></div>
-        <div class="stat-cell"><small>盈亏比</small><b>{{ stats.avg_win_pct != null && stats.avg_loss_pct != null && stats.avg_loss_pct !== 0 ? (stats.avg_win_pct / -stats.avg_loss_pct).toFixed(2) : '—' }}</b><span>均盈 {{ fmtSigned(stats.avg_win_pct) }} / 均亏 {{ fmtSigned(stats.avg_loss_pct) }}</span></div>
-        <div class="stat-cell"><small>累计收益点数</small><b :class="pctClass(stats.sum_change_pct)">{{ fmtSigned(stats.sum_change_pct, ' 点') }}</b><span>追踪中 {{ stats.tracking_picks }} 只未计入</span></div>
-        <div class="stat-cell"><small>最佳</small><b class="up">{{ fmtSigned(stats.best_pct) }}</b><span>{{ stats.best_name || '—' }}</span></div>
-        <div class="stat-cell"><small>最差</small><b class="down">{{ fmtSigned(stats.worst_pct) }}</b><span>{{ stats.worst_name || '—' }}</span></div>
-      </div>
-
-      <div v-if="shadowVisible" class="shadow-strip">
-        <div class="perf-caption"><b>AI vs 确定性基线</b><small>同一候选池、同一趋势退出冻结口径；用于观测 AI 超额，非投资建议</small></div>
-        <div class="shadow-table">
-          <div class="shadow-row head"><span>策略</span><span>样本日</span><span>已冻结</span><span>个股胜率</span><span>日胜率</span><span>平均收益</span><span>累计点数</span></div>
-          <div v-for="item in shadowStats" :key="item.strategy" class="shadow-row" :class="{ hero: item.strategy === 'ai' }">
-            <span>{{ shadowStrategyLabels[item.strategy] || item.strategy }}</span>
-            <span>{{ item.total_days }}</span>
-            <span>{{ item.frozen_picks }}<small v-if="item.tracking_picks"> +{{ item.tracking_picks }}追踪</small></span>
-            <span :class="(item.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ item.win_rate == null ? '—' : item.win_rate.toFixed(1) + '%' }}</span>
-            <span :class="(item.day_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ item.day_win_rate == null ? '—' : item.day_win_rate.toFixed(1) + '%' }}</span>
-            <span :class="pctClass(item.avg_change_pct)">{{ item.avg_change_pct == null ? '—' : `${item.avg_change_pct >= 0 ? '+' : ''}${item.avg_change_pct.toFixed(2)}%` }}</span>
-            <span :class="pctClass(item.sum_change_pct)">{{ item.sum_change_pct == null ? '—' : `${item.sum_change_pct >= 0 ? '+' : ''}${item.sum_change_pct.toFixed(2)} 点` }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="chart.bars.length" class="chart-strip">
-        <div class="perf-caption"><b>近 30 个推荐日每日组合涨跌</b><small>每日 3 只推荐股按建仓日开盘价买入的涨跌幅求和；红涨绿跌，浅色为追踪中，点击柱体查看当日明细</small></div>
-        <svg class="perf-chart" :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" role="img" aria-label="近30个推荐日组合涨跌柱状图">
-          <line :x1="0" :y1="chart.zeroY" :x2="chart.width" :y2="chart.zeroY" class="zero-line" />
-          <g v-for="(bar, i) in chart.bars" :key="bar.date" class="bar-group" @click="loadDate(bar.date)">
-            <rect :x="chart.step * i" y="0" :width="chart.step" :height="chart.height" class="bar-hit" />
-            <rect :x="bar.x" :y="bar.y" :width="bar.w" :height="bar.h" :class="['bar', bar.up ? 'up' : 'down', { tracking: !bar.finished, active: bar.date === activeDate }]">
-              <title>{{ bar.date }}：{{ bar.value >= 0 ? '+' : '' }}{{ bar.value.toFixed(2) }} 点{{ bar.finished ? '（已冻结）' : '（追踪中）' }}</title>
-            </rect>
-            <text v-if="i % chart.labelEvery === 0" :x="chart.step * i + chart.step / 2" :y="chart.height - 8" class="bar-label">{{ bar.label }}</text>
-          </g>
-        </svg>
-      </div>
-
-      <div v-if="performance.length" class="perf-strip">
-        <div class="perf-caption"><b>近 5 个推荐日组合表现</b><small>只汇总已实际/模拟建仓的有效样本；AI 标记退出后收益冻结</small></div>
-        <div class="perf-cards">
-          <div class="perf-card total">
-            <small>合计 {{ overall.stocks }} 只<i class="tracking">近 5 个推荐日</i></small>
-            <b :class="pctClass(overall.sum)">{{ overall.sum == null ? '—' : `${overall.sum >= 0 ? '+' : ''}${overall.sum.toFixed(2)}` }}<em> 点</em></b>
-            <span :class="pctClass(overall.avg)">均 {{ fmtPct(overall.avg) }}</span>
-          </div>
-          <button v-for="p in performance" :key="p.date" class="perf-card" :class="{ active: p.date === activeDate }" @click="loadDate(p.date)">
-            <small>{{ p.date.slice(5) }}<i v-if="p.finished" class="frozen">已退出</i><i v-else class="tracking">第 {{ p.tracked_days }} 天</i></small>
-            <b :class="pctClass(p.sum_change_pct)">{{ p.sum_change_pct == null ? '—' : `${p.sum_change_pct >= 0 ? '+' : ''}${p.sum_change_pct.toFixed(2)}` }}<em> 点</em></b>
-            <span :class="pctClass(p.avg_change_pct)">均 {{ fmtPct(p.avg_change_pct) }}</span>
-          </button>
-        </div>
+        <div class="stat-cell hero"><small>已实现收益合计</small><b :class="pctClass(stats.sum_change_pct)">{{ fmtSigned(stats.sum_change_pct) }}</b><span>{{ stats.frozen_picks }} 笔有效退出，非账户收益率</span></div>
+        <div class="stat-cell"><small>持有中浮盈</small><b :class="pctClass(stats.unrealized_sum_pct)">{{ fmtSigned(stats.unrealized_sum_pct) }}</b><span>{{ stats.holding_picks || 0 }} 笔 · 均 {{ fmtSigned(stats.unrealized_avg_pct) }}</span></div>
+        <div class="stat-cell"><small>单笔平均 / 中位数</small><b :class="pctClass(stats.avg_change_pct)">{{ fmtSigned(stats.avg_change_pct) }}</b><span>中位数 {{ fmtSigned(stats.median_pct) }}</span></div>
+        <div class="stat-cell"><small>标准盈亏因子</small><b>{{ stats.profit_factor == null ? (stats.wins > 0 && stats.losses === 0 ? '∞' : '—') : stats.profit_factor.toFixed(2) }}</b><span>总盈 {{ fmtSigned(stats.gross_profit_pct) }} / 总亏 {{ fmtSigned(stats.gross_loss_pct) }}</span></div>
+        <div class="stat-cell"><small>生命周期分布</small><b>{{ stats.lifecycle_picks || 0 }}</b><span>待建 {{ stats.pending_picks || 0 }} · 持有 {{ stats.holding_picks || 0 }} · 退出 {{ stats.exited_picks || 0 }} · 过期 {{ stats.expired_picks || 0 }}</span></div>
+        <div class="stat-cell"><small>平均持有</small><b>{{ stats.avg_hold_days == null ? '—' : stats.avg_hold_days.toFixed(1) + ' 天' }}</b><span>仅统计已退出交易</span></div>
+        <div class="stat-cell"><small>已退出极值</small><b><i class="up">{{ fmtSigned(stats.best_pct) }}</i> / <i class="down">{{ fmtSigned(stats.worst_pct) }}</i></b><span>{{ stats.best_name || '—' }} / {{ stats.worst_name || '—' }}</span></div>
       </div>
 
       <div class="reco-body">
@@ -394,7 +284,7 @@ onMounted(async () => {
                 <span class="rank">{{ item.rank }}</span>
                 <span class="stock"><b>{{ item.name }}</b><small>{{ item.code }}</small></span>
                 <span>{{ fmt(item.entry_price) }}</span>
-                <span>{{ fmt(item.latest_price) }}<small class="track-tag" :title="item.exit_reason || ''">{{ item.position_status === 'expired' ? '未建仓过期' : item.position_status === 'pending_entry' ? '等待建仓' : item.exited ? 'AI已退出' : item.position_status === 'holding' ? `持有${item.tracked_days}天` : `模拟第${item.tracked_days}天` }}</small></span>
+                <span>{{ fmt(item.latest_price) }}<small class="track-tag" :title="item.exit_reason || ''">{{ item.position_status === 'expired' ? '未建仓过期' : item.position_status === 'pending_entry' ? '等待建仓' : item.exited ? 'AI已退出' : item.position_status === 'holding' ? `持有${item.tracked_days}天` : '仅推荐记录' }}</small></span>
                 <span :class="pctClass(item.change_pct)">{{ fmtPct(item.change_pct) }}</span>
                 <span class="score">{{ item.probability.toFixed(1) }}</span>
                 <span class="risk" :class="riskClass(item.risk_score)">{{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</span>
@@ -428,7 +318,7 @@ onMounted(async () => {
                 <p v-if="mcResult" class="mc-note">基于最近 {{ mcResult.sample_days }} 个真实日收益率有放回抽样，模拟 {{ mcResult.paths }} 条未来 {{ mcResult.days }} 个交易日路径（基准价 {{ mcResult.base_price.toFixed(2) }}，确定性种子可复现）。模拟不构成投资建议。</p>
               </div>
             </template>
-            <p class="disclaimer">说明：每日盘前从趋势推荐中选出一只首选加入自选生命周期。入池后 D0+2 个交易日内由 AI 寻找建仓区间；建仓后每 30 分钟综合大盘、板块、个股判断趋势是否可持续，并给出持有、减仓或退出区间。AI 标记退出后立即移出自选，收益按退出参考价冻结且继续保留在推荐历史中；从未建仓的标的不计收益。没有生命周期记录的历史推荐沿用次日开盘建仓、MA10 趋势破位退出的模拟口径。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：每日盘前从趋势推荐中选出一只首选加入自选生命周期。入池后 D0+2 个交易日内由 AI 寻找建仓区间；建仓后每 30 分钟综合大盘、板块、个股判断趋势是否可持续，并给出持有、减仓或退出区间。AI 或确定性硬风控标记退出后立即移出自选，收益按退出参考价冻结且继续保留在推荐历史中；从未建仓的标的不计收益。没有生命周期记录的旧推荐仅供历史复盘，不进入胜率、已实现收益或持仓浮盈统计。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>

@@ -464,63 +464,86 @@ func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model
 	return out, nil
 }
 
-// applyRecommendationPerformance 填充单只推荐股的收益追踪结果。
-// 真实持仓记录优先于技术规则模拟：AI 判定退出后收益冻结在退出价，
-// 未建仓的标的不产生收益样本（Settled=false，不计入胜率统计）。
+// applyRecommendationPerformance 只按真实持仓生命周期填充收益。
+// 没有 position 记录的历史推荐只是候选历史，不代表发生过交易，不能进入
+// 胜率、累计收益或权益曲线。holding 使用最新市场快照计算浮盈；只有 exited
+// 使用 AI/硬规则给出的退出参考价冻结收益。
 func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.StockRecommendation, settlements map[string]PositionSettlement) error {
 	settlement, hasPosition := settlements[item.Symbol]
-	if hasPosition {
-		item.PositionStatus = settlement.Status
-		switch settlement.Status {
-		// 宽限期内未等到建仓点：从未持有，不产生收益样本。
-		case PositionExpired:
-			item.ExitReason = settlement.ExitReason
+	if !hasPosition {
+		return nil
+	}
+	item.PositionStatus = settlement.Status
+	switch settlement.Status {
+	case PositionExpired:
+		item.ExitReason = settlement.ExitReason
+		return nil
+	case PositionPendingEntry:
+		return nil
+	case PositionExited:
+		if settlement.EntryPrice == nil || settlement.ExitPrice == nil || *settlement.EntryPrice <= 0 {
 			return nil
-		// 盘前入池、盘中尚未给出建仓建议：还没有真实成本，暂不统计收益。
-		case PositionPendingEntry:
-			return nil
-		// AI 已建议退出：收益按真实建仓价与退出价冻结，不再跟随后续行情。
-		case PositionExited:
-			if settlement.EntryPrice != nil && settlement.ExitPrice != nil && *settlement.EntryPrice > 0 {
-				entry, exit := *settlement.EntryPrice, *settlement.ExitPrice
-				pct := (exit/entry - 1) * 100
-				item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, &exit, &pct
-				item.Exited, item.Settled = true, true
-				item.ExitReason = settlement.ExitReason
-				startDate := item.Date
-				if settlement.EntryDate != "" {
-					startDate = settlement.EntryDate
-				}
-				days, err := s.TradingDaysSince(ctx, startDate, settlement.ExitDate)
-				if err != nil {
-					return err
-				}
-				item.TrackedDays = days + 1
-				return nil
+		}
+		entry, exit := *settlement.EntryPrice, *settlement.ExitPrice
+		pct := (exit/entry - 1) * 100
+		item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, &exit, &pct
+		item.Exited, item.Settled = true, true
+		item.ExitReason = settlement.ExitReason
+		item.TrackedDays = settlement.HoldDays
+		if item.TrackedDays <= 0 {
+			startDate := item.Date
+			if settlement.EntryDate != "" {
+				startDate = settlement.EntryDate
 			}
+			days, err := s.TradingDaysSince(ctx, startDate, settlement.ExitDate)
+			if err != nil {
+				return err
+			}
+			item.TrackedDays = days + 1
 		}
-	}
-
-	window, err := s.recommendationWindow(ctx, item.Symbol, item.Date)
-	if err != nil {
-		return err
-	}
-	item.EntryPrice, item.LatestPrice, item.ChangePct = recommendationPerformance(window.entryOpen, window.lastClose)
-	item.TrackedDays = window.days
-	item.Exited = window.exited
-	item.ExitReason = window.exitReason
-	// 已实际建仓且仍持有：用真实建仓成本替换“次日开盘价”假设，
-	// 浮动收益随最新收盘价更新，退出前不冻结。
-	if hasPosition && settlement.Status == PositionHolding && settlement.EntryPrice != nil && *settlement.EntryPrice > 0 {
+		return nil
+	case PositionHolding:
+		if settlement.EntryPrice == nil || *settlement.EntryPrice <= 0 {
+			return nil
+		}
+		latest, err := s.latestPositionReferencePrice(ctx, item.Symbol)
+		if err != nil {
+			return err
+		}
+		if latest == nil || *latest <= 0 {
+			return nil
+		}
 		entry := *settlement.EntryPrice
-		item.EntryPrice = &entry
-		if item.LatestPrice != nil {
-			pct := (*item.LatestPrice/entry - 1) * 100
-			item.ChangePct = &pct
+		pct := (*latest/entry - 1) * 100
+		item.EntryPrice, item.LatestPrice, item.ChangePct = &entry, latest, &pct
+		item.TrackedDays = settlement.HoldDays
+		item.Exited, item.Settled = false, true
+		return nil
+	default:
+		return nil
+	}
+}
+
+func (s *Store) latestPositionReferencePrice(ctx context.Context, symbol string) (*float64, error) {
+	var price sql.NullFloat64
+	err := s.DB.QueryRowContext(ctx, `SELECT price FROM market_snapshot WHERE symbol=? ORDER BY snapshot_at DESC LIMIT 1`, symbol).Scan(&price)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if !price.Valid || price.Float64 <= 0 {
+		err = s.DB.QueryRowContext(ctx, `SELECT close FROM kline_daily WHERE symbol=? ORDER BY trade_date DESC LIMIT 1`, symbol).Scan(&price)
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
-	item.Settled = item.ChangePct != nil
-	return nil
+	if !price.Valid || price.Float64 <= 0 {
+		return nil, nil
+	}
+	value := price.Float64
+	return &value, nil
 }
 
 // 趋势跟踪退出参数：核心是趋势交易——趋势可持续就继续持有，收盘跌破 10 日
@@ -623,7 +646,7 @@ func trailingAverage(values []float64, period int) (float64, bool) {
 	return sum / float64(period), true
 }
 
-// RecommendationDailyPerformance 是“最近 N 个推荐日全部买入”的组合口径统计。
+// RecommendationDailyPerformance 按推荐日汇总真实生命周期交易表现。
 type RecommendationDailyPerformance struct {
 	Date         string   `json:"date"`
 	Stocks       int      `json:"stocks"`
@@ -633,8 +656,9 @@ type RecommendationDailyPerformance struct {
 	AvgChangePct *float64 `json:"avg_change_pct"`
 }
 
-// RecommendationRecentPerformance 汇总最近 days 个推荐日的窗口收益：
-// 假设每只推荐股按建仓日（推荐日后首个交易日）开盘价等权买入，输出各日合计与平均涨跌点数。
+// RecommendationRecentPerformance 汇总最近 days 个推荐日的真实生命周期收益。
+// holding 使用最新市场快照展示浮盈，exited 使用冻结收益；没有 position 的推荐、
+// pending_entry 和 expired 不产生收益样本。
 func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) ([]RecommendationDailyPerformance, error) {
 	if days <= 0 || days > 30 {
 		days = recommendationPerfDefault
@@ -683,8 +707,8 @@ func (s *Store) RecommendationRecentPerformance(ctx context.Context, days int) (
 	return out, nil
 }
 
-// recommendationPerformance 将建仓日开盘价与追踪窗口内最后收盘价转换为展示数据。
-// 无历史行情或建仓日价格无效时不计算收益率，前端据此显示“-”。
+// recommendationPerformance 将两个有效价格转换为收益展示数据。
+// 该函数仍供影子策略研究使用，不参与真实持仓生命周期统计。
 func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float64, *float64, *float64) {
 	var entry, latest, changePct *float64
 	if entryPrice.Valid && entryPrice.Float64 > 0 {
@@ -702,31 +726,44 @@ func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float6
 	return entry, latest, changePct
 }
 
-// RecommendationStats 是 AI 趋势推荐的整体成功率评估，仅统计已冻结
-// （趋势退出结算，或达最大追踪天数）的推荐，避免追踪中的浮动数据污染胜率。
+// RecommendationStats 是真实持仓生命周期的整体表现统计。
+// 只有 exited 的有效结算进入胜率和已实现收益，holding 单独统计浮盈。
 type RecommendationStats struct {
-	TotalDays     int      `json:"total_days"`
-	FrozenPicks   int      `json:"frozen_picks"`
-	TrackingPicks int      `json:"tracking_picks"`
-	Wins          int      `json:"wins"`
-	WinRate       *float64 `json:"win_rate"`
-	AvgChangePct  *float64 `json:"avg_change_pct"`
-	SumChangePct  *float64 `json:"sum_change_pct"`
-	MedianPct     *float64 `json:"median_pct"`
-	AvgWinPct     *float64 `json:"avg_win_pct"`
-	AvgLossPct    *float64 `json:"avg_loss_pct"`
-	BestPct       *float64 `json:"best_pct"`
-	BestName      string   `json:"best_name"`
-	WorstPct      *float64 `json:"worst_pct"`
-	WorstName     string   `json:"worst_name"`
-	DayWins       int      `json:"day_wins"`
-	DayFrozen     int      `json:"day_frozen"`
-	DayWinRate    *float64 `json:"day_win_rate"`
+	TotalDays        int      `json:"total_days"`
+	LifecyclePicks   int      `json:"lifecycle_picks"`
+	PendingPicks     int      `json:"pending_picks"`
+	HoldingPicks     int      `json:"holding_picks"`
+	ExitedPicks      int      `json:"exited_picks"`
+	ExpiredPicks     int      `json:"expired_picks"`
+	FrozenPicks      int      `json:"frozen_picks"`
+	TrackingPicks    int      `json:"tracking_picks"`
+	Wins             int      `json:"wins"`
+	Losses           int      `json:"losses"`
+	Breakeven        int      `json:"breakeven"`
+	WinRate          *float64 `json:"win_rate"`
+	AvgChangePct     *float64 `json:"avg_change_pct"`
+	SumChangePct     *float64 `json:"sum_change_pct"`
+	MedianPct        *float64 `json:"median_pct"`
+	AvgWinPct        *float64 `json:"avg_win_pct"`
+	AvgLossPct       *float64 `json:"avg_loss_pct"`
+	GrossProfitPct   *float64 `json:"gross_profit_pct"`
+	GrossLossPct     *float64 `json:"gross_loss_pct"`
+	ProfitFactor     *float64 `json:"profit_factor"`
+	UnrealizedSumPct *float64 `json:"unrealized_sum_pct"`
+	UnrealizedAvgPct *float64 `json:"unrealized_avg_pct"`
+	AvgHoldDays      *float64 `json:"avg_hold_days"`
+	BestPct          *float64 `json:"best_pct"`
+	BestName         string   `json:"best_name"`
+	WorstPct         *float64 `json:"worst_pct"`
+	WorstName        string   `json:"worst_name"`
+	DayWins          int      `json:"day_wins"`
+	DayFrozen        int      `json:"day_frozen"`
+	DayWinRate       *float64 `json:"day_win_rate"`
 }
 
-// RecommendationOverallStats 汇总最近 days 个推荐日的成功率评估。
-// 个股口径：优先采用实际建仓/退出价；无持仓生命周期的历史推荐沿用
-// “次日开盘建仓、趋势破位退出”的模拟口径。组合口径为单日有效收益样本求和。
+// RecommendationOverallStats 汇总最近 days 个推荐日的真实交易表现。
+// 只有 position 生命周期记录参与统计：holding 仅计浮动收益，exited 才进入
+// 胜率和已实现收益；pending_entry、expired 以及纯推荐历史均不产生收益样本。
 func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (RecommendationStats, error) {
 	if days <= 0 || days > 365 {
 		days = 60
@@ -738,8 +775,8 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 	}
 	stats.TotalDays = len(dates)
 	var frozen []float64
-	var winSum, lossSum float64
-	var winCnt, lossCnt int
+	var winSum, lossSum, unrealizedSum float64
+	var winCnt, lossCnt, unrealizedCnt, totalHoldDays int
 	for _, date := range dates {
 		items, err := s.RecommendationsByDate(ctx, date)
 		if err != nil {
@@ -749,6 +786,19 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 		dayFrozen := true
 		dayCounted := 0
 		for _, item := range items {
+			if item.PositionStatus != "" {
+				stats.LifecyclePicks++
+			}
+			switch item.PositionStatus {
+			case PositionPendingEntry:
+				stats.PendingPicks++
+			case PositionHolding:
+				stats.HoldingPicks++
+			case PositionExited:
+				stats.ExitedPicks++
+			case PositionExpired:
+				stats.ExpiredPicks++
+			}
 			// 未产生有效收益样本（盘前入池未建仓、宽限期满未建仓）的标的
 			// 既不计入追踪中也不计入冻结，避免用从未持有的仓位污染胜率。
 			if !item.Settled || item.ChangePct == nil {
@@ -756,12 +806,15 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 			}
 			if !item.Exited {
 				stats.TrackingPicks++
+				unrealizedSum += *item.ChangePct
+				unrealizedCnt++
 				dayFrozen = false
 				continue
 			}
 			pct := *item.ChangePct
 			stats.FrozenPicks++
 			frozen = append(frozen, pct)
+			totalHoldDays += item.TrackedDays
 			daySum += pct
 			dayCounted++
 			if pct > 0 {
@@ -769,8 +822,11 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 				winSum += pct
 				winCnt++
 			} else if pct < 0 {
+				stats.Losses++
 				lossSum += pct
 				lossCnt++
+			} else {
+				stats.Breakeven++
 			}
 			if stats.BestPct == nil || pct > *stats.BestPct {
 				value := pct
@@ -814,10 +870,26 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 	if winCnt > 0 {
 		value := winSum / float64(winCnt)
 		stats.AvgWinPct = &value
+		gross := winSum
+		stats.GrossProfitPct = &gross
 	}
 	if lossCnt > 0 {
 		value := lossSum / float64(lossCnt)
 		stats.AvgLossPct = &value
+		gross := lossSum
+		stats.GrossLossPct = &gross
+		factor := winSum / -lossSum
+		stats.ProfitFactor = &factor
+	}
+	if unrealizedCnt > 0 {
+		total := unrealizedSum
+		avg := unrealizedSum / float64(unrealizedCnt)
+		stats.UnrealizedSumPct = &total
+		stats.UnrealizedAvgPct = &avg
+	}
+	if stats.FrozenPicks > 0 {
+		value := float64(totalHoldDays) / float64(stats.FrozenPicks)
+		stats.AvgHoldDays = &value
 	}
 	if stats.DayFrozen > 0 {
 		value := float64(stats.DayWins) / float64(stats.DayFrozen) * 100
