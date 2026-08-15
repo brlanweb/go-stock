@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-08-15
+
+### Fixed
+
+- Show `0.0%` with an explicit “no real exits” message instead of an unexplained dash when the actual lifecycle has not exited any positions yet.
+- Add a separately labeled historical reference win rate and reference return-point total to Home and Recommendations, using only legacy trend-rule results and never mixing them into actual lifecycle performance.
+- Preserve the actual-trading contract: only real `position` exits affect the official win rate, realized return, and equity curve.
+
+### Database
+
+- No database schema or DML changes relative to v1.2.3.
+
 ## [1.2.3] - 2026-08-15
 
 ### Fixed
@@ -106,7 +118,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.3...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.4...HEAD
+[1.2.4]: https://github.com/brlanweb/go-stock/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/brlanweb/go-stock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/brlanweb/go-stock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1

@@ -257,14 +257,16 @@ onMounted(async () => {
       <div v-if="stats" class="stats-bar">
         <div class="stat-cell hero">
           <small>已退出胜率<em>仅真实生命周期</em></small>
-          <b :class="(stats.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats.win_rate == null ? '—' : stats.win_rate.toFixed(1) + '%' }}</b>
-          <span>{{ stats.wins || 0 }} 胜 / {{ stats.losses || 0 }} 负 / {{ stats.breakeven || 0 }} 平</span>
+          <b :class="(stats.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats.win_rate == null ? '0.0%' : stats.win_rate.toFixed(1) + '%' }}</b>
+          <span>{{ stats.frozen_picks ? `${stats.wins} 胜 / ${stats.losses} 负 / ${stats.breakeven} 平` : '暂无真实退出样本' }}</span>
         </div>
         <div class="stat-cell hero"><small>已实现收益合计</small><b :class="pctClass(stats.sum_change_pct)">{{ fmtSigned(stats.sum_change_pct) }}</b><span>{{ stats.frozen_picks }} 笔有效退出，非账户收益率</span></div>
         <div class="stat-cell"><small>持有中浮盈</small><b :class="pctClass(stats.unrealized_sum_pct)">{{ fmtSigned(stats.unrealized_sum_pct) }}</b><span>{{ stats.holding_picks || 0 }} 笔 · 均 {{ fmtSigned(stats.unrealized_avg_pct) }}</span></div>
         <div class="stat-cell"><small>单笔平均 / 中位数</small><b :class="pctClass(stats.avg_change_pct)">{{ fmtSigned(stats.avg_change_pct) }}</b><span>中位数 {{ fmtSigned(stats.median_pct) }}</span></div>
         <div class="stat-cell"><small>标准盈亏因子</small><b>{{ stats.profit_factor == null ? (stats.wins > 0 && stats.losses === 0 ? '∞' : '—') : stats.profit_factor.toFixed(2) }}</b><span>总盈 {{ fmtSigned(stats.gross_profit_pct) }} / 总亏 {{ fmtSigned(stats.gross_loss_pct) }}</span></div>
         <div class="stat-cell"><small>生命周期分布</small><b>{{ stats.lifecycle_picks || 0 }}</b><span>待建 {{ stats.pending_picks || 0 }} · 持有 {{ stats.holding_picks || 0 }} · 退出 {{ stats.exited_picks || 0 }} · 过期 {{ stats.expired_picks || 0 }}</span></div>
+        <div class="stat-cell reference"><small>历史参考胜率<em>不计真实交易</em></small><b :class="(stats.reference_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats.reference_win_rate == null ? '0.0%' : stats.reference_win_rate.toFixed(1) + '%' }}</b><span>{{ stats.reference_wins || 0 }} 胜 / {{ stats.reference_losses || 0 }} 负 · {{ stats.reference_frozen_picks || 0 }} 笔退出</span></div>
+        <div class="stat-cell reference"><small>历史参考收益点数</small><b :class="pctClass(stats.reference_sum_change_pct)">{{ fmtSigned(stats.reference_sum_change_pct) }}</b><span>{{ stats.reference_picks || 0 }} 只旧推荐 · 规则模拟</span></div>
         <div class="stat-cell"><small>平均持有</small><b>{{ stats.avg_hold_days == null ? '—' : stats.avg_hold_days.toFixed(1) + ' 天' }}</b><span>仅统计已退出交易</span></div>
         <div class="stat-cell"><small>已退出极值</small><b><i class="up">{{ fmtSigned(stats.best_pct) }}</i> / <i class="down">{{ fmtSigned(stats.worst_pct) }}</i></b><span>{{ stats.best_name || '—' }} / {{ stats.worst_name || '—' }}</span></div>
       </div>
@@ -337,6 +339,8 @@ onMounted(async () => {
 .stats-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(128px,1fr)); gap:8px; margin-top:12px; }
 .stat-cell { display:flex; flex-direction:column; gap:4px; padding:10px 12px; border:1px solid #26324a; background:#131e33; }
 .stat-cell.hero { border-color:#3d4f77; background:#1c2a47; }
+.stat-cell.reference { border-color:#554d39; background:#211f1b; }
+.stat-cell.reference>small { color:#c7ac69; }
 .stat-cell>small { display:flex; align-items:baseline; gap:6px; color:#8895ab; font-size:11px; }
 .stat-cell>small em { color:#5f6d85; font-size:9px; font-style:normal; }
 .stat-cell>b { font-size:20px; font-variant-numeric:tabular-nums; }

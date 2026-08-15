@@ -753,36 +753,78 @@ func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float6
 // RecommendationStats 是真实持仓生命周期的整体表现统计。
 // 只有 exited 的有效结算进入胜率和已实现收益，holding 单独统计浮盈。
 type RecommendationStats struct {
-	TotalDays        int      `json:"total_days"`
-	LifecyclePicks   int      `json:"lifecycle_picks"`
-	PendingPicks     int      `json:"pending_picks"`
-	HoldingPicks     int      `json:"holding_picks"`
-	ExitedPicks      int      `json:"exited_picks"`
-	ExpiredPicks     int      `json:"expired_picks"`
-	FrozenPicks      int      `json:"frozen_picks"`
-	TrackingPicks    int      `json:"tracking_picks"`
-	Wins             int      `json:"wins"`
-	Losses           int      `json:"losses"`
-	Breakeven        int      `json:"breakeven"`
-	WinRate          *float64 `json:"win_rate"`
-	AvgChangePct     *float64 `json:"avg_change_pct"`
-	SumChangePct     *float64 `json:"sum_change_pct"`
-	MedianPct        *float64 `json:"median_pct"`
-	AvgWinPct        *float64 `json:"avg_win_pct"`
-	AvgLossPct       *float64 `json:"avg_loss_pct"`
-	GrossProfitPct   *float64 `json:"gross_profit_pct"`
-	GrossLossPct     *float64 `json:"gross_loss_pct"`
-	ProfitFactor     *float64 `json:"profit_factor"`
-	UnrealizedSumPct *float64 `json:"unrealized_sum_pct"`
-	UnrealizedAvgPct *float64 `json:"unrealized_avg_pct"`
-	AvgHoldDays      *float64 `json:"avg_hold_days"`
-	BestPct          *float64 `json:"best_pct"`
-	BestName         string   `json:"best_name"`
-	WorstPct         *float64 `json:"worst_pct"`
-	WorstName        string   `json:"worst_name"`
-	DayWins          int      `json:"day_wins"`
-	DayFrozen        int      `json:"day_frozen"`
-	DayWinRate       *float64 `json:"day_win_rate"`
+	TotalDays              int      `json:"total_days"`
+	LifecyclePicks         int      `json:"lifecycle_picks"`
+	PendingPicks           int      `json:"pending_picks"`
+	HoldingPicks           int      `json:"holding_picks"`
+	ExitedPicks            int      `json:"exited_picks"`
+	ExpiredPicks           int      `json:"expired_picks"`
+	FrozenPicks            int      `json:"frozen_picks"`
+	TrackingPicks          int      `json:"tracking_picks"`
+	Wins                   int      `json:"wins"`
+	Losses                 int      `json:"losses"`
+	Breakeven              int      `json:"breakeven"`
+	WinRate                *float64 `json:"win_rate"`
+	AvgChangePct           *float64 `json:"avg_change_pct"`
+	SumChangePct           *float64 `json:"sum_change_pct"`
+	MedianPct              *float64 `json:"median_pct"`
+	AvgWinPct              *float64 `json:"avg_win_pct"`
+	AvgLossPct             *float64 `json:"avg_loss_pct"`
+	GrossProfitPct         *float64 `json:"gross_profit_pct"`
+	GrossLossPct           *float64 `json:"gross_loss_pct"`
+	ProfitFactor           *float64 `json:"profit_factor"`
+	UnrealizedSumPct       *float64 `json:"unrealized_sum_pct"`
+	UnrealizedAvgPct       *float64 `json:"unrealized_avg_pct"`
+	AvgHoldDays            *float64 `json:"avg_hold_days"`
+	BestPct                *float64 `json:"best_pct"`
+	BestName               string   `json:"best_name"`
+	WorstPct               *float64 `json:"worst_pct"`
+	WorstName              string   `json:"worst_name"`
+	DayWins                int      `json:"day_wins"`
+	DayFrozen              int      `json:"day_frozen"`
+	DayWinRate             *float64 `json:"day_win_rate"`
+	ReferencePicks         int      `json:"reference_picks"`
+	ReferenceFrozenPicks   int      `json:"reference_frozen_picks"`
+	ReferenceTrackingPicks int      `json:"reference_tracking_picks"`
+	ReferenceWins          int      `json:"reference_wins"`
+	ReferenceLosses        int      `json:"reference_losses"`
+	ReferenceWinRate       *float64 `json:"reference_win_rate"`
+	ReferenceSumChangePct  *float64 `json:"reference_sum_change_pct"`
+	ReferenceAvgChangePct  *float64 `json:"reference_avg_change_pct"`
+}
+
+// addRecommendationReferenceSample 汇总旧推荐的趋势规则参考结果。
+// 这些字段单独展示，绝不并入真实生命周期胜率和收益。
+func addRecommendationReferenceSample(stats *RecommendationStats, item model.StockRecommendation) {
+	if !item.ReferenceOnly || item.ChangePct == nil {
+		return
+	}
+	stats.ReferencePicks++
+	if item.ExitReason == "" {
+		stats.ReferenceTrackingPicks++
+		return
+	}
+	stats.ReferenceFrozenPicks++
+	pct := *item.ChangePct
+	if stats.ReferenceSumChangePct == nil {
+		stats.ReferenceSumChangePct = new(float64)
+	}
+	*stats.ReferenceSumChangePct += pct
+	if pct > 0 {
+		stats.ReferenceWins++
+	} else if pct < 0 {
+		stats.ReferenceLosses++
+	}
+}
+
+func finalizeRecommendationReferenceStats(stats *RecommendationStats) {
+	if stats.ReferenceFrozenPicks == 0 || stats.ReferenceSumChangePct == nil {
+		return
+	}
+	winRate := float64(stats.ReferenceWins) / float64(stats.ReferenceFrozenPicks) * 100
+	avg := *stats.ReferenceSumChangePct / float64(stats.ReferenceFrozenPicks)
+	stats.ReferenceWinRate = &winRate
+	stats.ReferenceAvgChangePct = &avg
 }
 
 // RecommendationOverallStats 汇总最近 days 个推荐日的真实交易表现。
@@ -810,6 +852,10 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 		dayFrozen := true
 		dayCounted := 0
 		for _, item := range items {
+			if item.ReferenceOnly {
+				addRecommendationReferenceSample(&stats, item)
+				continue
+			}
 			if item.PositionStatus != "" {
 				stats.LifecyclePicks++
 			}
@@ -870,6 +916,7 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 			}
 		}
 	}
+	finalizeRecommendationReferenceStats(&stats)
 	if stats.FrozenPicks > 0 {
 		var sum float64
 		for _, pct := range frozen {

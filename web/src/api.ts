@@ -253,6 +253,14 @@ export interface RecommendationStats {
   day_wins: number
   day_frozen: number
   day_win_rate: number | null
+  reference_picks: number
+  reference_frozen_picks: number
+  reference_tracking_picks: number
+  reference_wins: number
+  reference_losses: number
+  reference_win_rate: number | null
+  reference_sum_change_pct: number | null
+  reference_avg_change_pct: number | null
 }
 
 // 影子基线对照：ai 与确定性规则（trend=趋势分前3 / low_risk=低风险前3）
