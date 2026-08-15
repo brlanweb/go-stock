@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-08-15
+
+### Fixed
+
+- Render the historical reference aggregate as return points (`点`) instead of a percentage, preventing the legacy sum from being mistaken for an account return rate.
+
+### Database
+
+- No database schema or DML changes relative to v1.2.4.
+
 ## [1.2.4] - 2026-08-15
 
 ### Fixed
@@ -118,7 +128,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.5...HEAD
+[1.2.5]: https://github.com/brlanweb/go-stock/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/brlanweb/go-stock/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/brlanweb/go-stock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/brlanweb/go-stock/compare/v1.2.1...v1.2.2

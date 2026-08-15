@@ -16,6 +16,11 @@ function signed(value: number | null | undefined, digits = 2) {
   return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}%`
 }
 
+function signedPoints(value: number | null | undefined, digits = 2) {
+  if (value == null) return '—'
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)} 点`
+}
+
 const statusLabels: Record<Position['status'], string> = {
   pending_entry: '等待建仓', holding: '持有中', exited: '已退出', expired: '未建仓过期',
 }
@@ -96,7 +101,7 @@ onMounted(load)
         <article class="metric"><small>平均持有时间</small><b>{{ stats?.avg_hold_days == null ? '—' : `${stats.avg_hold_days.toFixed(1)} 天` }}</b><span>仅统计已退出交易</span></article>
         <article class="metric"><small>生命周期分布</small><b class="lifecycle-count">{{ stats?.lifecycle_picks || 0 }} 笔</b><span>待建 {{ stats?.pending_picks || 0 }} · 持有 {{ stats?.holding_picks || 0 }} · 退出 {{ stats?.exited_picks || 0 }} · 过期 {{ stats?.expired_picks || 0 }}</span></article>
         <article class="metric reference"><small>历史参考胜率</small><b :class="(stats?.reference_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats?.reference_win_rate == null ? '0.0%' : `${stats.reference_win_rate.toFixed(1)}%` }}</b><span>{{ stats?.reference_wins || 0 }} 胜 / {{ stats?.reference_losses || 0 }} 负 · {{ stats?.reference_frozen_picks || 0 }} 笔规则退出</span></article>
-        <article class="metric reference"><small>历史参考收益点数</small><b :class="pctClass(stats?.reference_sum_change_pct)">{{ signed(stats?.reference_sum_change_pct) }}</b><span>{{ stats?.reference_picks || 0 }} 只旧推荐 · 不计入真实交易</span></article>
+        <article class="metric reference"><small>历史参考收益点数</small><b :class="pctClass(stats?.reference_sum_change_pct)">{{ signedPoints(stats?.reference_sum_change_pct) }}</b><span>{{ stats?.reference_picks || 0 }} 只旧推荐 · 不计入真实交易</span></article>
         <article class="metric"><small>已退出极值</small><b class="range"><i class="up">{{ signed(stats?.best_pct) }}</i><em>/</em><i class="down">{{ signed(stats?.worst_pct) }}</i></b><span>{{ stats?.best_name || '—' }} / {{ stats?.worst_name || '—' }}</span></article>
       </section>
 
