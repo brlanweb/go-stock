@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-15
+
+### Added
+
+- Add a dedicated `/rules` archive with a navigable, mobile-friendly record of the market funnel, recommendation constraints, lifecycle state machine, intraday schedule, deterministic risk controls, AI actions, accounting rules, and known limitations.
+- Link the complete rule archive directly below the Home three-pick basket methodology note.
+
+### Changed
+
+- Split the three-pick basket area at the zero axis: positive performance now uses A-share red and negative performance uses green, with matching line segments, points, legend, and restrained solid fills.
+- Clarify that the three-pick basket, historical reference series, and actual position lifecycle are separate statistical scopes and cannot be interpreted as broker account returns.
+
+### Database
+
+- No database schema or DML changes relative to v1.4.0.
+
 ## [1.4.0] - 2026-08-15
 
 ### Fixed
@@ -195,7 +211,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/brlanweb/go-stock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/brlanweb/go-stock/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/brlanweb/go-stock/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/brlanweb/go-stock/compare/v1.3.0...v1.3.1

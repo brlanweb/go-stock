@@ -4,6 +4,7 @@ import App from './App.vue'
 import Dashboard from './views/Dashboard.vue'
 import StockDetail from './views/StockDetail.vue'
 import SectorDetail from './views/SectorDetail.vue'
+import Rules from './views/Rules.vue'
 import './style.css'
 
 const router = createRouter({
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/recommendations', redirect: { path: '/', query: { view: 'reco' } } },
     { path: '/review', redirect: { path: '/', query: { view: 'review' } } },
     { path: '/indicators', redirect: { path: '/', query: { view: 'indicators' } } },
+    { path: '/rules', component: Rules },
     { path: '/sector/:code', component: SectorDetail, props: true },
     { path: '/stock/:symbol', component: StockDetail, props: true }
   ]
