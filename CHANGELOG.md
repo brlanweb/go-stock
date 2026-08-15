@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-08-15
+
+### Changed
+
+- Rebuild the daily three-pick basket chart around its measured container width so desktop and mobile layouts use the available plot area without stretching a fixed SVG canvas.
+- Add a smooth line, restrained zero-based area, horizontal grid, readable responsive date ticks, latest/high/low summaries, and keyboard-accessible point details.
+- Reduce chart height and mobile header density while preserving the existing equal-weight reference-basket calculation.
+
+### Database
+
+- No database schema or DML changes relative to v1.3.1.
+
 ## [1.3.1] - 2026-08-15
 
 ### Changed
@@ -151,20 +163,14 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/brlanweb/go-stock/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/brlanweb/go-stock/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/brlanweb/go-stock/compare/v1.2.5...v1.3.0
 [1.2.5]: https://github.com/brlanweb/go-stock/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/brlanweb/go-stock/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/brlanweb/go-stock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/brlanweb/go-stock/compare/v1.2.1...v1.2.2
-[1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
-[1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
-[1.1.0]: https://github.com/brlanweb/go-stock/releases/tag/v1.1.0
-document MCP setup.
-
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.1...HEAD
 [1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/brlanweb/go-stock/compare/v1.1.0...v1.1.1
