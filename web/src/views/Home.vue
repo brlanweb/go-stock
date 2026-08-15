@@ -38,6 +38,13 @@ const latestEntry = computed(() => entryAdvice.value?.items.find(item => item.ac
 const latestExit = computed(() => entryAdvice.value?.items.find(item => item.action === 'exit') || null)
 const activePositionCount = computed(() => positions.value.filter(item => item.status === 'pending_entry' || item.status === 'holding').length)
 const dailyPick = computed(() => entryAdvice.value?.items.find(item => item.source === 'daily_pick') || null)
+const lifecycleSummary = computed(() => {
+  if (!stats.value?.lifecycle_picks) return '最新推荐尚未建立交易生命周期'
+  if (stats.value.pending_picks > 0 && stats.value.holding_picks === 0 && stats.value.exited_picks === 0) {
+    return `${stats.value.pending_picks} 只等待盘中 AI 给出建仓区间，未建仓不计算收益`
+  }
+  return '只统计真实建仓生命周期；持有中计浮盈，AI/硬风控退出后才冻结收益'
+})
 
 const equityChart = computed(() => {
   const exited = positions.value
@@ -76,7 +83,7 @@ onMounted(load)
 
 <template>
   <main class="overview">
-    <header class="overview-header"><div><strong>趋势交易总览</strong><small>只统计真实建仓生命周期；持有中计浮盈，AI/硬风控退出后才冻结收益</small></div><button type="button" :disabled="loading" title="刷新首页统计" @click="load">↻</button></header>
+    <header class="overview-header"><div><strong>趋势交易总览</strong><small>{{ lifecycleSummary }}</small></div><button type="button" :disabled="loading" title="刷新首页统计" @click="load">↻</button></header>
     <div v-if="loading" class="state">正在汇总真实持仓与结算数据…</div>
     <div v-else-if="error" class="state error">{{ error }}</div>
     <template v-else>
@@ -99,7 +106,7 @@ onMounted(load)
             <circle v-for="(point,index) in equityChart.values" :key="point.id" :cx="equityChart.x(index)" :cy="equityChart.y(point.value)" r="3" class="point"><title>{{ point.date }} {{ point.name }}：本笔 {{ signed(point.changePct) }}，累计 {{ signed(point.value) }}</title></circle>
             <text :x="equityChart.left-8" :y="equityChart.y(equityChart.max)+4" class="axis y">{{ equityChart.max.toFixed(1) }}</text><text :x="equityChart.left-8" :y="equityChart.y(equityChart.min)+4" class="axis y">{{ equityChart.min.toFixed(1) }}</text>
             <text v-for="label in equityChart.labels" :key="label.date" :x="equityChart.x(equityChart.values.indexOf(label))" :y="equityChart.height-8" class="axis x">{{ label.date.slice(5) }}</text>
-          </svg></div><div v-else class="empty">暂无可绘制的收益数据</div>
+          </svg></div><div v-else class="empty">{{ stats?.pending_picks ? '等待实际建仓与退出后生成收益曲线' : '暂无可绘制的真实交易收益' }}</div>
         </article>
 
         <article class="panel signal-panel">

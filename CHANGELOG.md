@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-08-15
+
+### Fixed
+
+- Backfill the latest pre-lifecycle recommendation batch into one `pending_entry` position when it directly precedes the newest stored trading day, so the Home dashboard no longer remains disconnected from valid current recommendations after upgrading from a pre-lifecycle release.
+- Keep the backfill non-transactional in performance terms: it records no entry price or return, and still requires a real intraday AI `entry` decision before any holding or performance statistic appears.
+- Clarify the Home dashboard state while recommendations are waiting for an actual entry signal instead of presenting an unexplained empty return chart.
+
+### Database
+
+- Add migration `020_backfill_latest_position.sql` with freshness, idempotency, and watchlist-capacity guards.
+
+## [1.2.2] - 2026-08-15
+
+### Fixed
+
+- Restore reference entry/latest prices and change percentages for legacy recommendation history while keeping those rows marked `reference_only` and excluded from lifecycle performance statistics.
+
 ## [1.2.1] - 2026-08-15
 
 ### Fixed
@@ -88,7 +106,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/brlanweb/go-stock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/brlanweb/go-stock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/brlanweb/go-stock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/brlanweb/go-stock/compare/v1.1.1...v1.2.0
