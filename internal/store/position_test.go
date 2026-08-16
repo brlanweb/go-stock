@@ -2,8 +2,15 @@ package store
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
+
+func TestPositionSelectColumnsMatchDataQualityScan(t *testing.T) {
+	if !strings.Contains(positionSelectColumns, "p.exit_kind,p.data_quality,\n\tp.hold_days") {
+		t.Fatal("持仓查询必须在 exit_kind 后选择 data_quality，与 scanPositions 字段顺序一致")
+	}
+}
 
 func TestPositionNetChangePctDeductsRoundTripCost(t *testing.T) {
 	// 毛收益 3% 扣除往返成本后应低于 3%，避免「微盈实亏」被统计成盈利单。

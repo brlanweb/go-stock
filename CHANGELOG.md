@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-08-16
+
+### Fixed
+
+- Fix the Home positions endpoint SQL scan mismatch by selecting the new `data_quality` column in the same order expected by the lifecycle scanner.
+
+### Database
+
+- No database schema or DML changes relative to v1.5.0.
+
 ## [1.5.0] - 2026-08-16
 
 ### Added
@@ -231,7 +241,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/brlanweb/go-stock/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/brlanweb/go-stock/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/brlanweb/go-stock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/brlanweb/go-stock/compare/v1.3.2...v1.4.0

@@ -116,7 +116,7 @@ type Position struct {
 const positionSelectColumns = `p.id,p.symbol,COALESCE(b.code,''),COALESCE(b.name,''),
 	DATE_FORMAT(p.pick_date,'%Y-%m-%d'),DATE_FORMAT(p.analysis_date,'%Y-%m-%d'),p.status,
 	COALESCE(DATE_FORMAT(p.entry_date,'%Y-%m-%d'),''),p.entry_price,p.highest_price,p.lowest_price,
-	COALESCE(DATE_FORMAT(p.exit_date,'%Y-%m-%d'),''),p.exit_price,p.exit_reason,p.exit_kind,
+	COALESCE(DATE_FORMAT(p.exit_date,'%Y-%m-%d'),''),p.exit_price,p.exit_reason,p.exit_kind,p.data_quality,
 	p.hold_days,p.position_pct,p.realized_pct,
 	DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i'),DATE_FORMAT(p.updated_at,'%Y-%m-%d %H:%i')`
 
