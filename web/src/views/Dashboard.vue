@@ -9,6 +9,7 @@ import Home from './Home.vue'
 import Review from './Review.vue'
 import Recommendations from './Recommendations.vue'
 import Indicators from './Indicators.vue'
+import Scorecard from './Scorecard.vue'
 
 interface TreeDatum {
   name: string
@@ -21,10 +22,10 @@ interface TreeDatum {
 const router = useRouter()
 const route = useRoute()
 
-// 首页六个同级 Tab：默认统计总览；热点漏斗后移至趋势推荐之后。
+// 首页七个同级 Tab：默认统计总览；策略考核集中展示全链路指标与参数审计。
 // 旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
-type HomeView = 'home' | 'heatmap' | 'review' | 'reco' | 'hotspot' | 'indicators'
-const homeViews: HomeView[] = ['home', 'heatmap', 'review', 'reco', 'hotspot', 'indicators']
+type HomeView = 'home' | 'heatmap' | 'review' | 'reco' | 'scorecard' | 'hotspot' | 'indicators'
+const homeViews: HomeView[] = ['home', 'heatmap', 'review', 'reco', 'scorecard', 'hotspot', 'indicators']
 function normalizeView(value: unknown): HomeView {
   return homeViews.includes(value as HomeView) ? value as HomeView : 'home'
 }
@@ -217,6 +218,7 @@ onUnmounted(() => {
           <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'">大盘云图</button>
           <button type="button" :class="{ active: activeView === 'review' }" @click="activeView = 'review'">每日复盘</button>
           <button type="button" :class="{ active: activeView === 'reco' }" @click="activeView = 'reco'">趋势推荐</button>
+          <button type="button" :class="{ active: activeView === 'scorecard' }" @click="activeView = 'scorecard'">策略考核</button>
           <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'"><span class="live-dot"></span>热点漏斗</button>
           <button type="button" :class="{ active: activeView === 'indicators' }" @click="activeView = 'indicators'">指标与回测</button>
         </nav>
@@ -239,6 +241,7 @@ onUnmounted(() => {
       <HotspotFunnel v-else-if="activeView === 'hotspot'" />
       <Review v-else-if="activeView === 'review'" />
       <Recommendations v-else-if="activeView === 'reco'" />
+      <Scorecard v-else-if="activeView === 'scorecard'" />
       <Indicators v-else-if="activeView === 'indicators'" />
     </section>
   </main>
@@ -246,7 +249,7 @@ onUnmounted(() => {
 
 <style scoped>
 .heatmap-workspace { display:grid; grid-template-columns:212px minmax(0,1fr); width:100vw; height:100vh; overflow:hidden; background:#151f31; color:#edf1f7; }
-.heatmap-canvas { display:grid; min-width:0; min-height:0; grid-template-rows:35px minmax(0,1fr); overflow:hidden; }.canvas-header { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:16px; padding:0 8px; border-bottom:1px solid #354157; background:#182234; }.workspace-tabs { align-self:stretch; display:flex; align-items:stretch; }.workspace-tabs button { display:flex; min-width:112px; align-items:center; justify-content:center; gap:7px; padding:0 14px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:#94a1b5; cursor:pointer; font-size:13px; font-weight:700; }.workspace-tabs button:hover { color:#e2e7ef; }.workspace-tabs button.active { border-bottom-color:#e0b64f; background:#202d41; color:#f0c760; }.hotspot-caption { overflow:hidden; color:#8e9cb0; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.live-dot { width:7px; height:7px; background:#00a56f; box-shadow:0 0 0 3px rgba(0,165,111,.14); }
+.heatmap-canvas { display:grid; min-width:0; min-height:0; grid-template-rows:35px minmax(0,1fr); overflow:hidden; }.canvas-header { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:16px; overflow:hidden; padding:0 8px; border-bottom:1px solid #354157; background:#182234; }.workspace-tabs { align-self:stretch; display:flex; min-width:0; align-items:stretch; overflow-x:auto; scrollbar-width:none; }.workspace-tabs::-webkit-scrollbar { display:none; }.workspace-tabs button { display:flex; min-width:112px; align-items:center; justify-content:center; gap:7px; padding:0 14px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:#94a1b5; cursor:pointer; font-size:13px; font-weight:700; }.workspace-tabs button:hover { color:#e2e7ef; }.workspace-tabs button.active { border-bottom-color:#e0b64f; background:#202d41; color:#f0c760; }.hotspot-caption { overflow:hidden; color:#8e9cb0; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.live-dot { width:7px; height:7px; background:#00a56f; box-shadow:0 0 0 3px rgba(0,165,111,.14); }
 .legend { display:flex; min-width:0; align-items:center; justify-content:flex-end; gap:2px; color:#aeb8c9; font-size:12px; white-space:nowrap; }.legend>span { margin-right:8px; overflow:hidden; text-overflow:ellipsis; }.legend i { min-width:43px; padding:4px 5px; color:#fff; font-style:normal; text-align:center; }
 .market-notice { position:absolute; z-index:30; top:40px; left:220px; padding:8px 11px; border-left:3px solid #d6a12c; background:#342d1d; color:#e9c986; font-size:12px; }.market-notice.error { border-color:#db4b57; background:#3a2329; color:#ffb1b8; }
 .treemap-stage { position:relative; min-width:0; min-height:0; margin:7px 8px 8px; overflow:hidden; background:#151f31; }.treemap-stage.empty { display:grid; place-items:center; }.sector-frame { position:absolute; z-index:5; overflow:hidden; border:1px solid #43516a; pointer-events:none; }.sector-title { position:absolute; z-index:1; top:0; right:0; left:0; display:flex; width:100%; height:19px; min-width:0; align-items:center; gap:4px; overflow:hidden; padding:1px 4px; border:0; border-radius:0; background:#1b2638; color:#d5dce7; cursor:pointer; font-size:11px; line-height:17px; text-align:left; pointer-events:auto; }.sector-title:hover { color:#ffd400; }.sector-title span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sector-title i { flex:0 1 auto; min-width:0; overflow:hidden; color:#8794a8; font-size:8px; font-style:normal; text-overflow:ellipsis; white-space:nowrap; }

@@ -18,6 +18,15 @@ import (
 // 30 分钟节奏：避开开盘最初 30 分钟噪音，14:52 增加尾盘隔夜风险检查。
 var entryRunSlots = []int{10 * 60, 10*60 + 30, 11 * 60, 11*60 + 30, 13*60 + 30, 14 * 60, 14*60 + 30, 14*60 + 52}
 
+// truncateRunes 按字符（而非字节）截断，避免截断中文时产生乱码。
+func truncateRunes(text string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(text) <= max {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:max]) + "…"
+}
+
 // isTailSlot 判断是否处于当日最后一档（14:52）。趋势破位用当时价格近似收盘价确认，
 // 避免盘中插针击穿均线就不可逆清仓——A 股盘中下影线极常见，按盘中价判破位会被噪音扫出。
 func isTailSlot(now time.Time) bool {
@@ -52,19 +61,21 @@ type intradayMarketContext struct {
 }
 
 type positionAnalysisItem struct {
-	PositionID    int64               `json:"position_id"`
-	Symbol        string              `json:"symbol"`
-	Name          string              `json:"name"`
-	Stage         string              `json:"stage"`
-	PickDate      string              `json:"pick_date"`
-	EntryDate     string              `json:"entry_date,omitempty"`
-	EntryPrice    *float64            `json:"entry_price,omitempty"`
-	HighestPrice  *float64            `json:"highest_price,omitempty"`
-	ProfitPct     *float64            `json:"profit_pct,omitempty"`
-	PeakProfitPct *float64            `json:"peak_profit_pct,omitempty"`
-	PositionPct   float64             `json:"position_pct,omitempty"`
-	StopLossPrice *float64            `json:"stop_loss_price,omitempty"`
-	HoldDays      int                 `json:"hold_days"`
+	PositionID    int64    `json:"position_id"`
+	Symbol        string   `json:"symbol"`
+	Name          string   `json:"name"`
+	Stage         string   `json:"stage"`
+	PickDate      string   `json:"pick_date"`
+	EntryDate     string   `json:"entry_date,omitempty"`
+	EntryPrice    *float64 `json:"entry_price,omitempty"`
+	HighestPrice  *float64 `json:"highest_price,omitempty"`
+	ProfitPct     *float64 `json:"profit_pct,omitempty"`
+	PeakProfitPct *float64 `json:"peak_profit_pct,omitempty"`
+	PositionPct   float64  `json:"position_pct,omitempty"`
+	StopLossPrice *float64 `json:"stop_loss_price,omitempty"`
+	HoldDays      int      `json:"hold_days"`
+	// SellableToday 表达 A 股 T+1：建仓当日为 false，此时 reduce/exit 都无法成交。
+	SellableToday bool                `json:"sellable_today"`
 	GraceDaysUsed int                 `json:"entry_grace_days_used,omitempty"`
 	Price         *float64            `json:"price"`
 	ChangePct     *float64            `json:"change_pct"`
@@ -163,6 +174,7 @@ func (s *Service) runEntryAnalysis(ctx context.Context, now time.Time) error {
 1. stage=entry只能返回entry或wait。entry要求多头结构完整、现价未明显追高、板块未显著转弱，并给出可执行建仓价区间；否则wait。
 2. price_low/price_high是真实成交约束：现价高于price_high时系统不会建仓而是继续等待，因此区间要给在可接受的建仓成本上，不要围绕已冲高的现价随意放宽。
 3. stage=exit只能返回hold、reduce或exit。趋势仍健康且量价配合则hold；动量减速、冲高乏力或板块降温用reduce分批减仓保护利润；个股趋势逆转、板块退潮或风险放大用exit。
+3.1 sellable_today=false表示该标的今日建仓、受A股T+1限制不可卖出，此时只能返回hold；即使风险已显现也只能在reason中说明并等待次一交易日。
 4. reduce会真实减仓50%并锁定该部分收益，请在「还想留一部分博延续」时使用，不要用它替代应当清仓的情形。
 5. 输入含profit_pct、peak_profit_pct、stop_loss_price、position_pct、atr_pct：浮盈已显著回吐、接近止损位或动量明显衰竭时，应更果断reduce或exit。
 6. 判断优先级：大盘系统性风险>板块趋势破坏>个股趋势破位>短时噪音。不得因固定持有天数退出，也不得因浮亏而扛单等待回本。
@@ -213,6 +225,10 @@ func (s *Service) buildPositionAnalysisContext(ctx context.Context, now time.Tim
 	market := intradayMarketContext{CheckedAt: now.Format("2006-01-02 15:04"), Indices: []model.IndexQuote{}}
 	var indices []model.IndexQuote
 	var err error
+	policy, err := s.st.StrategyRiskPolicySnapshot(ctx)
+	if err != nil {
+		return nil, market, fmt.Errorf("加载策略风控参数: %w", err)
+	}
 	if s.marketProvider != nil {
 		indexSymbols := []string{"SH000001", "SZ399001", "SZ399006", "SH000688", "SH000300", "BJ899050"}
 		indexQuotes, fetchErr := s.marketProvider.BatchQuotes(ctx, indexSymbols)
@@ -304,6 +320,7 @@ func (s *Service) buildPositionAnalysisContext(ctx context.Context, now time.Tim
 		if err != nil {
 			return nil, market, err
 		}
+		item.SellableToday = stage == store.EntryStageExit && item.HoldDays >= store.PositionMinExitHoldDays
 		q := quoteBySymbol[p.Symbol]
 		if q == nil || q.Price == nil {
 			return nil, market, fmt.Errorf("%s 实时行情缺失，终止本轮避免基于陈旧价格决策", p.Symbol)
@@ -319,7 +336,7 @@ func (s *Service) buildPositionAnalysisContext(ctx context.Context, now time.Tim
 		if item.EntryPrice != nil && *item.EntryPrice > 0 && item.Price != nil {
 			profit := (*item.Price/(*item.EntryPrice) - 1) * 100
 			item.ProfitPct = &profit
-			stop := *item.EntryPrice * (1 - stopLossDistancePct(item.ATRPct)/100)
+			stop := *item.EntryPrice * (1 - stopLossDistancePctWithPolicy(item.ATRPct, policy)/100)
 			item.StopLossPrice = &stop
 			if item.HighestPrice != nil && *item.HighestPrice > 0 {
 				peak := (*item.HighestPrice/(*item.EntryPrice) - 1) * 100
@@ -403,6 +420,10 @@ func fillPositionIndicators(item *positionAnalysisItem, klines []model.Kline) {
 //
 // 返回仍需 AI 评估的标的；已被风控清仓的标的不再进入 AI 请求。
 func (s *Service) applyRiskControls(ctx context.Context, date string, tailSlot bool, market intradayMarketContext, items []positionAnalysisItem) ([]positionAnalysisItem, error) {
+	policy, err := s.st.StrategyRiskPolicySnapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("加载策略风控参数: %w", err)
+	}
 	remaining := make([]positionAnalysisItem, 0, len(items))
 	for _, item := range items {
 		if item.Stage != store.EntryStageExit || item.Price == nil || item.EntryPrice == nil {
@@ -433,6 +454,7 @@ func (s *Service) applyRiskControls(ctx context.Context, date string, tailSlot b
 			IndexTotal:   len(market.Indices),
 			IndexFalling: market.FallingCount,
 			IsTailSlot:   tailSlot,
+			Policy:       policy,
 		})
 		if decision.Action == riskActionNone {
 			remaining = append(remaining, item)
@@ -550,6 +572,21 @@ func (s *Service) applyPositionDecisions(ctx context.Context, date string, items
 				TradeDate: date, Symbol: item.Symbol, Source: store.EntrySourceHourlyAI,
 				Stage: item.Stage, Action: store.EntryActionWait, Reason: waitReason,
 				Urgency: store.EntryUrgencyNormal, RefPrice: item.Price, Model: s.config.Model,
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// T+1 硬约束：建仓当日不得减仓或清仓。降级为 hold 并留痕，而不是整批报错——
+		// 单只标的的时序约束不应中断其余持仓的正常决策。
+		if (d.Action == store.EntryActionReduce || d.Action == store.EntryActionExit) &&
+			item.HoldDays < store.PositionMinExitHoldDays {
+			holdReason := fmt.Sprintf("T+1限制：建仓当日不可卖出，原判定「%s」顺延至次一交易日执行", truncateRunes(d.Reason, 60))
+			if err := s.st.SaveEntryAdvice(ctx, store.EntryAdviceInput{
+				TradeDate: date, Symbol: item.Symbol, Source: store.EntrySourceRule,
+				Stage: item.Stage, Action: store.EntryActionHold, Reason: holdReason,
+				Urgency: store.EntryUrgencyWarn, RefPrice: item.Price, Model: "local-rule",
 			}); err != nil {
 				return err
 			}

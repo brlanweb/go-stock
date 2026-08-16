@@ -544,6 +544,110 @@ export interface DailyReviewReport {
   }
 }
 
+export interface ScorecardOverall {
+  score: number
+  confidence: number
+  samples: number
+  wins: number
+  losses: number
+  win_rate?: number
+  avg_net_pct?: number
+  median_net_pct?: number
+  profit_factor?: number
+  total_return_pct?: number
+  max_drawdown_pct?: number
+  trade_sharpe?: number
+  calmar?: number
+  avg_hold_days?: number
+  mechanical_avg_pct?: number
+  actual_vs_mechanical_pct?: number
+}
+
+export interface ScorecardStage {
+  score: number
+  samples: number
+  confidence: number
+  metrics: Record<string, number>
+  summary: string
+}
+
+export interface StrategyScorecard {
+  generated_at: string
+  window_days: number
+  since_date: string
+  phase: 'all' | 'up' | 'range' | 'down'
+  overall: ScorecardOverall
+  stages: {
+    selection: ScorecardStage
+    opportunity: ScorecardStage
+    entry: ScorecardStage
+    exit: ScorecardStage
+  }
+  equity: Array<{ date: string; equity: number; drawdown_pct: number; trades: number }>
+  exit_kinds: Array<{ kind: string; samples: number; win_rate?: number; avg_net_pct?: number; avg_capture_rate?: number; avg_post_exit_5d_pct?: number }>
+  data_quality: { excluded_samples: number; t0_violations: number }
+  methodology: { mechanical_baseline: string; equity_curve: string; risk_note: string; minimum_samples: number }
+}
+
+export interface PositionReview {
+  id: number
+  position_id: number
+  symbol: string
+  code: string
+  name: string
+  review_date: string
+  verdict: 'success' | 'failure' | 'neutral'
+  blame_stage: 'selection' | 'opportunity' | 'entry' | 'exit' | 'market'
+  net_change_pct: number
+  mfe_pct?: number
+  mae_pct?: number
+  capture_rate_pct?: number
+  post_exit_5d_pct?: number
+  exit_kind: string
+  reason: string
+  data_quality?: string
+  generated_by: string
+  created_at: string
+}
+
+export interface StrategyParam {
+  key: string
+  value: number
+  default: number
+  min: number
+  max: number
+  step: number
+  frozen_until?: string
+  updated_source: string
+  updated_at: string
+}
+
+export interface StrategyParamChange {
+  id: number
+  param_key: string
+  previous: number
+  proposed: number
+  applied: number
+  baseline_score?: number
+  evaluation_score?: number
+  sample_count: number
+  source: string
+  rationale: string
+  status: 'active' | 'kept' | 'reverted' | 'rejected'
+  effective_date: string
+  evaluate_after: string
+  created_at: string
+}
+
+export interface StrategyParamsResponse {
+  params: StrategyParam[]
+  changes: StrategyParamChange[]
+  min_samples: number
+  evaluation_min_samples: number
+  freeze_days: number
+  rollback_drop_score: number
+}
+
 export interface HeatmapResponse {
   market: string
   group_by: string
@@ -580,6 +684,9 @@ export const api = {
   recommendationStats: (days = 60) => req<RecommendationStats>(`/recommendations/stats?days=${days}`),
   recommendationRiskPolicy: () => req<RecommendationRiskPolicy>('/recommendations/risk-policy'),
   recommendationShadowStats: (days = 60) => req<RecommendationShadowStats[]>(`/recommendations/shadow-stats?days=${days}`),
+  strategyScorecard: (days = 60, phase: StrategyScorecard['phase'] = 'all') => req<StrategyScorecard>(`/recommendations/scorecard?days=${days}&phase=${phase}`),
+  strategyParams: () => req<StrategyParamsResponse>('/recommendations/scorecard/params'),
+  positionReviews: (limit = 30) => req<{ items: PositionReview[] }>(`/recommendations/position-reviews?limit=${limit}`),
   recommendationStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/recommendations/status'),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
   recommendationMonteCarlo: (code: string, days = 10) => req<MonteCarloResult>(`/recommendations/montecarlo/${encodeURIComponent(code)}?days=${days}`),

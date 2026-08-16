@@ -33,6 +33,9 @@ type StockRecommendation struct {
 	ExitReason string `json:"exit_reason,omitempty"`
 	// PositionStatus 是该股的真实持仓状态；为空表示只存在推荐历史，未发生交易。
 	PositionStatus string `json:"position_status,omitempty"`
+	// DataQuality 非空表示该样本存在已知失真（如 t0_violation：当日进出违反 T+1），
+	// 保留展示与审计价值，但一律不进入胜率、收益与考核统计。
+	DataQuality string `json:"data_quality,omitempty"`
 	// Settled 表示该股产生了有效收益样本并计入统计。
 	// 未建仓（pending_entry/expired）时为 false，收益字段不参与胜率与合计。
 	Settled bool `json:"settled"`

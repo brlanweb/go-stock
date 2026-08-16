@@ -39,21 +39,29 @@ type riskInput struct {
 	MarketAvgPct float64
 	IndexTotal   int
 	IndexFalling int
-	IsTailSlot   bool // 是否处于尾盘档（14:52），趋势破位仅在此档确认
+	IsTailSlot   bool                     // 是否处于尾盘档（14:52），趋势破位仅在此档确认
+	Policy       store.StrategyRiskPolicy // 本轮动态参数快照；零值时回退默认纪律
 }
 
 // stopLossDistancePct 计算本笔的止损距离：在固定基准与 ATR 自适应之间取较大者，
 // 并受上限约束。高波动标的给更宽的止损，避免被正常波动扫出；
 // 低波动标的收紧止损，减少无谓亏损。
 func stopLossDistancePct(atrPct float64) float64 {
-	distance := store.PositionStopLossPct
+	return stopLossDistancePctWithPolicy(atrPct, store.DefaultStrategyRiskPolicy())
+}
+
+func stopLossDistancePctWithPolicy(atrPct float64, policy store.StrategyRiskPolicy) float64 {
+	if policy.StopLossPct <= 0 {
+		policy = store.DefaultStrategyRiskPolicy()
+	}
+	distance := policy.StopLossPct
 	if atrPct > 0 {
-		if adaptive := atrPct * store.PositionStopLossATRMult; adaptive > distance {
+		if adaptive := atrPct * policy.StopLossATRMult; adaptive > distance {
 			distance = adaptive
 		}
 	}
-	if distance > store.PositionStopLossMaxPct {
-		distance = store.PositionStopLossMaxPct
+	if distance > policy.StopLossMaxPct {
+		distance = policy.StopLossMaxPct
 	}
 	return distance
 }
@@ -74,10 +82,20 @@ func evaluateRisk(in riskInput) riskDecision {
 	if in.Price <= 0 || in.EntryPrice <= 0 {
 		return riskDecision{Action: riskActionNone}
 	}
+	// T+1 硬约束：建仓当日（hold_days=1）不可卖出，任何风控动作都必须顺延到次一交易日。
+	// 这条守卫必须在全部规则之前，否则「当日建仓 → 当日止损」会产生现实中无法成交的样本，
+	// 让退出类统计与参数寻优建立在失真数据上。
+	if in.HoldDays < store.PositionMinExitHoldDays {
+		return riskDecision{Action: riskActionNone}
+	}
+	policy := in.Policy
+	if policy.StopLossPct <= 0 {
+		policy = store.DefaultStrategyRiskPolicy()
+	}
 	profitPct := (in.Price/in.EntryPrice - 1) * 100
 
 	// 1. 硬止损：相对建仓成本的最大可接受回撤。
-	stopDistance := stopLossDistancePct(in.ATRPct)
+	stopDistance := stopLossDistancePctWithPolicy(in.ATRPct, policy)
 	if profitPct <= -stopDistance {
 		return riskDecision{
 			Action: riskActionExit,
@@ -135,7 +153,7 @@ func evaluateRisk(in riskInput) riskDecision {
 		return riskDecision{
 			Action: riskActionExit,
 			Kind:   store.ExitKindTimeStop,
-			Reason: fmt.Sprintf("持有%d个交易日浮盈仅%.2f%%，未达%.1f%%动量兑现线，优势衰减退出腾位", in.HoldDays, profitPct, store.PositionTimeStopMinPct),
+			Reason: fmt.Sprintf("持有%d个交易日浮盈仅%.2f%%，未达%.1f%%动量兑现线，优势衰减退出腾位", in.HoldDays, profitPct, policy.TimeStopMinPct),
 		}
 	}
 

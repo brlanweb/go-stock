@@ -20,6 +20,14 @@ const (
 // 并移出自选，把位置让给新的推荐。趋势交易允许等回踩，但不能无限期占位。
 const PositionEntryGraceDays = 2
 
+// 考核样本质量标记（与 022_position_data_quality.sql 对应）。
+// 空字符串表示正常样本；t0_violation 表示当日建仓当日退出，违反 A 股 T+1，
+// 保留审计价值但不得进入任何考核统计与参数寻优。
+const (
+	PositionDataQualityOK = ""
+	PositionDataQualityT0 = "t0_violation"
+)
+
 // 退出归因：区分是确定性风控触发还是 AI 判断，便于复盘各条规则的实际贡献。
 const (
 	ExitKindAI           = "ai"            // AI 综合三层上下文判断退出
@@ -60,6 +68,14 @@ const (
 	// PositionMaxHoldDays 最长持有交易日数兜底，防止个别标的长期占用仓位。
 	PositionMaxHoldDays = 15
 
+	// PositionMinExitHoldDays 是可以卖出的最小 hold_days，用于强制 A 股 T+1。
+	//
+	// hold_days 口径见 analysis/entry.go：hold_days = TradingDaysSince(entry_date, today) + 1，
+	// 因此建仓当日 hold_days=1，次一交易日 hold_days=2。取 2 表示「建仓当日不可卖出」。
+	// 缺少该约束时，10:00 建仓、13:30 触发止损会被记为当日 exited——这在 A 股不可能成交，
+	// 会系统性高估止损类样本的收益，并让所有基于这些样本的考核与调参建立在失真数据上。
+	PositionMinExitHoldDays = 2
+
 	// PositionReducePct 单次减仓比例；减到低于 PositionMinPositionPct 时直接清仓。
 	PositionReducePct      = 50.0
 	PositionMinPositionPct = 30.0
@@ -86,6 +102,7 @@ type Position struct {
 	ExitPrice      *float64 `json:"exit_price"`
 	ExitReason     string   `json:"exit_reason,omitempty"`
 	ExitKind       string   `json:"exit_kind,omitempty"`
+	DataQuality    string   `json:"data_quality,omitempty"`
 	HoldDays       int      `json:"hold_days"`
 	PositionPct    float64  `json:"position_pct"`
 	RealizedPct    float64  `json:"realized_pct"`
@@ -112,7 +129,7 @@ func scanPositions(rows *sql.Rows) ([]Position, error) {
 		if err := rows.Scan(&item.ID, &item.Symbol, &item.Code, &item.Name,
 			&item.PickDate, &item.AnalysisDate, &item.Status,
 			&item.EntryDate, &entryPrice, &highestPrice, &lowestPrice,
-			&item.ExitDate, &exitPrice, &item.ExitReason, &item.ExitKind,
+			&item.ExitDate, &exitPrice, &item.ExitReason, &item.ExitKind, &item.DataQuality,
 			&item.HoldDays, &item.PositionPct, &item.RealizedPct,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
@@ -270,9 +287,13 @@ func (s *Store) MarkPositionExited(ctx context.Context, id int64, exitDate strin
 		return err
 	}
 	defer tx.Rollback()
+	// 纵深防御：即使上游 T+1 守卫被绕过，落库时也会把当日进出打成 t0_violation，
+	// 保证考核统计永远不会吃进现实中无法成交的样本。
 	result, err := tx.ExecContext(ctx,
-		`UPDATE position SET status=?,exit_date=?,exit_price=?,exit_reason=?,exit_kind=? WHERE id=? AND status=?`,
-		PositionExited, exitDate, price, reason, kind, id, PositionHolding)
+		`UPDATE position SET status=?,exit_date=?,exit_price=?,exit_reason=?,exit_kind=?,
+		 data_quality=IF(entry_date IS NOT NULL AND entry_date=?, ?, data_quality)
+		 WHERE id=? AND status=?`,
+		PositionExited, exitDate, price, reason, kind, exitDate, PositionDataQualityT0, id, PositionHolding)
 	if err != nil {
 		return err
 	}
@@ -282,6 +303,11 @@ func (s *Store) MarkPositionExited(ctx context.Context, id int64, exitDate strin
 	}
 	if affected == 0 {
 		return fmt.Errorf("持仓 %d 不处于持有状态，忽略退出流转", id)
+	}
+	// 每笔退出立即生成结构化复盘底稿，与状态流转在同一事务中提交。
+	// 这样即使服务在退出后立刻中断，也不会留下「有结算、无复盘」的断链记录。
+	if err := savePositionReviewTx(ctx, tx, id); err != nil {
+		return err
 	}
 	if symbol != "" {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM watchlist WHERE symbol=?`, symbol); err != nil {
@@ -373,6 +399,7 @@ type PositionSettlement struct {
 	ExitDate    string
 	ExitReason  string
 	ExitKind    string
+	DataQuality string
 	HoldDays    int
 	PositionPct float64
 	RealizedPct float64
@@ -383,7 +410,7 @@ type PositionSettlement struct {
 // 不再按技术规则继续追踪；expired（未建仓）标的不参与收益统计。
 func (s *Store) PositionSettlementsByAnalysisDate(ctx context.Context, analysisDate string) (map[string]PositionSettlement, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT symbol,status,COALESCE(DATE_FORMAT(entry_date,'%Y-%m-%d'),''),entry_price,exit_price,COALESCE(DATE_FORMAT(exit_date,'%Y-%m-%d'),''),exit_reason,exit_kind,hold_days,position_pct,realized_pct
+		`SELECT symbol,status,COALESCE(DATE_FORMAT(entry_date,'%Y-%m-%d'),''),entry_price,exit_price,COALESCE(DATE_FORMAT(exit_date,'%Y-%m-%d'),''),exit_reason,exit_kind,data_quality,hold_days,position_pct,realized_pct
 		 FROM position WHERE analysis_date=?`, analysisDate)
 	if err != nil {
 		return nil, err
@@ -394,7 +421,7 @@ func (s *Store) PositionSettlementsByAnalysisDate(ctx context.Context, analysisD
 		var symbol string
 		var item PositionSettlement
 		var entryPrice, exitPrice sql.NullFloat64
-		if err := rows.Scan(&symbol, &item.Status, &item.EntryDate, &entryPrice, &exitPrice, &item.ExitDate, &item.ExitReason, &item.ExitKind, &item.HoldDays, &item.PositionPct, &item.RealizedPct); err != nil {
+		if err := rows.Scan(&symbol, &item.Status, &item.EntryDate, &entryPrice, &exitPrice, &item.ExitDate, &item.ExitReason, &item.ExitKind, &item.DataQuality, &item.HoldDays, &item.PositionPct, &item.RealizedPct); err != nil {
 			return nil, err
 		}
 		if entryPrice.Valid {

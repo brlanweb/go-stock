@@ -2,7 +2,7 @@
 
 > 低内存 A 股数据底座：Go 单二进制集成 REST API、MCP Streamable HTTP、Vue 3 市场云图和 MySQL 历史数据同步。
 
-**当前稳定版本：v1.4.1**
+**当前稳定版本：v1.5.0**
 
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/) [![Vue](https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs)](https://vuejs.org/) [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-4479A1?logo=mysql)](https://www.mysql.com/)
 
@@ -24,6 +24,8 @@
 - **受控缺失补齐**：`sync_checkpoint` 表记录进度，历史为空或落后最近交易日时低速补齐；完整证券不重复请求上游。历史源按 `东方财富 → BaoStock → AKShare → 腾讯` 降级：BaoStock 覆盖沪深股票/ETF，AKShare（新浪源）覆盖 ETF 与北交所 `920` 代码，避免单一上游被限流时整批失败
 - **定时快照**：按 `Asia/Shanghai` 在工作日 `12:00` 采集上午快照，`16:00` 采集收盘快照并写入日K/每日指标
 - **每日收盘复盘闭环**：交易日 `17:00` 基于本地收盘指数、市场宽度、板块强弱、当日盘前热点兑现情况，以及最近 5 个推荐日的个股表现生成结构化复盘；推荐结果同时计算沪深300近似基准收益和超额收益，并逐条回验上次优化指令。历史运行可追溯，最多 5 条新指令自动注入次日 `08:10` 趋势推荐
+- **全链路策略考核**：以数据库确定性事实分别评估选股、机会判断、建仓和离场，统一展示机械 5 日基线、净值、最大回撤、MFE/MAE、离场捕获率、影子参数扫描和逐笔归因；历史 T+0 异常样本自动排除
+- **受约束参数优化**：AI 复盘只能提出参数目标值；实际调整受 30 笔历史样本、数据库上下限、单步幅度和 10 日冻结约束，冻结后还需至少 10 笔新增结算样本，总分下降超过 2 分自动回滚并保留审计记录
 - **MCP Streamable HTTP**（`/mcp`）：本地 MySQL 分析工具 + 显式单股同步工具，供 LobeHub / Claude 等 MCP 客户端调用
 - **Vue3 前端**：全屏市场终端云图，一级行业和主要概念按流通市值映射面积、颜色按涨跌幅映射；个股日K/周K/月K 图、指标管理和策略回测
 - **低内存**：进程常驻约 20~40MB；扩展预留 US/CRYPTO market 字段与 Provider 接口
@@ -109,6 +111,10 @@ curl http://127.0.0.1:8480/api/v1/recommendations
 | `GET /api/v1/hotspot`、`POST /api/v1/hotspot/run` | 查询或触发热点漏斗；按数据初筛、关系收敛、AI产业链分析、本地回验输出有效概念。配置 AI 后交易日 08:00 自动运行盘前分析 |
 | `GET /api/v1/review`、`GET /api/v1/review/history` | 查询最新或指定历史每日复盘；包含指数、市场宽度、板块、盘前热点回验、最近 5 个推荐日的基准/超额收益、上次指令回验、风控和次日优化指令 |
 | `GET /api/v1/review/status`、`POST /api/v1/review/run` | 查询或手动触发每日复盘；配置 AI 后交易日 17:00 自动运行 |
+| `GET /api/v1/recommendations/scorecard?days=60&phase=all` | 查询风险调整总分、四环节评分、结算净值、最大回撤和离场归因；`phase` 支持 `all/up/range/down` |
+| `GET /api/v1/recommendations/scorecard/params` | 查询当前动态风控参数、冻结状态和最近变更审计 |
+| `GET /api/v1/recommendations/position-reviews?limit=30` | 查询逐笔离场复盘，包括 MFE、MAE、捕获率和离场后 5 日表现 |
+| `GET /api/v1/recommendations/shadow-stats?days=60` | 查询 AI、确定性选股基线、机械 5 日及固定止损参数扫描组表现 |
 | `GET/PUT /api/v1/indicators[/{id}]` | 指标与策略目录、启停及参数管理 |
 | `POST /api/v1/indicators/{id}/reset` | 恢复指标默认参数 |
 | `POST /api/v1/backtest` | 使用本地日 K 执行确定性 A 股策略回测 |

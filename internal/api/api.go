@@ -64,6 +64,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/stats", s.handleRecommendationStats)
 	mux.HandleFunc("GET /api/v1/recommendations/risk-policy", s.handleRecommendationRiskPolicy)
 	mux.HandleFunc("GET /api/v1/recommendations/shadow-stats", s.handleRecommendationShadowStats)
+	mux.HandleFunc("GET /api/v1/recommendations/scorecard", s.handleStrategyScorecard)
+	mux.HandleFunc("GET /api/v1/recommendations/scorecard/params", s.handleStrategyParams)
+	mux.HandleFunc("GET /api/v1/recommendations/position-reviews", s.handlePositionReviews)
 	mux.HandleFunc("GET /api/v1/recommendations/status", s.handleRecommendationsStatus)
 	mux.HandleFunc("POST /api/v1/recommendations/run", s.handleRecommendationsRun)
 	mux.HandleFunc("GET /api/v1/recommendations/montecarlo/{code}", s.handleRecommendationMonteCarlo)
@@ -751,6 +754,64 @@ func (s *Server) handleRecommendationStats(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, 200, stats)
+}
+
+// handleStrategyScorecard 返回统一目标分、四环节分和退出归因指标。
+// 计算只使用本地已结算事实；数据质量异常样本会显式计数并排除。
+func (s *Server) handleStrategyScorecard(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	phase := r.URL.Query().Get("phase")
+	// 顺便回填已经成熟的离场后5日表现；失败不阻断主考核，避免辅助指标影响总览可用性。
+	if err := s.St.RefreshPositionReviewPostExit(ctx, 100); err != nil {
+		slog.Warn("回填离场后表现失败", "error", err)
+	}
+	report, err := s.St.StrategyScorecardForWindow(ctx, days, phase)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handleStrategyParams 返回当前动态风控参数与最近变更审计，只读展示。
+// 参数只能由受约束复盘闭环调整，不开放绕过样本门槛与冻结期的写接口。
+func (s *Server) handleStrategyParams(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	params, err := s.St.StrategyParams(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	changes, err := s.St.RecentStrategyParamChanges(ctx, 30)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"params": params, "changes": changes,
+		"min_samples": store.StrategyMinSamples, "evaluation_min_samples": store.StrategyEvaluationMinSamples,
+		"freeze_days":         store.StrategyFreezeDays,
+		"rollback_drop_score": store.StrategyRollbackDrop,
+	})
+}
+
+// handlePositionReviews 返回每笔退出后的结构化成败归因。
+func (s *Server) handlePositionReviews(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err := s.St.RefreshPositionReviewPostExit(ctx, limit); err != nil {
+		slog.Warn("回填单笔复盘后续表现失败", "error", err)
+	}
+	items, err := s.St.RecentPositionReviews(ctx, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 // handleRecommendationShadowStats 返回 AI 与确定性影子基线（trend/low_risk）

@@ -481,6 +481,7 @@ func (s *Store) applyRecommendationPerformance(ctx context.Context, item *model.
 		return nil
 	}
 	item.PositionStatus = settlement.Status
+	item.DataQuality = settlement.DataQuality
 	switch settlement.Status {
 	case PositionExpired:
 		item.ExitReason = settlement.ExitReason
@@ -863,6 +864,9 @@ type RecommendationStats struct {
 	ReferenceWinRate       *float64 `json:"reference_win_rate"`
 	ReferenceSumChangePct  *float64 `json:"reference_sum_change_pct"`
 	ReferenceAvgChangePct  *float64 `json:"reference_avg_change_pct"`
+	// ExcludedPicks 是因数据质量问题被排除出统计的样本数（当前只有 t0_violation）。
+	// 显式返回而不是静默丢弃，避免出现「统计口径悄悄变化」而无从察觉。
+	ExcludedPicks int `json:"excluded_picks"`
 }
 
 // addRecommendationReferenceSample 汇总旧推荐的趋势规则参考结果。
@@ -926,6 +930,12 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 		for _, item := range items {
 			if item.ReferenceOnly {
 				addRecommendationReferenceSample(&stats, item)
+				continue
+			}
+			// 数据质量不合格的样本（当日进出违反 T+1）只计数不参与任何收益统计：
+			// 这些交易现实中无法成交，纳入统计会系统性高估退出类规则的表现。
+			if item.DataQuality != PositionDataQualityOK {
+				stats.ExcludedPicks++
 				continue
 			}
 			if item.PositionStatus != "" {
@@ -1048,6 +1058,8 @@ func (s *Store) RecommendationOverallStats(ctx context.Context, days int) (Recom
 //   - low_risk：风险分最低的 3 只（保守基线）
 //
 // 与 AI 推荐共用趋势跟踪冻结口径统计，用于回答“AI 相对确定性规则有无超额”。
+// 另外并行计算三组执行基线：mechanical_5d（固定持有5日）、stop_4 / stop_8
+//（相同AI选股、不同固定止损），用来区分“选股贡献”与“执行参数贡献”。
 // AI 请求失败时影子记录依然存在，因此基线样本天数 ≥ AI 样本天数。
 
 // SaveRecommendationShadow 以 REPLACE 语义保存分析日的影子基线选股。
@@ -1136,7 +1148,7 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 		return nil, err
 	}
 
-	order := []string{"ai", "trend", "low_risk"}
+	order := []string{"ai", "trend", "low_risk", "mechanical_5d", "stop_4", "stop_8"}
 	stats := make(map[string]*RecommendationShadowStrategyStats, len(order))
 	for _, name := range order {
 		stats[name] = &RecommendationShadowStrategyStats{Strategy: name}
@@ -1192,10 +1204,36 @@ func (s *Store) RecommendationShadowStats(ctx context.Context, days int) ([]Reco
 			return nil, err
 		}
 		aiPicks := make([]pickResult, 0, len(aiItems))
+		mechanicalPicks := make([]pickResult, 0, len(aiItems))
+		stop4Picks := make([]pickResult, 0, len(aiItems))
+		stop8Picks := make([]pickResult, 0, len(aiItems))
 		for _, item := range aiItems {
 			aiPicks = append(aiPicks, pickResult{item.ChangePct, item.Exited})
+			mechanical, err := s.MechanicalWindow(ctx, item.Symbol, date, MechanicalHoldDays)
+			if err != nil {
+				return nil, err
+			}
+			if mechanical == nil {
+				mechanicalPicks = append(mechanicalPicks, pickResult{nil, false})
+			} else {
+				value := mechanical.NetPct
+				mechanicalPicks = append(mechanicalPicks, pickResult{&value, true})
+			}
+			for _, scan := range []struct {
+				stop   float64
+				target *[]pickResult
+			}{{4, &stop4Picks}, {8, &stop8Picks}} {
+				value, frozen, err := s.fixedRiskWindow(ctx, item.Symbol, date, scan.stop)
+				if err != nil {
+					return nil, err
+				}
+				*scan.target = append(*scan.target, pickResult{value, frozen})
+			}
 		}
 		accumulate("ai", aiPicks)
+		accumulate("mechanical_5d", mechanicalPicks)
+		accumulate("stop_4", stop4Picks)
+		accumulate("stop_8", stop8Picks)
 
 		shadowRows, err := s.DB.QueryContext(ctx,
 			"SELECT strategy,symbol FROM recommendation_shadow WHERE analysis_date=? ORDER BY strategy,rank_no", date)

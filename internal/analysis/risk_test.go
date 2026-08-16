@@ -8,14 +8,17 @@ import (
 	"github.com/hoax/go-stock/internal/store"
 )
 
-// baseHolding 是一个「健康持仓」基线：小幅浮盈、持有 1 天、大盘平稳，
+// baseHolding 是一个「健康持仓」基线：小幅浮盈、已过 T+1、大盘平稳，
 // 各用例只改动待验证的那一个维度，避免相互干扰。
+//
+// HoldDays 取 PositionMinExitHoldDays 而非 1：hold_days=1 表示建仓当日，
+// 受 T+1 限制不可卖出，用它做基线会让所有退出用例恒为 none。
 func baseHolding() riskInput {
 	return riskInput{
 		Price:        104,
 		EntryPrice:   100,
 		HighestPrice: 104,
-		HoldDays:     1,
+		HoldDays:     store.PositionMinExitHoldDays,
 		PositionPct:  100,
 		ATRPct:       2,
 		MA10:         100,
@@ -164,6 +167,51 @@ func TestEvaluateRiskMaxHoldDaysFallback(t *testing.T) {
 	in.HoldDays, in.Price, in.HighestPrice = store.PositionMaxHoldDays, 104, 104
 	if got := evaluateRisk(in); got.Action != riskActionExit {
 		t.Fatalf("达到最长持有应退出，got=%+v", got)
+	}
+}
+
+// T+1 硬约束：建仓当日（hold_days=1）即使触发任何一条退出规则也不得卖出。
+// 这是数据可信度的地基——当日进出的样本在 A 股现实中不可能成交。
+func TestEvaluateRiskForbidsSameDayExit(t *testing.T) {
+	cases := map[string]func(in *riskInput){
+		"硬止损":   func(in *riskInput) { in.Price, in.HighestPrice = 90, 100 },
+		"移动止盈":  func(in *riskInput) { in.HighestPrice, in.Price = 118, 113 },
+		"硬止盈":   func(in *riskInput) { in.Price, in.HighestPrice = 113, 113 },
+		"系统性风险": func(in *riskInput) { in.IndexFalling, in.MarketAvgPct = 5, -3.0 },
+		"尾盘破位": func(in *riskInput) {
+			in.IsTailSlot, in.MA10, in.SectorWeak = true, 110, true
+			in.Price = 98
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := baseHolding()
+			in.HoldDays = 1 // 建仓当日
+			mutate(&in)
+			if got := evaluateRisk(in); got.Action != riskActionNone {
+				t.Fatalf("建仓当日受 T+1 限制不得产生退出动作，got=%+v", got)
+			}
+			// 次一交易日同样的行情必须正常触发，证明守卫只推迟、不吞掉纪律。
+			in.HoldDays = store.PositionMinExitHoldDays
+			if got := evaluateRisk(in); got.Action == riskActionNone {
+				t.Fatalf("次一交易日应恢复风控判定，got=%+v", got)
+			}
+		})
+	}
+}
+
+func TestEvaluateRiskUsesDynamicPolicySnapshot(t *testing.T) {
+	in := baseHolding()
+	in.Price, in.HighestPrice = 95, 100 // -5%，默认6%止损不会触发
+	if got := evaluateRisk(in); got.Action != riskActionNone {
+		t.Fatalf("默认6%%止损下 -5%% 不应退出，got=%+v", got)
+	}
+	policy := store.DefaultStrategyRiskPolicy()
+	policy.StopLossPct = 4
+	policy.StopLossATRMult = 1 // ATR=2%，不放宽4%固定止损
+	in.Policy = policy
+	if got := evaluateRisk(in); got.Kind != store.ExitKindStopLoss {
+		t.Fatalf("动态4%%止损应在 -5%% 时退出，got=%+v", got)
 	}
 }
 

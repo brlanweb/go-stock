@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-16
+
+### Added
+
+- Add a deterministic strategy scorecard with risk-adjusted overall score and separate selection, opportunity, entry, and exit stage scores.
+- Add settlement equity, maximum drawdown, trade Sharpe, Calmar, MFE, MAE, exit capture, post-exit five-day performance, market-phase segmentation, and sample-confidence shrinkage.
+- Add per-position exit reviews with structured verdict, stage attribution, exit-kind breakdown, and delayed post-exit outcome refresh.
+- Extend shadow evaluation with a mechanical five-day hold and fixed 4% / 8% stop-loss scans on the same AI picks.
+- Add constrained dynamic risk parameters, change audit history, freeze periods, minimum post-change evaluation samples, and deterministic rollback when the score deteriorates.
+- Add a Vue strategy assessment workspace for scores, equity, baselines, parameter state, trade reviews, and adjustment audit history.
+
+### Fixed
+
+- Enforce A-share T+1 in the live position lifecycle so entry-day reduce and exit actions cannot inflate assessed performance.
+- Mark historical same-day entry/exit records as data-quality violations and exclude them from official scorecard statistics.
+
+### Database
+
+- Add migrations `022_position_data_quality.sql`, `023_position_review.sql`, and `024_strategy_optimization.sql`.
+
 ## [1.4.1] - 2026-08-15
 
 ### Added
@@ -211,7 +231,8 @@ All notable changes to this project are documented in this file.
 - Use a reachable Go module proxy in image builds.
 - Clarify MCP tool arguments and document MCP setup.
 
-[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/brlanweb/go-stock/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/brlanweb/go-stock/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/brlanweb/go-stock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/brlanweb/go-stock/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/brlanweb/go-stock/compare/v1.3.1...v1.3.2

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -147,7 +148,31 @@ func (s *Service) runDailyReview(ctx context.Context, now time.Time, requireToda
 	if err := validateDailyReview(&report, facts); err != nil {
 		return err
 	}
-	return s.st.SaveDailyReview(ctx, tradeDate, "review", report.MarketPhase, s.config.Model, report)
+	if err := s.st.SaveDailyReview(ctx, tradeDate, "review", report.MarketPhase, s.config.Model, report); err != nil {
+		return err
+	}
+
+	// 复盘闭环的执行端：先用确定性事实生成并保存统一考核快照，再验收已过冻结期的
+	// 参数调整，最后才处理本次 AI 提案。AI 只能提出 stop_loss 目标；是否调整、调整
+	// 幅度、样本门槛、冻结期和回滚全部由数据库约束与确定性代码决定。
+	scorecard, scoreErr := s.st.StrategyScorecardForWindow(ctx, 60, "all")
+	if scoreErr != nil {
+		slog.Warn("生成每日策略考核失败", "date", tradeDate, "error", scoreErr)
+		return nil // 复盘报告已成功落库，辅助优化失败不得伪装成复盘失败
+	}
+	if err := s.st.SaveStrategyScorecard(ctx, tradeDate, scorecard); err != nil {
+		slog.Warn("保存每日策略考核失败", "date", tradeDate, "error", err)
+	}
+	if err := s.st.EvaluateStrategyParamChanges(ctx, tradeDate, scorecard); err != nil {
+		slog.Warn("验收策略参数调整失败", "date", tradeDate, "error", err)
+	}
+	if report.RiskControls.StopLossPct > 0 {
+		rationale := fmt.Sprintf("复盘%s阶段建议止损%.1f%%；由样本门槛、单步幅度与冻结回滚约束执行", report.MarketPhase, report.RiskControls.StopLossPct)
+		if _, err := s.st.ApplyStrategyParamProposal(ctx, "stop_loss_pct", report.RiskControls.StopLossPct, scorecard, tradeDate, "daily_review", rationale); err != nil {
+			slog.Warn("应用策略参数提案失败", "date", tradeDate, "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) analyzeDailyReviewWithAI(ctx context.Context, facts store.DailyReviewFacts) (DailyReviewReport, error) {
