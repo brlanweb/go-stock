@@ -144,6 +144,13 @@ fi
 
 # ---------- 5. 收尾 ----------
 docker image prune -f >/dev/null 2>&1 || true
+# 自更新：发布成功后用仓库内最新脚本刷新已安装副本（下次发布生效）。
+# 安装副本位于 APP_DIR/deploy/，与 src 分离，避免 git checkout 改写运行中的脚本。
+if [ -f "${SRC_DIR}/deploy/release.sh" ]; then
+  mkdir -p "${APP_DIR}/deploy"
+  cp "${SRC_DIR}/deploy/release.sh" "${APP_DIR}/deploy/release.sh"
+  chmod +x "${APP_DIR}/deploy/release.sh"
+fi
 # 只保留最近 5 份 compose 备份与发布日志，避免目录膨胀
 ls -t "${COMPOSE_FILE}".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f
 ls -t "${LOG_DIR}"/release-*.log 2>/dev/null | tail -n +6 | xargs -r rm -f
