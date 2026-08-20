@@ -58,7 +58,13 @@ func New(st *store.Store, config Config) *Service {
 
 // SetMarketProvider 注入实时行情源。盘中生命周期分析必须优先使用实时行情，
 // 本地 market_snapshot 仅作为测试或旧部署兼容回退。
-func (s *Service) SetMarketProvider(provider marketQuoteProvider) { s.marketProvider = provider }
+func (s *Service) SetMarketProvider(provider marketQuoteProvider) {
+	s.marketProvider = provider
+	// 行情源同时实现外盘接口（provider.Manager）时，风险感知层自动启用。
+	if gp, ok := provider.(globalQuoteProvider); ok {
+		s.globalProvider = gp
+	}
+}
 
 func (s *Service) Enabled() bool {
 	return s.config.BaseURL != "" && s.config.APIKey != "" && s.config.Model != ""
