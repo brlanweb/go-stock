@@ -241,6 +241,7 @@ onUnmounted(() => {
         </section>
       </template>
       <HotspotFunnel v-else-if="activeView === 'hotspot'" />
+      <RiskSentinel v-else-if="activeView === 'risk'" />
       <Review v-else-if="activeView === 'review'" />
       <Recommendations v-else-if="activeView === 'reco'" />
       <Scorecard v-else-if="activeView === 'scorecard'" />
