@@ -27,6 +27,10 @@ type Manager struct {
 	indexMu       sync.RWMutex
 	lastIndices   []model.IndexQuote
 	lastIndicesAt time.Time
+
+	globalMu     sync.RWMutex
+	lastGlobal   []model.GlobalQuote
+	lastGlobalAt time.Time
 }
 
 // NewManager 构建默认降级链。
@@ -222,6 +226,58 @@ func indexQuotesFromQuotes(quotes []*model.Quote) []model.IndexQuote {
 		})
 	}
 	return out
+}
+
+// GlobalQuotes 隔夜外盘风险因子行情：东财批量 + 金龙指数 + 新浪 VIX。
+// 东财失败时返回最近成功缓存（保守可用），VIX 缺失只损失单一因子不阻断。
+func (m *Manager) GlobalQuotes(ctx context.Context) ([]model.GlobalQuote, error) {
+	var out []model.GlobalQuote
+	var lastErr error
+	if m.em.Breaker().Allow() {
+		quotes, err := m.em.GlobalQuotes(ctx)
+		if err != nil {
+			m.em.Breaker().Failure(m.em.Name())
+			lastErr = err
+		} else {
+			m.em.Breaker().Success()
+			out = quotes
+		}
+	}
+	if m.sina.Breaker().Allow() {
+		vix, err := m.sina.GlobalVIX(ctx)
+		if err != nil {
+			m.sina.Breaker().Failure(m.sina.Name())
+			slog.Warn("VIX 行情获取失败，本轮缺失该因子", "err", err)
+		} else {
+			m.sina.Breaker().Success()
+			out = append(out, *vix)
+		}
+	}
+	if len(out) > 0 {
+		m.rememberGlobal(out)
+		return out, nil
+	}
+	if cached, cachedAt := m.cachedGlobal(); len(cached) > 0 {
+		slog.Warn("外盘行情源不可用，返回最近成功缓存", "age", time.Since(cachedAt).Round(time.Second), "err", lastErr)
+		return cached, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("外盘行情源均熔断中")
+	}
+	return nil, fmt.Errorf("获取外盘行情失败: %w", lastErr)
+}
+
+func (m *Manager) rememberGlobal(quotes []model.GlobalQuote) {
+	m.globalMu.Lock()
+	defer m.globalMu.Unlock()
+	m.lastGlobal = append([]model.GlobalQuote(nil), quotes...)
+	m.lastGlobalAt = time.Now()
+}
+
+func (m *Manager) cachedGlobal() ([]model.GlobalQuote, time.Time) {
+	m.globalMu.RLock()
+	defer m.globalMu.RUnlock()
+	return append([]model.GlobalQuote(nil), m.lastGlobal...), m.lastGlobalAt
 }
 
 func (m *Manager) rememberIndices(indices []model.IndexQuote) {

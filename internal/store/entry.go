@@ -10,6 +10,7 @@ const (
 	EntrySourceDailyPick = "daily_pick"
 	EntrySourceHourlyAI  = "hourly_ai"
 	EntrySourceRule      = "rule" // 确定性硬规则兜底产出，不依赖 LLM
+	EntrySourceManual    = "manual"
 
 	// 阶段：入池首日找建仓机会，建仓之后全程找退出机会。
 	EntryStageEntry = "entry"

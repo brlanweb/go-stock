@@ -2,7 +2,7 @@
 FROM node:22-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com
 COPY web/ ./
 RUN npm run build
 

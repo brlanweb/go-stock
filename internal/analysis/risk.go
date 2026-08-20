@@ -40,8 +40,13 @@ type riskInput struct {
 	IndexTotal   int
 	IndexFalling int
 	IsTailSlot   bool                     // 是否处于尾盘档（14:52），趋势破位仅在此档确认
+	GlobalRed    bool                     // 全球风险门红灯：进入防御模式，收紧全部退出纪律
 	Policy       store.StrategyRiskPolicy // 本轮动态参数快照；零值时回退默认纪律
 }
+
+// defensiveTightenRatio 防御模式（全球风险门红灯）下的纪律收紧系数：
+// 止损距离与移动止盈回撤阈值同乘该系数，抢在普跌封板前离场。
+const defensiveTightenRatio = 0.7
 
 // stopLossDistancePct 计算本笔的止损距离：在固定基准与 ATR 自适应之间取较大者，
 // 并受上限约束。高波动标的给更宽的止损，避免被正常波动扫出；
@@ -94,38 +99,65 @@ func evaluateRisk(in riskInput) riskDecision {
 	}
 	profitPct := (in.Price/in.EntryPrice - 1) * 100
 
-	// 1. 硬止损：相对建仓成本的最大可接受回撤。
+	// 1. 硬止损：相对建仓成本的最大可接受回撤。防御模式下收紧至 70%，
+	//    外盘已确认系统性风险时不给正常波动留缓冲。
 	stopDistance := stopLossDistancePctWithPolicy(in.ATRPct, policy)
+	if in.GlobalRed {
+		stopDistance *= defensiveTightenRatio
+	}
 	if profitPct <= -stopDistance {
+		reason := fmt.Sprintf("现价%.2f较建仓价%.2f亏损%.2f%%，触发硬止损（阈值%.1f%%）", in.Price, in.EntryPrice, profitPct, stopDistance)
+		if in.GlobalRed {
+			reason += "；全球风险门红灯，止损阈值已收紧"
+		}
 		return riskDecision{
 			Action: riskActionExit,
 			Kind:   store.ExitKindStopLoss,
-			Reason: fmt.Sprintf("现价%.2f较建仓价%.2f亏损%.2f%%，触发硬止损（阈值%.1f%%）", in.Price, in.EntryPrice, profitPct, stopDistance),
+			Reason: reason,
 		}
 	}
 
 	// 2. 系统性风险：按下跌指数占比判定，避免要求「全部下跌」而永不触发。
+	//    全球风险门红灯时提前触发（-1.5% → -0.8%）：外盘已预警的普跌日，
+	//    等大盘跌满 1.5% 再退出往往已在跌停板上卖不出去。
 	if in.IndexTotal >= 3 {
+		systemicAvgPct := -1.5
+		if in.GlobalRed {
+			systemicAvgPct = -0.8
+		}
 		fallingRatio := float64(in.IndexFalling) / float64(in.IndexTotal)
-		if fallingRatio >= 2.0/3.0 && in.MarketAvgPct <= -1.5 {
+		if fallingRatio >= 2.0/3.0 && in.MarketAvgPct <= systemicAvgPct {
+			reason := fmt.Sprintf("%d/%d指数下跌且平均跌幅%.2f%%，系统性风险放大，退出规避隔夜风险", in.IndexFalling, in.IndexTotal, in.MarketAvgPct)
+			if in.GlobalRed {
+				reason = fmt.Sprintf("全球风险门红灯叠加%d/%d指数下跌（平均%.2f%%），系统性风险提前确认，立即退出", in.IndexFalling, in.IndexTotal, in.MarketAvgPct)
+			}
 			return riskDecision{
 				Action: riskActionExit,
 				Kind:   store.ExitKindSystemic,
-				Reason: fmt.Sprintf("%d/%d指数下跌且平均跌幅%.2f%%，系统性风险放大，退出规避隔夜风险", in.IndexFalling, in.IndexTotal, in.MarketAvgPct),
+				Reason: reason,
 			}
 		}
 	}
 
 	// 3. 移动止盈：浮盈冲过激活线后，自最高点回撤超阈值即保护离场。
+	//    防御模式下回撤阈值同步收紧，普跌日优先保住已有浮盈。
 	if in.HighestPrice > in.EntryPrice {
 		peakPct := (in.HighestPrice/in.EntryPrice - 1) * 100
 		if peakPct >= store.PositionTrailingArmPct {
+			givebackLimit := store.PositionTrailingGivebackPct
+			if in.GlobalRed {
+				givebackLimit *= defensiveTightenRatio
+			}
 			giveback := peakPct - profitPct
-			if giveback >= store.PositionTrailingGivebackPct {
+			if giveback >= givebackLimit {
+				reason := fmt.Sprintf("最高浮盈%.2f%%回落至%.2f%%，回撤%.2f%%触发移动止盈，锁定利润", peakPct, profitPct, giveback)
+				if in.GlobalRed {
+					reason += "；全球风险门红灯，回撤阈值已收紧"
+				}
 				return riskDecision{
 					Action: riskActionExit,
 					Kind:   store.ExitKindTrailingStop,
-					Reason: fmt.Sprintf("最高浮盈%.2f%%回落至%.2f%%，回撤%.2f%%触发移动止盈，锁定利润", peakPct, profitPct, giveback),
+					Reason: reason,
 				}
 			}
 		}
@@ -157,15 +189,20 @@ func evaluateRisk(in riskInput) riskDecision {
 		}
 	}
 
-	// 6. 趋势破位：只在尾盘档确认，且要求跌破缓冲带，避免盘中插针误杀。
+	// 6. 趋势破位：常规只在尾盘档确认（避免盘中插针误杀）；全球风险门红灯时
+	//    放开到任意盘中档——外盘已预警的普跌日，等尾盘确认往往错过流动性窗口。
 	//    退出尺度改用 MA10，与 1-5 日入场 edge 对齐（原 MA20 尺度过慢）。
-	if in.IsTailSlot && in.MA10 > 0 {
+	if (in.IsTailSlot || in.GlobalRed) && in.MA10 > 0 {
 		buffer := in.MA10 * 0.99
 		if in.Price < buffer && (in.SectorWeak || in.MarketAvgPct < 0) {
+			reason := fmt.Sprintf("尾盘现价%.2f有效跌破MA10 %.2f且板块或大盘转弱，短线趋势结构破坏", in.Price, in.MA10)
+			if !in.IsTailSlot && in.GlobalRed {
+				reason = fmt.Sprintf("全球风险门红灯，盘中现价%.2f跌破MA10 %.2f且板块或大盘转弱，提前确认趋势破位", in.Price, in.MA10)
+			}
 			return riskDecision{
 				Action: riskActionExit,
 				Kind:   store.ExitKindTrendBreak,
-				Reason: fmt.Sprintf("尾盘现价%.2f有效跌破MA10 %.2f且板块或大盘转弱，短线趋势结构破坏", in.Price, in.MA10),
+				Reason: reason,
 			}
 		}
 	}

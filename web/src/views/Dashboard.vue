@@ -10,6 +10,7 @@ import Review from './Review.vue'
 import Recommendations from './Recommendations.vue'
 import Indicators from './Indicators.vue'
 import Scorecard from './Scorecard.vue'
+import RiskSentinel from './RiskSentinel.vue'
 
 interface TreeDatum {
   name: string
@@ -24,8 +25,8 @@ const route = useRoute()
 
 // 首页七个同级 Tab：默认统计总览；策略考核集中展示全链路指标与参数审计。
 // 旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
-type HomeView = 'home' | 'heatmap' | 'review' | 'reco' | 'scorecard' | 'hotspot' | 'indicators'
-const homeViews: HomeView[] = ['home', 'heatmap', 'review', 'reco', 'scorecard', 'hotspot', 'indicators']
+type HomeView = 'home' | 'heatmap' | 'risk' | 'review' | 'reco' | 'scorecard' | 'hotspot' | 'indicators'
+const homeViews: HomeView[] = ['home', 'heatmap', 'risk', 'review', 'reco', 'scorecard', 'hotspot', 'indicators']
 function normalizeView(value: unknown): HomeView {
   return homeViews.includes(value as HomeView) ? value as HomeView : 'home'
 }
@@ -216,6 +217,7 @@ onUnmounted(() => {
         <nav class="workspace-tabs" aria-label="首页视图">
           <button type="button" :class="{ active: activeView === 'home' }" @click="activeView = 'home'">首页</button>
           <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'">大盘云图</button>
+          <button type="button" :class="{ active: activeView === 'risk' }" @click="activeView = 'risk'">风险感知</button>
           <button type="button" :class="{ active: activeView === 'review' }" @click="activeView = 'review'">每日复盘</button>
           <button type="button" :class="{ active: activeView === 'reco' }" @click="activeView = 'reco'">趋势推荐</button>
           <button type="button" :class="{ active: activeView === 'scorecard' }" @click="activeView = 'scorecard'">策略考核</button>

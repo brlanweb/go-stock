@@ -32,9 +32,15 @@ type marketQuoteProvider interface {
 	BatchQuotes(context.Context, []string) ([]*model.Quote, error)
 }
 
+// globalQuoteProvider 隔夜外盘行情源（风险感知板块）。provider.Manager 实现。
+type globalQuoteProvider interface {
+	GlobalQuotes(context.Context) ([]model.GlobalQuote, error)
+}
+
 type Service struct {
 	st             *store.Store
 	marketProvider marketQuoteProvider
+	globalProvider globalQuoteProvider
 	config         Config
 	client         *http.Client
 	running        atomic.Bool
@@ -226,6 +232,32 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		guidance = store.LatestReviewGuidance{}
 	}
 	maxRisk := store.RecommendationMaxRiskScore(guidance.MarketPhase)
+	// 指数风向门：推荐链路的第一道确定性闸门，级别只能收紧 AI 复盘的结论，
+	// 不能放宽。red 直接跳过当日推荐与建仓；yellow 仍生成推荐供观察，但强制
+	// 把候选风险上限压到 down 档，且盘前不自动建仓；计算失败按黄灯保守处理。
+	gate, gateErr := s.st.MarketDirectionGate(ctx, analysisDate)
+	if gateErr != nil {
+		slog.Warn("计算指数风向门失败，按黄灯保守处理", "err", gateErr)
+		gate = store.MarketGate{TradeDate: analysisDate, Level: store.MarketGateYellow, Reason: "指数风向数据不可用，保守降档"}
+	}
+	slog.Info("指数风向门判定", "level", gate.Level, "reason", gate.Reason)
+	// 全球风险门：风险感知板块的盘前判定。用隔夜外盘（A50 夜盘/金龙/美股/
+	// VIX/离岸人民币）提前识别千股跌停类系统性风险——境内指数门基于 T-1 收盘
+	// 是滞后确认，外盘门在开盘前预警。融合取最严档位：只能收紧，不能放宽。
+	globalGate := s.RunGlobalGate(ctx, now.Format("2006-01-02"))
+	if merged := store.StricterGateLevel(gate.Level, globalGate.Level); merged != gate.Level {
+		gate.Reason = mergedGateReason(gate, globalGate)
+		gate.Level = merged
+		slog.Info("全球风险门收紧风向档位", "level", gate.Level, "global_score", globalGate.Score)
+	}
+	if gate.Level == store.MarketGateRed {
+		return fmt.Errorf("风险感知红灯，跳过当日推荐与自动建仓: %s", gate.Reason)
+	}
+	if gate.Level == store.MarketGateYellow {
+		if downRisk := store.RecommendationMaxRiskScore("down"); downRisk < maxRisk {
+			maxRisk = downRisk
+		}
+	}
 	// 候选池优先复用当日热点漏斗 final 报告（08:00 先于推荐运行）：漏斗已完成
 	// “数据筛选→AI 产业链分析→数据回验”，其卡点概念成分股即为热点候选；
 	// 漏斗缺失/过期或过滤后不足时回退到独立的题材热度候选池。
@@ -245,6 +277,9 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	prompt := s.config.Prompt
 	if prompt == "" {
 		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审目标是在趋势跟踪口径下选择结构最完整、可持续性最强的候选，不设固定持有天数，也不得承诺收益。"
+	}
+	if gate.Level == store.MarketGateYellow {
+		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：请在候选内优先选择低波动、低回撤、乖离小的稳健结构，回避高位加速形态。"
 	}
 	if guidance.ReviewDate != "" {
 		guidanceJSON, _ := json.Marshal(guidance)
@@ -350,17 +385,18 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	// 推荐落库成功后，从 3 只中确定性选出最适合建仓的一只并自动加入自选
 	// （自选上限 10 只，AddWatchlist 内部自动淘汰最旧条目保持数据同步）。
 	// 该步骤失败只告警，不影响推荐主结果。
-	s.autoWatchBestEntryPick(ctx, now, analysisDate, result.Recommendations)
+	// 指数风向非绿灯时只生成推荐供观察，不自动建仓——大盘转弱期强行开仓
+	// 是近期连续亏损的主要来源。
+	if gate.AllowAutoEntry() {
+		s.autoWatchBestEntryPick(ctx, now, analysisDate, result.Recommendations)
+	} else {
+		slog.Info("指数风向非绿灯，仅生成推荐观察，不自动建仓", "level", gate.Level, "reason", gate.Reason)
+	}
 	return nil
 }
 
-// DailyEntryPickCount 是每个推荐日纳入生命周期的标的数量。
-//
-// 原实现每日只建 1 只，组合收益完全等于单票波动，没有任何分散化：
-// 一次 -10% 就能抹掉此前多笔盈利，方差极大。趋势/动量策略的正期望依赖
-// 大数定律，必须靠多笔独立样本摊平个股特异风险。取 2 只是在「分散」与
-// 「自选 10 只容量 + 每只都要有足够仓位」之间的平衡。
-const DailyEntryPickCount = 2
+// DailyEntryPickCount 是每个推荐日纳入生命周期的唯一最强标的数量。
+const DailyEntryPickCount = 1
 
 // selectEntryPicks 按确定性规则排序当日推荐并取前 N 只作为建仓候选：
 // AI 概率降序 → 风险分升序 → AI 排名升序。同时保证板块分散：
@@ -519,6 +555,23 @@ func (s *Service) hotspotConceptsForDate(ctx context.Context, analysisDate strin
 //
 // 各条调度独立超时，互不挤占。
 func (s *Service) StartScheduler(ctx context.Context) {
+	// 风险感知（全球风险门）独立于 AI 配置：交易日 08:05 盘前采集隔夜外盘
+	// 并落库判定，先于 08:10 推荐链路，供其直接复用；盘中风控亦读取该结论。
+	go func() {
+		for {
+			now := time.Now().In(shanghai())
+			next := nextGlobalGateRun(now)
+			select {
+			case <-time.After(time.Until(next)):
+				runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				gate := s.RunGlobalGate(runCtx, next.Format("2006-01-02"))
+				slog.Info("盘前风险感知完成", "level", gate.Level, "score", gate.Score)
+				cancel()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	if !s.Enabled() {
 		return
 	}

@@ -13,6 +13,10 @@ const (
 	PositionHolding      = "holding"       // 已建仓，进入退出机会分析
 	PositionExited       = "exited"        // 已择机退出，收益冻结
 	PositionExpired      = "expired"       // 宽限期内未建仓，放弃并腾位
+	// PositionRemoved：用户手动移除自选后放弃跟踪的持仓。与 exited 不同，
+	// removed 没有用户确认的平仓价，收益无法可信结算，因此不进入胜率、
+	// 收益或任何考核统计；与 expired 不同，它可能发生在 holding 阶段。
+	PositionRemoved = "removed"
 )
 
 // PositionEntryGraceDays 是建仓宽限期：入池当日未等到合适建仓点时，
@@ -37,6 +41,7 @@ const (
 	ExitKindTimeStop     = "time_stop"     // 动量半衰期内未兑现，时间止损
 	ExitKindTrendBreak   = "trend_break"   // 趋势结构破位
 	ExitKindSystemic     = "systemic"      // 大盘系统性风险
+	ExitKindManual       = "manual"        // 用户手动确认平仓
 )
 
 // 风控参数。入场 edge（强板块+强个股+人气+建仓机会）的有效期是 1-5 个交易日，
@@ -196,6 +201,23 @@ func (s *Store) RecentPositions(ctx context.Context, limit int) ([]Position, err
 	return s.enrichPositionPerformance(ctx, items)
 }
 
+// PositionByID 返回单条持仓，用于手动建仓和平仓时核对标的与当前状态。
+func (s *Store) PositionByID(ctx context.Context, id int64) (Position, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+positionSelectColumns+`
+		FROM position p LEFT JOIN stock_basic b ON b.symbol=p.symbol WHERE p.id=? LIMIT 1`, id)
+	if err != nil {
+		return Position{}, err
+	}
+	items, err := scanPositions(rows)
+	if err != nil {
+		return Position{}, err
+	}
+	if len(items) == 0 {
+		return Position{}, sql.ErrNoRows
+	}
+	return items[0], nil
+}
+
 // PositionNetChangePct 把毛收益率换算为扣除往返交易成本后的净收益率。
 // 统一在结算口径中扣减，避免「微盈实亏」被统计成盈利单。
 func PositionNetChangePct(grossPct float64) float64 {
@@ -251,7 +273,7 @@ func (s *Store) enrichPositionPerformance(ctx context.Context, items []Position)
 func (s *Store) MarkPositionEntered(ctx context.Context, id int64, entryDate string, price *float64) error {
 	result, err := s.DB.ExecContext(ctx,
 		`UPDATE position SET status=?,entry_date=?,entry_price=?,highest_price=?,lowest_price=?,
-		 position_pct=100,realized_pct=0 WHERE id=? AND status=?`,
+		 hold_days=1,position_pct=100,realized_pct=0 WHERE id=? AND status=?`,
 		PositionHolding, entryDate, price, price, price, id, PositionPendingEntry)
 	if err != nil {
 		return err
@@ -264,6 +286,41 @@ func (s *Store) MarkPositionEntered(ctx context.Context, id int64, entryDate str
 		return fmt.Errorf("持仓 %d 不处于待建仓状态，忽略建仓流转", id)
 	}
 	return nil
+}
+
+// ManuallyEnterPosition 仅在用户明确操作后推进建仓状态，并在同一事务中记录操作。
+func (s *Store) ManuallyEnterPosition(ctx context.Context, id int64, entryDate string, price float64) error {
+	if price <= 0 {
+		return fmt.Errorf("建仓价格必须大于 0")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var symbol string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT symbol FROM position WHERE id=? AND status=? FOR UPDATE`, id, PositionPendingEntry).Scan(&symbol); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("持仓 %d 不处于待建仓状态", id)
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE position SET status=?,entry_date=?,entry_price=?,highest_price=?,lowest_price=?,
+		 hold_days=1,position_pct=100,realized_pct=0 WHERE id=? AND status=?`,
+		PositionHolding, entryDate, price, price, price, id, PositionPendingEntry); err != nil {
+		return err
+	}
+	reason := fmt.Sprintf("用户手动确认建仓，成交参考价 %.3f", price)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO entry_advice (trade_date,symbol,source,stage,action,reason,urgency,ref_price,model_name)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		entryDate, symbol, EntrySourceManual, EntryStageEntry, EntryActionEntry, reason,
+		EntryUrgencyNormal, price, "manual"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdatePositionExtremes 刷新持仓期最高/最低价。移动止盈必须基于持仓期间的
@@ -313,6 +370,50 @@ func (s *Store) MarkPositionExited(ctx context.Context, id int64, exitDate strin
 		if _, err := tx.ExecContext(ctx, `DELETE FROM watchlist WHERE symbol=?`, symbol); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// ManuallyExitPosition 仅在用户明确操作后平仓，并原子完成结算、复盘、建议留痕和移出自选。
+func (s *Store) ManuallyExitPosition(ctx context.Context, id int64, exitDate string, price float64) error {
+	if price <= 0 {
+		return fmt.Errorf("平仓价格必须大于 0")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var symbol, entryDate string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT symbol,DATE_FORMAT(entry_date,'%Y-%m-%d') FROM position WHERE id=? AND status=? FOR UPDATE`,
+		id, PositionHolding).Scan(&symbol, &entryDate); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("持仓 %d 不处于持有状态", id)
+		}
+		return err
+	}
+	if entryDate == exitDate {
+		return fmt.Errorf("A股 T+1 限制：建仓当日不能平仓")
+	}
+	reason := fmt.Sprintf("用户手动确认平仓，成交参考价 %.3f", price)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE position SET status=?,exit_date=?,exit_price=?,exit_reason=?,exit_kind=?
+		 WHERE id=? AND status=?`, PositionExited, exitDate, price, reason, ExitKindManual, id, PositionHolding); err != nil {
+		return err
+	}
+	if err := savePositionReviewTx(ctx, tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO entry_advice (trade_date,symbol,source,stage,action,reason,urgency,ref_price,model_name)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		exitDate, symbol, EntrySourceManual, EntryStageExit, EntryActionExit, reason,
+		EntryUrgencyNormal, price, "manual"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM watchlist WHERE symbol=?`, symbol); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -406,7 +507,7 @@ type PositionSettlement struct {
 }
 
 // PositionSettlementsByAnalysisDate 返回某个推荐日对应的持仓结算结果（按 symbol 索引）。
-// 收益统计优先采用这里的真实建仓/退出价：AI 判定退出后收益立即冻结，
+// 收益统计优先采用这里的真实手动建仓/平仓价：用户确认平仓后收益立即冻结，
 // 不再按技术规则继续追踪；expired（未建仓）标的不参与收益统计。
 func (s *Store) PositionSettlementsByAnalysisDate(ctx context.Context, analysisDate string) (map[string]PositionSettlement, error) {
 	rows, err := s.DB.QueryContext(ctx,

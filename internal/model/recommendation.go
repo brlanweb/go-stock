@@ -2,15 +2,13 @@ package model
 
 // StockRecommendation 是 AI 对趋势延续概率的结构化结果。
 //
-// 收益展示口径只认真实持仓生命周期：
-//  1. 每日推荐中被选为最佳建仓股的一只会建立 position 记录。该股以盘中 AI
-//     实际给出的建仓参考价为成本；AI 或确定性硬风控判定退出后，收益按退出
-//     参考价冻结（Exited=true），后续行情不再改变结果。
-//  2. pending_entry / expired 从未建仓，不产生收益样本；holding 只展示按最新
+// 收益展示分为真实手动交易与固定参考窗口：
+//  1. 每日唯一最强推荐建立 position 记录。只有用户手动确认建仓/平仓才推进
+//     holding/exited，并按确认时的行情参考价计算和冻结收益。
+//  2. pending_entry / expired 从未建仓，不产生真实收益样本；holding 只展示按最新
 //     市场快照计算的浮动收益，不进入胜率和已实现累计收益。
-//  3. 没有 position 记录的历史推荐仅补充“参考走势”（ReferenceOnly=true）：
-//     按推荐日后首个交易日开盘与趋势退出规则展示涨跌，供复盘参考，
-//     Settled 恒为 false，不进入胜率、已实现收益或浮盈统计。
+//  3. 其余两只无 position 的推荐标记为 ReferenceOnly：按推荐后首个交易日开盘
+//     至第 10 个交易日收盘计算，窗口未满时暂随最新收盘更新；不进入真实交易统计。
 type StockRecommendation struct {
 	Date        string  `json:"date"`
 	Rank        int     `json:"rank"`
@@ -28,7 +26,7 @@ type StockRecommendation struct {
 	LatestPrice *float64 `json:"latest_price"`
 	ChangePct   *float64 `json:"change_pct"`
 	TrackedDays int      `json:"tracked_days"`
-	// Exited 只表示真实 position 已按 AI/硬风控信号退出；ExitReason 为退出原因。
+	// Exited 表示真实 position 已由用户手动确认平仓；ExitReason 为平仓原因。
 	Exited     bool   `json:"exited"`
 	ExitReason string `json:"exit_reason,omitempty"`
 	// PositionStatus 是该股的真实持仓状态；为空表示只存在推荐历史，未发生交易。

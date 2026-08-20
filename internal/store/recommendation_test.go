@@ -257,6 +257,30 @@ func TestApplyRecommendationPerformanceFreezesExitedLifecycle(t *testing.T) {
 	}
 }
 
+func TestApplyRecommendationPerformanceExcludesRemovedLifecycle(t *testing.T) {
+	// 用户手动移除自选后：状态与放弃原因保留展示，但没有可信结算价，
+	// 不得产生收益样本（Settled=false），也不得回落到参考走势口径。
+	entry := 100.0
+	item := model.StockRecommendation{Date: "2026-08-10", Symbol: "SH600000"}
+	settlements := map[string]PositionSettlement{
+		item.Symbol: {
+			Status: PositionRemoved, EntryDate: "2026-08-11", EntryPrice: &entry,
+			ExitDate: "2026-08-13", ExitReason: "用户手动移除自选，停止跟踪；无确认平仓价，不计入收益统计",
+			HoldDays: 3, PositionPct: 100,
+		},
+	}
+
+	if err := (&Store{}).applyRecommendationPerformance(context.Background(), &item, settlements); err != nil {
+		t.Fatal(err)
+	}
+	if item.PositionStatus != PositionRemoved || item.ExitReason == "" {
+		t.Fatalf("removed lifecycle must keep status and reason for display: %+v", item)
+	}
+	if item.Settled || item.Exited || item.ChangePct != nil || item.EntryPrice != nil || item.LatestPrice != nil {
+		t.Fatalf("removed lifecycle must not produce a performance sample: %+v", item)
+	}
+}
+
 // 分批减仓后，已退出交易的收益必须按仓位加权：
 // +12% 时减半仓锁定 6 个点，剩余半仓在 +4% 退出贡献 2 个点，合计毛收益 8 个点。
 func TestApplyRecommendationPerformanceBlendsReducedPosition(t *testing.T) {

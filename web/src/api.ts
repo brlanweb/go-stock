@@ -153,7 +153,7 @@ export interface Recommendation {
   // 真实生命周期：AI/硬风控退出后冻结；无生命周期记录时收益为参考走势口径
   exited: boolean
   exit_reason?: string
-  position_status?: 'pending_entry' | 'holding' | 'exited' | 'expired'
+  position_status?: 'pending_entry' | 'holding' | 'exited' | 'expired' | 'removed'
   settled: boolean
   // 参考走势口径（无生命周期记录），仅供复盘展示，不进统计
   reference_only?: boolean
@@ -184,7 +184,7 @@ export interface EntryAdvice {
   symbol: string
   name: string
   code: string
-  source: 'daily_pick' | 'hourly_ai' | 'rule'
+  source: 'daily_pick' | 'hourly_ai' | 'rule' | 'manual'
   stage: 'entry' | 'exit'
   action: 'pick' | 'entry' | 'wait' | 'hold' | 'reduce' | 'exit' | 'expired'
   reason: string
@@ -203,7 +203,7 @@ export interface Position {
   name: string
   pick_date: string
   analysis_date: string
-  status: 'pending_entry' | 'holding' | 'exited' | 'expired'
+  status: 'pending_entry' | 'holding' | 'exited' | 'expired' | 'removed'
   entry_date?: string
   entry_price: number | null
   highest_price: number | null
@@ -211,7 +211,7 @@ export interface Position {
   exit_date?: string
   exit_price: number | null
   exit_reason?: string
-  exit_kind?: 'ai' | 'stop_loss' | 'trailing_stop' | 'take_profit' | 'time_stop' | 'trend_break' | 'systemic' | ''
+  exit_kind?: 'ai' | 'stop_loss' | 'trailing_stop' | 'take_profit' | 'time_stop' | 'trend_break' | 'systemic' | 'manual' | ''
   hold_days: number
   position_pct: number
   realized_pct: number
@@ -235,6 +235,7 @@ export interface RecommendationStats {
   holding_picks: number
   exited_picks: number
   expired_picks: number
+  removed_picks: number
   frozen_picks: number
   tracking_picks: number
   wins: number
@@ -658,6 +659,59 @@ export interface HeatmapResponse {
   groups: HeatmapGroup[]
 }
 
+// ---- 风险感知板块（Risk Sentinel）----
+
+export interface GlobalRiskSignal {
+  factor: string
+  name: string
+  price: number
+  change_pct: number
+  has_data: boolean
+  score: number
+  note: string
+}
+
+export interface GlobalRiskGate {
+  trade_date: string
+  level: 'green' | 'yellow' | 'red'
+  score: number
+  reason: string
+  signals: GlobalRiskSignal[]
+  created_at?: string
+}
+
+export interface MarketGateIndexFact {
+  symbol: string
+  name: string
+  close: number
+  ma20: number
+  momentum_5d_pct: number
+  has_ma20: boolean
+  has_momentum: boolean
+}
+
+export interface MarketGateBreadth {
+  valid: boolean
+  stock_count: number
+  up_ratio: number
+  avg_change_pct: number
+}
+
+export interface MarketGate {
+  trade_date: string
+  level: 'green' | 'yellow' | 'red'
+  reason: string
+  indices: MarketGateIndexFact[]
+  breadth: MarketGateBreadth
+}
+
+export interface RiskGateOverview {
+  analysis_date: string
+  market_gate: MarketGate | null
+  global_gate: GlobalRiskGate | null
+  final_level: 'green' | 'yellow' | 'red'
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`/api/v1${path}`, init)
   if (!resp.ok) {
@@ -692,12 +746,17 @@ export const api = {
   recommendationMonteCarlo: (code: string, days = 10) => req<MonteCarloResult>(`/recommendations/montecarlo/${encodeURIComponent(code)}?days=${days}`),
   entryAdvice: (date = '') => req<EntryAdviceResponse>(`/entry/advice${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   positions: (limit = 30) => req<{ items: Position[] }>(`/positions?limit=${limit}`),
+  enterPosition: (id: number) => req<{ id: number; price: number; status: string }>(`/positions/${id}/enter`, { method: 'POST' }),
+  exitPosition: (id: number) => req<{ id: number; price: number; status: string }>(`/positions/${id}/exit`, { method: 'POST' }),
   entryStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/entry/status'),
   runEntryAnalysis: () => req<{ status: string }>('/entry/run', { method: 'POST' }),
   hotspot: (id?: number) => req<HotspotReport>(`/hotspot${id ? `?id=${id}` : ''}`),
   hotspotHistory: (limit = 30) => req<HotspotRunSummary[]>(`/hotspot/history?limit=${limit}`),
   hotspotStatus: () => req<{ enabled: boolean; running: boolean }>('/hotspot/status'),
   runHotspot: () => req<{ status: string }>('/hotspot/run', { method: 'POST' }),
+  riskGate: () => req<RiskGateOverview>('/risk/gate'),
+  riskGateHistory: (limit = 30) => req<{ items: GlobalRiskGate[] }>(`/risk/gate/history?limit=${limit}`),
+  runRiskGate: () => req<GlobalRiskGate>('/risk/gate/run', { method: 'POST' }),
   dailyReview: (id?: number) => req<DailyReviewReport>(`/review${id ? `?id=${id}` : ''}`),
   dailyReviewHistory: (limit = 30) => req<DailyReviewRunSummary[]>(`/review/history?limit=${limit}`),
   dailyReviewStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/review/status'),

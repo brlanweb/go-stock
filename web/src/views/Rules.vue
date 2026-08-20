@@ -51,8 +51,8 @@ const sections = [
             <div class="principles">
               <span><b>事实层</b>本地 MySQL 日 K、实时股票与指数行情、板块数据</span>
               <span><b>判断层</b>受候选池约束的 AI 推荐与三层盘中分析</span>
-              <span><b>纪律层</b>先于 AI 执行、可回测和可单测的确定性风控</span>
-              <span><b>审计层</b>推荐、建议、减仓、退出原因和冻结收益均留痕</span>
+              <span><b>纪律层</b>确定性风控生成高优先级建议，用户确认后执行真实平仓</span>
+              <span><b>审计层</b>推荐、AI/规则建议、手动建仓和平仓结果均留痕</span>
             </div>
           </div>
         </section>
@@ -65,8 +65,8 @@ const sections = [
               <li><time>16:00</time><div><b>收盘数据同步</b><p>保存全天市场快照并更新日 K、指标和板块统计。盘前任务要求最近日 K 不早于上一交易日。</p></div></li>
               <li><time>17:00</time><div><b>每日复盘</b><p>复核指数、市场宽度、板块、热点兑现和最近推荐，生成市场阶段、可执行优化指令及次日风险偏好。</p></div></li>
               <li><time>08:00</time><div><b>热点漏斗</b><p>基于最近收盘数据执行数据筛选、关系候选、AI 产业链分析和本地数据回验。</p></div></li>
-              <li><time>08:10</time><div><b>趋势推荐</b><p>从确定性候选池中由 AI 恰好选出 3 只，并从中确定最多 2 只生命周期建仓候选。</p></div></li>
-              <li><time>盘中</time><div><b>建仓与持仓分析</b><p>8 个固定时点批量获取实时股票和指数行情，先执行硬风控，再由 AI 给出建仓或持仓动作。</p></div></li>
+              <li><time>08:10</time><div><b>趋势推荐</b><p>从确定性候选池中由 AI 恰好选出 3 只，仅将唯一最强标的加入建仓池。</p></div></li>
+              <li><time>盘中</time><div><b>建仓与持仓分析</b><p>8 个固定时点批量获取实时股票和指数行情，本地风控与 AI 只记录建议，真实建仓和平仓由用户手动确认。</p></div></li>
             </ol>
           </div>
         </section>
@@ -111,14 +111,14 @@ const sections = [
           <div class="section-no">05</div>
           <div>
             <h2>生命周期入池与建仓</h2>
-            <p>每日从三只推荐中最多选 2 只进入 <code>pending_entry</code>。排序顺序为 AI 概率降序、风险分升序、AI 排名升序，并优先跨板块分散。活跃自选容量上限为 10 只，容量不足时不会静默淘汰仍在等待或持有的旧标的。</p>
+            <p>每日从三只推荐中只选择唯一最强标的进入 <code>pending_entry</code>。排序顺序为 AI 概率降序、风险分升序、AI 排名升序。活跃自选容量上限为 10 只，容量不足时不会静默淘汰仍在等待或持有的旧标的。</p>
             <div class="parameter-table">
-              <div><span>入池数量</span><b>每日最多 2 只</b><small>跨板块优先</small></div>
+              <div><span>入池数量</span><b>每日唯一 1 只</b><small>只取唯一最强</small></div>
               <div><span>建仓宽限</span><b>D0 至 D0+2</b><small>按后续交易日计算</small></div>
-              <div><span>价格约束</span><b>不得高于 AI 区间上沿</b><small>冲高时继续等待</small></div>
+              <div><span>执行方式</span><b>用户手动确认</b><small>AI 区间仅作参考</small></div>
               <div><span>过期处理</span><b>转为 expired</b><small>移出活跃自选且不计收益</small></div>
             </div>
-            <p class="note">AI 给出的建仓价格只是参考区间。当前系统记录信号时的实时参考价，不等同于券商真实成交回报。</p>
+            <p class="note">AI 给出的建仓价格只是参考区间，不会自动触发建仓。用户点击建仓或平仓时，系统按当时可用行情记录参考价，不等同于券商真实成交回报。</p>
           </div>
         </section>
 
@@ -139,8 +139,8 @@ const sections = [
         <section id="risk" class="rule-section">
           <div class="section-no">07</div>
           <div>
-            <h2>确定性风控优先级</h2>
-            <p>每个盘中档先按下列顺序检查，命中第一条后立即执行，不再交给 AI 覆盖。参数集中在后端常量中，便于回测、审计和后续版本调整。</p>
+            <h2>确定性风控建议优先级</h2>
+            <p>每个盘中档先按下列顺序检查，命中后记录为高优先级建议，并继续保留 AI 独立评估结果；两者都不会自动改变真实仓位。</p>
             <ol class="risk-list">
               <li><span>01</span><div><b>ATR 自适应硬止损</b><p>止损距离取 <code>max(6%, ATR14 × 1.8)</code>，上限 10%。相对建仓价达到该亏损即全部退出。</p></div></li>
               <li><span>02</span><div><b>系统性风险</b><p>至少 3 个指数有效；下跌指数占比达到 2/3，且指数平均跌幅不高于 -1.5% 时退出。</p></div></li>
@@ -159,11 +159,11 @@ const sections = [
             <h2>AI 的持仓动作</h2>
             <p>只有在确定性风控未触发时，AI 才结合大盘、板块和个股三层上下文判断。</p>
             <div class="action-row">
-              <div><code>hold</code><p>趋势和风险仍可接受，保持当前仓位并进入下一盘中档复核。</p></div>
-              <div><code>reduce</code><p>按实时参考价减仓 50%，锁定对应部分收益并记录独立减仓审计。</p></div>
-              <div><code>exit</code><p>按实时参考价退出剩余仓位，冻结收益、记录原因并释放自选容量。</p></div>
+              <div><code>hold</code><p>趋势和风险仍可接受，建议继续持有并在下一盘中档复核。</p></div>
+              <div><code>reduce</code><p>建议减仓保护收益，只记录理由和参考价格区间，不自动改变仓位。</p></div>
+              <div><code>exit</code><p>建议尽快平仓；用户手动确认后才冻结收益并释放自选容量。</p></div>
             </div>
-            <p>AI 输入包含浮盈、最高浮盈、止损价、当前仓位和 ATR；模型被明确告知硬纪律已经执行，只能做剩余的趋势持续性判断。</p>
+            <p>AI 输入包含浮盈、最高浮盈、止损价、当前仓位和 ATR；模型负责形成独立分析记录，用户结合规则与 AI 建议作最终交易决策。</p>
           </div>
         </section>
 
@@ -178,7 +178,7 @@ const sections = [
             <ul>
               <li><code>pending_entry</code>：已入池、尚未出现可执行建仓点；不计收益。</li>
               <li><code>holding</code>：已记录建仓参考价；只展示浮动收益，不进入已实现胜率。</li>
-              <li><code>exited</code>：AI 或硬风控退出；退出价和净收益冻结，后续行情不再改变结果。</li>
+              <li><code>exited</code>：用户手动确认平仓；平仓参考价和净收益冻结，后续行情不再改变结果。</li>
               <li><code>expired</code>：建仓宽限内未成交；不计收益、不计胜率。</li>
               <li>退出状态变更和自选移除在同一数据库事务中完成，避免已退出标的继续占位。</li>
             </ul>
@@ -193,12 +193,12 @@ const sections = [
             <div class="stats-table">
               <div class="stats-head"><span>口径</span><span>样本</span><span>用途</span><span>不能解释为</span></div>
               <div><b>真实生命周期</b><span>有 position 记录的 holding / exited</span><span>真实策略浮盈、已实现收益与胜率</span><span>券商账户实际成交收益</span></div>
-              <div><b>历史参考走势</b><span>reference_only 旧推荐</span><span>按统一规则复盘历史推荐</span><span>真实建仓或真实退出</span></div>
-              <div><b>每日三只组合</b><span>每个推荐日最多 3 只等权</span><span>观察每日推荐集合的参考表现</span><span>账户净值或实际持仓组合</span></div>
+              <div><b>历史参考走势</b><span>未加入建仓池的推荐</span><span>次日开盘至第 10 个交易日收盘</span><span>真实建仓或真实平仓</span></div>
+              <div><b>每日三只组合</b><span>每个推荐日 3 只等权</span><span>唯一最强用手动交易结果，其余两只用固定 10 日结果</span><span>账户净值或实际持仓组合</span></div>
             </div>
             <ul>
               <li>真实胜率分母只包含 <code>exited</code>；没有真实退出样本时显示 0.0% 并明确提示无样本。</li>
-              <li>历史参考从次日开盘开始，旧规则退出后冻结，未退出随最新收盘变化，始终不进入真实交易统计。</li>
+              <li>未加入建仓池的两只推荐从次日开盘开始，在第 10 个交易日收盘冻结；窗口未满时随最新收盘变化，始终不进入真实交易统计。</li>
               <li>“收益点数合计”是多笔个股收益率百分点相加，不是按本金、仓位和复利计算的账户收益率。</li>
               <li>图表采用 A 股红涨绿跌：零轴以上红色、零轴以下绿色。</li>
             </ul>

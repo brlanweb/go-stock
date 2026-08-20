@@ -27,12 +27,12 @@ function signedPoints(value: number | null | undefined, digits = 2) {
 }
 
 const statusLabels: Record<Position['status'], string> = {
-  pending_entry: '等待建仓', holding: '持有中', exited: '已退出', expired: '未建仓过期',
+  pending_entry: '等待建仓', holding: '持有中', exited: '已退出', expired: '未建仓过期', removed: '移除自选放弃',
 }
 // 退出归因：区分确定性风控与 AI 判断，便于复盘各条纪律的实际贡献。
 const exitKindLabels: Record<string, string> = {
-  ai: 'AI判断', stop_loss: '硬止损', trailing_stop: '移动止盈',
-  take_profit: '目标止盈', time_stop: '时间止损', trend_break: '趋势破位', systemic: '系统性风险',
+  manual: '手动平仓', ai: 'AI建议', stop_loss: '硬止损建议', trailing_stop: '移动止盈建议',
+  take_profit: '目标止盈建议', time_stop: '时间止损建议', trend_break: '趋势破位建议', systemic: '系统性风险建议',
 }
 const lifecycleRows = computed(() => positions.value.slice(0, 12))
 function statusLabel(status: Position['status']) { return statusLabels[status] || status }
@@ -47,6 +47,7 @@ function recommendationStatus(item: Recommendation) {
   if (item.position_status === 'holding') return `持有 ${item.tracked_days} 天`
   if (item.position_status === 'exited') return '已退出'
   if (item.position_status === 'expired') return '未建仓过期'
+  if (item.position_status === 'removed') return '移除自选放弃'
   if (item.reference_only && item.change_pct != null) return `参考走势 ${item.tracked_days} 天`
   return '仅推荐记录'
 }
@@ -57,9 +58,9 @@ const dailyPick = computed(() => entryAdvice.value?.items.find(item => item.sour
 const lifecycleSummary = computed(() => {
   if (!stats.value?.lifecycle_picks) return '最新推荐尚未建立交易生命周期'
   if (stats.value.pending_picks > 0 && stats.value.holding_picks === 0 && stats.value.exited_picks === 0) {
-    return `${stats.value.pending_picks} 只等待盘中 AI 给出建仓区间，未建仓不计算收益`
+    return `${stats.value.pending_picks} 只等待手动确认建仓，AI 建仓区间仅作决策参考`
   }
-  return '只统计真实建仓生命周期；持有中计浮盈，AI/硬风控退出后才冻结收益'
+  return '只统计手动确认的真实建仓生命周期；持有中计浮盈，手动平仓后冻结收益'
 })
 
 const equityChart = computed(() => {
@@ -178,7 +179,7 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
       <section class="dashboard-grid">
         <article class="panel basket-panel">
           <header class="basket-header">
-            <div><b>每日三只趋势推荐组合</b><small>每个推荐日等权汇总 3 只；次日开盘为参考起点，退出后冻结，未退出跟随最新收盘</small></div>
+            <div><b>每日三只趋势推荐组合</b><small>唯一最强按手动建仓/平仓结算；其余 2 只按次日开盘至第 10 个交易日收盘结算</small></div>
             <div class="basket-summary" aria-label="组合表现摘要">
               <span><small>最新</small><strong :class="pctClass(basketChart.latest?.value)">{{ signed(basketChart.latest?.value) }}</strong></span>
               <span><small>最高</small><strong class="up">{{ signed(basketChart.best?.value) }}</strong></span>
@@ -215,7 +216,7 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
             <strong>已冻结 {{ basketChart.frozen }} · 跟踪中 {{ basketChart.tracking }}</strong>
           </footer>
           <div class="rule-entry">
-            <span>组合口径：每个推荐日等权汇总 3 只，次日开盘为参考起点，规则退出后冻结，未退出跟随最新收盘。</span>
+            <span>组合口径：每日 3 只等权；唯一最强使用手动交易结果，其余 2 只从次日开盘跟踪并在第 10 个交易日收盘冻结。</span>
             <RouterLink to="/rules">查看完整规则档案 <span aria-hidden="true">→</span></RouterLink>
           </div>
         </article>
@@ -232,10 +233,10 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
 
         <article class="panel signal-panel">
           <header><div><b>当前趋势持仓</b><small>30分钟分析 · 大盘/板块/个股三层风控</small></div><i class="watching">活跃 {{ activePositionCount }}/10</i></header>
-          <div v-if="latestExit" class="signal exit"><small>最新退出 · {{ latestExit.created_at.slice(11) }}</small><button type="button" @click="openStock(latestExit.symbol)">{{ latestExit.name || latestExit.symbol }}<em>{{ latestExit.code }}</em></button><p>{{ latestExit.reason }}</p></div>
-          <div v-else-if="latestEntry" class="signal entry"><small>最新建仓 · {{ latestEntry.created_at.slice(11) }}</small><button type="button" @click="openStock(latestEntry.symbol)">{{ latestEntry.name || latestEntry.symbol }}<em>{{ latestEntry.code }}</em></button><p>{{ latestEntry.reason }}</p></div>
+          <div v-if="latestExit" class="signal exit"><small>{{ latestExit.source === 'manual' ? '最新手动平仓' : '最新平仓建议' }} · {{ latestExit.created_at.slice(11) }}</small><button type="button" @click="openStock(latestExit.symbol)">{{ latestExit.name || latestExit.symbol }}<em>{{ latestExit.code }}</em></button><p>{{ latestExit.reason }}</p></div>
+          <div v-else-if="latestEntry" class="signal entry"><small>{{ latestEntry.source === 'manual' ? '最新手动建仓' : '最新建仓建议' }} · {{ latestEntry.created_at.slice(11) }}</small><button type="button" @click="openStock(latestEntry.symbol)">{{ latestEntry.name || latestEntry.symbol }}<em>{{ latestEntry.code }}</em></button><p>{{ latestEntry.reason }}</p></div>
           <div v-else class="signal waiting"><small>最新结论</small><b>等待趋势确认</b><p>{{ entryAdvice?.items.find(item => item.action === 'wait')?.reason || '当前尚未给出建仓建议。' }}</p></div>
-          <div v-if="dailyPick" class="daily-pick"><span>今日首选</span><button type="button" @click="openStock(dailyPick.symbol)">{{ dailyPick.name || dailyPick.symbol }} <small>{{ dailyPick.code }}</small></button><p>{{ dailyPick.reason }}</p></div>
+          <div v-if="dailyPick" class="daily-pick"><span>今日唯一最强</span><button type="button" @click="openStock(dailyPick.symbol)">{{ dailyPick.name || dailyPick.symbol }} <small>{{ dailyPick.code }}</small></button><p>{{ dailyPick.reason }}</p></div>
         </article>
 
         <article class="panel reason-panel">
@@ -254,12 +255,12 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
               <span class="stock"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }} · 入池 {{ item.pick_date }}</small></span>
               <span class="status" :class="item.status">{{ statusLabel(item.status) }}</span>
               <span><small>成本</small>{{ item.entry_price == null ? '—' : item.entry_price.toFixed(2) }}</span>
-              <span><small>{{ item.status === 'exited' ? '退出价' : '参考价' }}</small>{{ referenceLabel(item) }}</span>
+              <span><small>{{ item.status === 'exited' ? '平仓价' : '参考价' }}</small>{{ referenceLabel(item) }}</span>
               <span><small>仓位</small>{{ item.status === 'holding' ? `${(item.position_pct ?? 100).toFixed(0)}%` : '—' }}</span>
               <strong :class="pctClass(item.change_pct)">{{ signed(item.change_pct) }}</strong>
               <span class="reason">
                 <em v-if="item.exit_kind" class="exit-kind" :class="item.exit_kind">{{ exitKindLabel(item.exit_kind) }}</em>
-                {{ item.exit_reason || (item.status === 'holding' ? `已持有 ${item.hold_days} 个交易日` : '等待盘中信号') }}
+                {{ item.exit_reason || (item.status === 'holding' ? `已持有 ${item.hold_days} 个交易日` : '等待手动建仓') }}
               </span>
             </button>
           </div>

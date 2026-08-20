@@ -9,3 +9,4 @@ web/dist/
 .vscode/
 *.log
 .DS_Store
+._*

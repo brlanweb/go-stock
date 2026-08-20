@@ -7,6 +7,12 @@ import (
 	"github.com/hoax/go-stock/internal/model"
 )
 
+func TestDailyEntryPickCountKeepsOnlyUniqueStrongest(t *testing.T) {
+	if DailyEntryPickCount != 1 {
+		t.Fatalf("daily lifecycle pool must contain exactly one strongest pick, got %d", DailyEntryPickCount)
+	}
+}
+
 func TestSelectBestEntryPickPrefersProbabilityThenLowerRisk(t *testing.T) {
 	risk := func(v float64) *float64 { return &v }
 	items := []model.StockRecommendation{
@@ -21,7 +27,7 @@ func TestSelectBestEntryPickPrefersProbabilityThenLowerRisk(t *testing.T) {
 	}
 }
 
-// 每日建仓多只以分散个股特异风险：单票持仓时组合收益等于单票波动，方差极大。
+// 多只候选选择函数仍需保持确定性，实际每日生命周期只取第一只。
 func TestSelectEntryPicksReturnsDiversifiedSet(t *testing.T) {
 	risk := func(v float64) *float64 { return &v }
 	items := []model.StockRecommendation{

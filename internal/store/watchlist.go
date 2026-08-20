@@ -64,3 +64,80 @@ func (s *Store) RemoveWatchlist(ctx context.Context, symbol string) error {
 	_, err := s.DB.ExecContext(ctx, "DELETE FROM watchlist WHERE symbol=?", symbol)
 	return err
 }
+
+// RemoveWatchlistAndAbandonLifecycle 处理用户手动移除自选：自选是 AI 生命周期
+// 的实时跟踪入口，移除即表示用户放弃该标的，必须同步终结活跃生命周期，
+// 否则盘中调度会继续分析一只用户已不关注（甚至已场外卖出）的股票。
+//
+// 联动口径（与统计口径一一对应）：
+//   - pending_entry → expired：撤销建仓候选，与宽限期过期同口径，不产生收益样本；
+//   - holding → removed：停止跟踪。没有用户确认的平仓价，收益无法可信结算，
+//     不进入胜率/收益/考核统计（区别于 exited 的冻结结算）；
+//   - 每条状态流转写入 entry_advice 审计记录，全部动作与自选删除同事务提交。
+func (s *Store) RemoveWatchlistAndAbandonLifecycle(ctx context.Context, symbol, tradeDate string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id,status FROM position WHERE symbol=? AND status IN (?,?) FOR UPDATE`,
+		symbol, PositionPendingEntry, PositionHolding)
+	if err != nil {
+		return err
+	}
+	type activePosition struct {
+		id     int64
+		status string
+	}
+	var actives []activePosition
+	for rows.Next() {
+		var item activePosition
+		if err := rows.Scan(&item.id, &item.status); err != nil {
+			rows.Close()
+			return err
+		}
+		actives = append(actives, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, active := range actives {
+		if active.status == PositionPendingEntry {
+			reason := "用户手动移除自选，撤销建仓候选"
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE position SET status=?,exit_reason=? WHERE id=? AND status=?`,
+				PositionExpired, reason, active.id, PositionPendingEntry); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO entry_advice (trade_date,symbol,source,stage,action,reason,urgency,model_name)
+				 VALUES (?,?,?,?,?,?,?,?)`,
+				tradeDate, symbol, EntrySourceManual, EntryStageEntry, PositionExpired, reason,
+				EntryUrgencyNormal, "manual"); err != nil {
+				return err
+			}
+			continue
+		}
+		reason := "用户手动移除自选，停止跟踪；无确认平仓价，不计入收益统计"
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE position SET status=?,exit_date=?,exit_reason=?,exit_kind=? WHERE id=? AND status=?`,
+			PositionRemoved, tradeDate, reason, ExitKindManual, active.id, PositionHolding); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO entry_advice (trade_date,symbol,source,stage,action,reason,urgency,model_name)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			tradeDate, symbol, EntrySourceManual, EntryStageExit, PositionRemoved, reason,
+			EntryUrgencyNormal, "manual"); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM watchlist WHERE symbol=?", symbol); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

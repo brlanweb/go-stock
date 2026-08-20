@@ -3,7 +3,9 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -72,12 +74,17 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/montecarlo/{code}", s.handleRecommendationMonteCarlo)
 	mux.HandleFunc("GET /api/v1/entry/advice", s.handleEntryAdvice)
 	mux.HandleFunc("GET /api/v1/positions", s.handlePositions)
+	mux.HandleFunc("POST /api/v1/positions/{id}/enter", s.handlePositionEnter)
+	mux.HandleFunc("POST /api/v1/positions/{id}/exit", s.handlePositionExit)
 	mux.HandleFunc("GET /api/v1/entry/status", s.handleEntryStatus)
 	mux.HandleFunc("POST /api/v1/entry/run", s.handleEntryRun)
 	mux.HandleFunc("GET /api/v1/hotspot", s.handleHotspot)
 	mux.HandleFunc("GET /api/v1/hotspot/history", s.handleHotspotHistory)
 	mux.HandleFunc("GET /api/v1/hotspot/status", s.handleHotspotStatus)
 	mux.HandleFunc("POST /api/v1/hotspot/run", s.handleHotspotRun)
+	mux.HandleFunc("GET /api/v1/risk/gate", s.handleRiskGate)
+	mux.HandleFunc("GET /api/v1/risk/gate/history", s.handleRiskGateHistory)
+	mux.HandleFunc("POST /api/v1/risk/gate/run", s.handleRiskGateRun)
 	mux.HandleFunc("GET /api/v1/review", s.handleDailyReview)
 	mux.HandleFunc("GET /api/v1/review/history", s.handleDailyReviewHistory)
 	mux.HandleFunc("GET /api/v1/review/status", s.handleDailyReviewStatus)
@@ -944,6 +951,64 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 }
 
+func (s *Server) manualPositionPrice(ctx context.Context, symbol string) (float64, error) {
+	var quote *model.Quote
+	var err error
+	if s.Svc != nil {
+		quote, err = s.Svc.Quote(ctx, symbol)
+	}
+	if quote == nil || err != nil || quote.Price == nil || *quote.Price <= 0 {
+		quote, err = s.St.LatestQuote(ctx, symbol)
+	}
+	if err != nil || quote == nil || quote.Price == nil || *quote.Price <= 0 {
+		return 0, fmt.Errorf("%s 当前价格不可用，无法确认交易", symbol)
+	}
+	return *quote.Price, nil
+}
+
+func (s *Server) handlePositionEnter(w http.ResponseWriter, r *http.Request) {
+	s.handleManualPositionAction(w, r, true)
+}
+
+func (s *Server) handlePositionExit(w http.ResponseWriter, r *http.Request) {
+	s.handleManualPositionAction(w, r, false)
+}
+
+func (s *Server) handleManualPositionAction(w http.ResponseWriter, r *http.Request, enter bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "无效的持仓 id")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	position, err := s.St.PositionByID(ctx, id)
+	if err == sql.ErrNoRows {
+		writeErr(w, http.StatusNotFound, "持仓记录不存在")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	price, err := s.manualPositionPrice(ctx, position.Symbol)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	tradeDate := time.Now().In(shanghaiLoc()).Format("2006-01-02")
+	if enter {
+		err = s.St.ManuallyEnterPosition(ctx, id, tradeDate, price)
+	} else {
+		err = s.St.ManuallyExitPosition(ctx, id, tradeDate, price)
+	}
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "price": price, "status": map[bool]string{true: store.PositionHolding, false: store.PositionExited}[enter]})
+}
+
 // handleEntryStatus 返回盘中建仓分析任务状态，供手动触发后轮询。
 func (s *Server) handleEntryStatus(w http.ResponseWriter, r *http.Request) {
 	enabled, running, lastError := false, false, ""
@@ -1161,7 +1226,9 @@ func (s *Server) handleWatchlistDel(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	if err := s.St.RemoveWatchlist(ctx, symbol); err != nil {
+	// 手动移除自选即放弃该标的的 AI 生命周期：撤销待建仓候选、终止持仓跟踪，
+	// 盘中调度不再分析；收益统计按 expired/removed 口径排除（见 store 注释）。
+	if err := s.St.RemoveWatchlistAndAbandonLifecycle(ctx, symbol, time.Now().In(shanghaiLoc()).Format("2006-01-02")); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
