@@ -23,15 +23,44 @@ interface TreeDatum {
 const router = useRouter()
 const route = useRoute()
 
-// 首页七个同级 Tab：默认统计总览；策略考核集中展示全链路指标与参数审计。
-// 旧路径 /review /recommendations /indicators 通过 ?view= 重定向进入对应 Tab。
+// 导航按「交易日决策流程」分两级，主 Tab 只留 5 个：
+//   总览(home) → 市场(heatmap/hotspot) → 交易(reco) → 复盘(review/scorecard/indicators) → 风险(risk)
+// 二级页仍用同一套 ?view= 值，因此旧链接与书签（?view=reco 等）全部保持有效，
+// 归属关系由 viewGroup 反查，进入时自动展开对应主 Tab。
 type HomeView = 'home' | 'heatmap' | 'risk' | 'review' | 'reco' | 'scorecard' | 'hotspot' | 'indicators'
 const homeViews: HomeView[] = ['home', 'heatmap', 'risk', 'review', 'reco', 'scorecard', 'hotspot', 'indicators']
+
+type NavGroup = 'home' | 'market' | 'trade' | 'retro' | 'risk'
+interface NavItem { key: NavGroup; label: string; views: HomeView[]; subLabels?: string[]; live?: boolean }
+const navItems: NavItem[] = [
+  { key: 'home', label: '总览', views: ['home'] },
+  { key: 'market', label: '市场', views: ['heatmap', 'hotspot'], subLabels: ['大盘云图', '热点漏斗'], live: true },
+  { key: 'trade', label: '交易', views: ['reco'] },
+  { key: 'retro', label: '复盘', views: ['review', 'scorecard', 'indicators'], subLabels: ['每日复盘', '策略考核', '指标与回测'] },
+  { key: 'risk', label: '风险', views: ['risk'] },
+]
+const viewGroup = new Map<HomeView, NavGroup>(
+  navItems.flatMap(item => item.views.map(view => [view, item.key] as [HomeView, NavGroup]))
+)
+
 function normalizeView(value: unknown): HomeView {
   return homeViews.includes(value as HomeView) ? value as HomeView : 'home'
 }
 const activeView = ref<HomeView>(normalizeView(route.query.view))
 watch(() => route.query.view, value => { if (value) activeView.value = normalizeView(value) })
+
+const activeGroup = computed<NavGroup>(() => viewGroup.get(activeView.value) || 'home')
+// 当前主 Tab 下的二级页；只有一项时不渲染二级栏，避免无意义的一层点击。
+const activeSubItems = computed(() => {
+  const item = navItems.find(nav => nav.key === activeGroup.value)
+  if (!item || !item.subLabels || item.views.length < 2) return []
+  return item.views.map((view, index) => ({ view, label: item.subLabels![index] }))
+})
+// 切换主 Tab 时进入该组第一个二级页；点击当前组则保持已选二级页不跳回。
+function selectGroup(item: NavItem) {
+  if (activeGroup.value === item.key) return
+  activeView.value = item.views[0]
+}
 const groups = ref<HeatmapGroup[]>([])
 const notice = ref('')
 const error = ref('')
@@ -212,21 +241,28 @@ onUnmounted(() => {
   <main class="heatmap-workspace">
     <MarketSidebar :market="market" :group-by="groupBy" :metric="metric" :period="period" :controls="activeView === 'heatmap'" :security-count="itemCount" @change="options => { market = options.market; groupBy = options.groupBy; metric = options.metric; period = options.period; setOption() }" />
 
-    <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView !== 'heatmap' }">
+    <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView !== 'heatmap', 'has-subtabs': activeSubItems.length > 0 }">
       <header class="canvas-header">
-        <nav class="workspace-tabs" aria-label="首页视图">
-          <button type="button" :class="{ active: activeView === 'home' }" @click="activeView = 'home'">首页</button>
-          <button type="button" :class="{ active: activeView === 'heatmap' }" @click="activeView = 'heatmap'">大盘云图</button>
-          <button type="button" :class="{ active: activeView === 'risk' }" @click="activeView = 'risk'">风险感知</button>
-          <button type="button" :class="{ active: activeView === 'review' }" @click="activeView = 'review'">每日复盘</button>
-          <button type="button" :class="{ active: activeView === 'reco' }" @click="activeView = 'reco'">趋势推荐</button>
-          <button type="button" :class="{ active: activeView === 'scorecard' }" @click="activeView = 'scorecard'">策略考核</button>
-          <button type="button" :class="{ active: activeView === 'hotspot' }" @click="activeView = 'hotspot'"><span class="live-dot"></span>热点漏斗</button>
-          <button type="button" :class="{ active: activeView === 'indicators' }" @click="activeView = 'indicators'">指标与回测</button>
+        <nav class="workspace-tabs" aria-label="主视图">
+          <button
+            v-for="item in navItems" :key="item.key" type="button"
+            :class="{ active: activeGroup === item.key }"
+            :aria-current="activeGroup === item.key ? 'page' : undefined"
+            @click="selectGroup(item)"
+          >{{ item.label }}</button>
         </nav>
-        <div v-if="activeView === 'heatmap'" class="legend"><span>板块面积以成分市值为主，概念兼顾活跃度；个股面积代表市值，颜色代表涨跌幅</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
-        <div v-else-if="activeView === 'hotspot'" class="hotspot-caption">数据初筛 → 关系收敛 → AI 产业链分析 → 本地数据回验</div>
+        <div v-if="activeView === 'heatmap'" class="legend"><span>面积＝市值，颜色＝涨跌幅</span><i v-for="value in heatLegend" :key="value" :style="{ background: tileColor(value) }">{{ value > 0 ? `+${value}%` : `${value}%` }}</i></div>
       </header>
+
+      <!-- 二级栏：仅在主 Tab 含多个子页时出现 -->
+      <nav v-if="activeSubItems.length" class="workspace-subtabs" aria-label="子视图">
+        <button
+          v-for="sub in activeSubItems" :key="sub.view" type="button"
+          :class="{ active: activeView === sub.view }"
+          @click="activeView = sub.view"
+        >{{ sub.label }}</button>
+        <span v-if="activeView === 'hotspot'" class="sub-caption">数据初筛 → 关系收敛 → AI 产业链分析 → 本地回验</span>
+      </nav>
       <Home v-if="activeView === 'home'" />
       <template v-else-if="activeView === 'heatmap'">
         <section v-if="notice || error" class="market-notice" :class="{ error }">{{ error || notice }}</section>
@@ -252,7 +288,21 @@ onUnmounted(() => {
 
 <style scoped>
 .heatmap-workspace { display:grid; grid-template-columns:212px minmax(0,1fr); width:100vw; height:100vh; overflow:hidden; background:#151f31; color:#edf1f7; }
-.heatmap-canvas { display:grid; min-width:0; min-height:0; grid-template-rows:35px minmax(0,1fr); overflow:hidden; }.canvas-header { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:16px; overflow:hidden; padding:0 8px; border-bottom:1px solid #354157; background:#182234; }.workspace-tabs { align-self:stretch; display:flex; min-width:0; align-items:stretch; overflow-x:auto; scrollbar-width:none; }.workspace-tabs::-webkit-scrollbar { display:none; }.workspace-tabs button { display:flex; min-width:112px; align-items:center; justify-content:center; gap:7px; padding:0 14px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:#94a1b5; cursor:pointer; font-size:13px; font-weight:700; }.workspace-tabs button:hover { color:#e2e7ef; }.workspace-tabs button.active { border-bottom-color:#e0b64f; background:#202d41; color:#f0c760; }.hotspot-caption { overflow:hidden; color:#8e9cb0; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.live-dot { width:7px; height:7px; background:#00a56f; box-shadow:0 0 0 3px rgba(0,165,111,.14); }
+.heatmap-canvas { display:grid; min-width:0; min-height:0; grid-template-rows:38px minmax(0,1fr); overflow:hidden; }
+.heatmap-canvas.has-subtabs { grid-template-rows:38px 30px minmax(0,1fr); }
+.canvas-header { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:16px; overflow:hidden; padding:0 8px; border-bottom:1px solid #354157; background:#182234; }
+.workspace-tabs { align-self:stretch; display:flex; min-width:0; align-items:stretch; overflow-x:auto; scrollbar-width:none; }
+.workspace-tabs::-webkit-scrollbar { display:none; }
+.workspace-tabs button { display:flex; min-width:88px; align-items:center; justify-content:center; padding:0 20px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:#94a1b5; cursor:pointer; font-size:14px; font-weight:700; letter-spacing:1px; }
+.workspace-tabs button:hover { color:#e2e7ef; }
+.workspace-tabs button.active { border-bottom-color:#e0b64f; background:#202d41; color:#f0c760; }
+/* 二级栏：视觉上明显弱于主栏，避免与主导航争夺注意力 */
+.workspace-subtabs { display:flex; min-width:0; align-items:center; gap:2px; overflow-x:auto; padding:0 10px; border-bottom:1px solid #26324a; background:#131e2f; scrollbar-width:none; }
+.workspace-subtabs::-webkit-scrollbar { display:none; }
+.workspace-subtabs button { padding:3px 12px; border:1px solid transparent; border-radius:2px; background:transparent; color:#8895ab; cursor:pointer; font-size:11.5px; white-space:nowrap; }
+.workspace-subtabs button:hover { color:#dbe3ee; }
+.workspace-subtabs button.active { border-color:#3a496a; background:#1e2c45; color:#e9c16c; }
+.sub-caption { overflow:hidden; margin-left:10px; color:#75839a; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .legend { display:flex; min-width:0; align-items:center; justify-content:flex-end; gap:2px; color:#aeb8c9; font-size:12px; white-space:nowrap; }.legend>span { margin-right:8px; overflow:hidden; text-overflow:ellipsis; }.legend i { min-width:43px; padding:4px 5px; color:#fff; font-style:normal; text-align:center; }
 .market-notice { position:absolute; z-index:30; top:40px; left:220px; padding:8px 11px; border-left:3px solid #d6a12c; background:#342d1d; color:#e9c986; font-size:12px; }.market-notice.error { border-color:#db4b57; background:#3a2329; color:#ffb1b8; }
 .treemap-stage { position:relative; min-width:0; min-height:0; margin:7px 8px 8px; overflow:hidden; background:#151f31; }.treemap-stage.empty { display:grid; place-items:center; }.sector-frame { position:absolute; z-index:5; overflow:hidden; border:1px solid #43516a; pointer-events:none; }.sector-title { position:absolute; z-index:1; top:0; right:0; left:0; display:flex; width:100%; height:19px; min-width:0; align-items:center; gap:4px; overflow:hidden; padding:1px 4px; border:0; border-radius:0; background:#1b2638; color:#d5dce7; cursor:pointer; font-size:11px; line-height:17px; text-align:left; pointer-events:auto; }.sector-title:hover { color:#ffd400; }.sector-title span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sector-title i { flex:0 1 auto; min-width:0; overflow:hidden; color:#8794a8; font-size:8px; font-style:normal; text-overflow:ellipsis; white-space:nowrap; }

@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, fmtPct, pctClass, type EntryAdviceResponse, type Position, type Recommendation, type RecommendationBasketPerformance, type RecommendationRiskPolicy, type RecommendationStats, type RiskGateOverview } from '../api'
+import MiniChart from '../components/MiniChart.vue'
 
 const router = useRouter()
 const loading = ref(true)
@@ -39,7 +40,6 @@ const exitKindLabels: Record<string, string> = {
   manual: '手动平仓', ai: 'AI建议', stop_loss: '硬止损建议', trailing_stop: '移动止盈建议',
   take_profit: '目标止盈建议', time_stop: '时间止损建议', trend_break: '趋势破位建议', systemic: '系统性风险建议',
 }
-const lifecycleRows = computed(() => positions.value.slice(0, 12))
 function statusLabel(status: Position['status']) { return statusLabels[status] || status }
 function exitKindLabel(kind?: string) { return kind ? exitKindLabels[kind] || kind : '' }
 function referenceLabel(item: Position) {
@@ -179,6 +179,49 @@ const riskPolicyHint = computed(() => {
   return `复盘${riskPolicy.value.review_date || '—'} · ${phase}阶段`
 })
 function openRiskTab() { router.push({ path: '/', query: { view: 'risk' } }) }
+// 首页只做总览；完整推荐历史、持仓操作与蒙特卡洛都在「交易」Tab，避免两处重复维护。
+function openTradeTab() { router.push({ path: '/', query: { view: 'reco' } }) }
+
+// 三道风险门收敛成一组状态点，用颜色而非成段文字表达档位。
+const gateDots = computed(() => [
+  { key: 'global', label: '外盘', cls: gateMeta(globalGate.value?.level).cls, text: globalGate.value ? `${gateMeta(globalGate.value.level).label} ${globalGate.value.score}` : '无数据', tip: globalGate.value?.reason || '今日尚未采集外盘因子' },
+  { key: 'market', label: '境内', cls: gateMeta(marketGate.value?.level).cls, text: marketGate.value ? gateMeta(marketGate.value.level).label : '无数据', tip: marketGate.value?.reason || '指数风向数据不可用' },
+  { key: 'policy', label: '惩罚起点', cls: 'lv-plain', text: riskPolicyText.value, tip: riskPolicyHint.value },
+])
+
+// ---- 指标卡图形化数据 ----
+// 每张卡都配一条迷你图：占比条(bar)、双向标尺(gauge)、构成条(split/stack)。
+// 数字仍是主角，图形只负责让「好/坏、多/少」在扫视中立刻成立。
+const winSegments = computed(() => [
+  { value: stats.value?.wins ?? 0, label: '胜', tone: 'up' as const },
+  { value: stats.value?.losses ?? 0, label: '负', tone: 'down' as const },
+  { value: stats.value?.breakeven ?? 0, label: '平', tone: 'flat' as const },
+])
+const referenceWinSegments = computed(() => [
+  { value: stats.value?.reference_wins ?? 0, label: '胜', tone: 'up' as const },
+  { value: stats.value?.reference_losses ?? 0, label: '负', tone: 'down' as const },
+])
+const profitSegments = computed(() => [
+  { value: Math.abs(stats.value?.gross_profit_pct ?? 0), label: '总盈利', tone: 'up' as const },
+  { value: Math.abs(stats.value?.gross_loss_pct ?? 0), label: '总亏损', tone: 'down' as const },
+])
+const extremeSegments = computed(() => [
+  { value: Math.abs(stats.value?.best_pct ?? 0), label: '最好', tone: 'up' as const },
+  { value: Math.abs(stats.value?.worst_pct ?? 0), label: '最差', tone: 'down' as const },
+])
+const lifecycleSegments = computed(() => [
+  { value: stats.value?.pending_picks ?? 0, label: '待建', tone: 'warn' as const },
+  { value: stats.value?.holding_picks ?? 0, label: '持有', tone: 'up' as const },
+  { value: stats.value?.exited_picks ?? 0, label: '退出', tone: 'down' as const },
+  { value: stats.value?.expired_picks ?? 0, label: '过期', tone: 'flat' as const },
+])
+// gauge 量程取「当前值与参考刻度的较大者」，保证极端值不撑爆、正常值不贴边。
+function gaugeMax(value: number | null | undefined, base: number) {
+  return Math.max(base, Math.abs(value ?? 0) * 1.15)
+}
+
+// 待办：只列出需要人工动作的持仓（等待建仓 / 持有中），完整明细在「交易」Tab。
+const actionRows = computed(() => positions.value.filter(item => item.status === 'pending_entry' || item.status === 'holding').slice(0, 6))
 
 async function observeBasketChart() {
   await nextTick()
@@ -219,51 +262,110 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
   <main class="overview">
     <header class="overview-header"><div><strong>趋势交易总览</strong><small>{{ lifecycleSummary }}</small></div><button type="button" :disabled="loading" title="刷新首页统计" @click="load">↻</button></header>
 
-    <!-- 风险感知带：独立于绩效统计加载，任何状态下都优先可见。
-         点击任意卡片进入「风险感知」Tab 查看外盘因子明细。 -->
-    <section class="risk-band" :class="finalGate.cls">
-      <button type="button" class="risk-main" :title="'查看风险感知明细'" @click="openRiskTab">
-        <small>综合风险档位</small>
-        <b>{{ finalGate.label }}</b>
-        <span>{{ finalGate.action }}</span>
+    <!-- 风险灯条：一行读完「今天能不能做、系统会不会自己开仓」。
+         独立于绩效统计加载，任何状态下都优先可见；点击进入风险感知明细。 -->
+    <section class="risk-strip" :class="finalGate.cls">
+      <button type="button" class="risk-light" title="查看风险感知明细" @click="openRiskTab">
+        <i class="lamp" />
+        <span class="light-text"><b>{{ finalGate.label }}</b><em>{{ finalGate.action }}</em></span>
       </button>
-      <button type="button" class="risk-cell" @click="openRiskTab">
-        <small>自动建仓</small>
-        <b :class="autoEntryOn ? 'on' : 'off'">{{ autoEntryLabel }}</b>
-        <span>{{ autoEntryHint }}</span>
+
+      <button type="button" class="risk-entry" :class="autoEntryOn ? 'on' : 'off'" :title="autoEntryHint" @click="openRiskTab">
+        <i class="switch"><u /></i>
+        <span><small>自动建仓</small><b>{{ autoEntryLabel }}</b></span>
       </button>
-      <button type="button" class="risk-cell" @click="openRiskTab">
-        <small>全球风险门 <em>隔夜外盘</em></small>
-        <b :class="gateMeta(globalGate?.level).cls">{{ globalGate ? gateMeta(globalGate.level).label : '无数据' }}<i v-if="globalGate">{{ globalGate.score }} 分</i></b>
-        <span>{{ globalGate?.reason || '今日尚未采集外盘因子' }}</span>
-      </button>
-      <button type="button" class="risk-cell" @click="openRiskTab">
-        <small>境内风向门 <em>T-1 收盘</em></small>
-        <b :class="gateMeta(marketGate?.level).cls">{{ marketGate ? gateMeta(marketGate.level).label : '无数据' }}</b>
-        <span>{{ marketGate?.reason || '指数风向数据不可用' }}</span>
-      </button>
-      <button type="button" class="risk-cell" @click="openRiskTab">
-        <small>风险惩罚起点</small>
-        <b>{{ riskPolicyText }}</b>
-        <span>{{ riskPolicyHint }}</span>
-      </button>
+
+      <div class="risk-dots">
+        <button v-for="dot in gateDots" :key="dot.key" type="button" class="dot-item" :title="dot.tip" @click="openRiskTab">
+          <i class="dot" :class="dot.cls" />
+          <span><small>{{ dot.label }}</small><b>{{ dot.text }}</b></span>
+        </button>
+      </div>
+
       <p v-if="riskError" class="risk-alert">风险感知不可用：{{ riskError }} —— 请按最保守口径处理</p>
     </section>
 
     <div v-if="loading" class="state">正在汇总真实持仓与结算数据…</div>
     <div v-else-if="error" class="state error">{{ error }}</div>
     <template v-else>
+      <!-- 绩效指标：数字 + 迷你图。图形负责「好坏多少」一眼可判，
+           文字只留必要口径，不再逐卡堆三行说明。 -->
       <section class="metric-band">
-        <article class="metric primary"><small>已退出胜率</small><b :class="(stats?.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats?.win_rate == null ? '0.0%' : `${stats.win_rate.toFixed(1)}%` }}</b><span>{{ stats?.frozen_picks ? `${stats.wins} 胜 / ${stats.losses} 负 / ${stats.breakeven} 平` : '暂无真实退出样本' }}</span></article>
-        <article class="metric"><small>已实现收益合计</small><b :class="pctClass(stats?.sum_change_pct)">{{ signed(stats?.sum_change_pct) }}</b><span>{{ stats?.frozen_picks || 0 }} 笔已退出 · 非账户收益率</span></article>
-        <article class="metric"><small>单笔平均 / 中位数</small><b :class="pctClass(stats?.avg_change_pct)">{{ signed(stats?.avg_change_pct) }}</b><span>中位数 {{ signed(stats?.median_pct) }}</span></article>
-        <article class="metric"><small>持有中浮动收益</small><b :class="pctClass(stats?.unrealized_sum_pct)">{{ signed(stats?.unrealized_sum_pct) }}</b><span>{{ stats?.holding_picks || 0 }} 笔 · 均值 {{ signed(stats?.unrealized_avg_pct) }}</span></article>
-        <article class="metric"><small>标准盈亏因子</small><b>{{ stats?.profit_factor == null ? ((stats?.wins || 0) > 0 && (stats?.losses || 0) === 0 ? '∞' : '—') : stats.profit_factor.toFixed(2) }}</b><span>总盈利 {{ signed(stats?.gross_profit_pct) }} / 总亏损 {{ signed(stats?.gross_loss_pct) }}</span></article>
-        <article class="metric"><small>平均持有时间</small><b>{{ stats?.avg_hold_days == null ? '—' : `${stats.avg_hold_days.toFixed(1)} 天` }}</b><span>仅统计已退出交易</span></article>
-        <article class="metric"><small>生命周期分布</small><b class="lifecycle-count">{{ stats?.lifecycle_picks || 0 }} 笔</b><span>待建 {{ stats?.pending_picks || 0 }} · 持有 {{ stats?.holding_picks || 0 }} · 退出 {{ stats?.exited_picks || 0 }} · 过期 {{ stats?.expired_picks || 0 }}</span></article>
-        <article class="metric reference"><small>历史参考胜率</small><b :class="(stats?.reference_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats?.reference_win_rate == null ? '0.0%' : `${stats.reference_win_rate.toFixed(1)}%` }}</b><span>{{ stats?.reference_wins || 0 }} 胜 / {{ stats?.reference_losses || 0 }} 负 · {{ stats?.reference_frozen_picks || 0 }} 笔规则退出</span></article>
-        <article class="metric reference"><small>历史参考收益点数</small><b :class="pctClass(stats?.reference_sum_change_pct)">{{ signedPoints(stats?.reference_sum_change_pct) }}</b><span>{{ stats?.reference_picks || 0 }} 只旧推荐 · 不计入真实交易</span></article>
-        <article class="metric"><small>已退出极值</small><b class="range"><i class="up">{{ signed(stats?.best_pct) }}</i><em>/</em><i class="down">{{ signed(stats?.worst_pct) }}</i></b><span>{{ stats?.best_name || '—' }} / {{ stats?.worst_name || '—' }}</span></article>
+        <article class="metric primary">
+          <small>已退出胜率</small>
+          <b :class="(stats?.win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats?.win_rate == null ? '0.0%' : `${stats.win_rate.toFixed(1)}%` }}</b>
+          <MiniChart kind="bar" :value="stats?.win_rate ?? 0" />
+          <span v-if="stats?.frozen_picks"><i class="up">{{ stats.wins }}</i>/<i class="down">{{ stats.losses }}</i>/<i class="dim">{{ stats.breakeven }}</i> 胜负平</span>
+          <span v-else>暂无真实退出样本</span>
+        </article>
+
+        <article class="metric">
+          <small>已实现收益合计</small>
+          <b :class="pctClass(stats?.sum_change_pct)">{{ signed(stats?.sum_change_pct) }}</b>
+          <MiniChart kind="gauge" :value="stats?.sum_change_pct ?? 0" :max="gaugeMax(stats?.sum_change_pct, 20)" />
+          <span>{{ stats?.frozen_picks || 0 }} 笔已退出</span>
+        </article>
+
+        <article class="metric">
+          <small>单笔平均</small>
+          <b :class="pctClass(stats?.avg_change_pct)">{{ signed(stats?.avg_change_pct) }}</b>
+          <MiniChart kind="gauge" :value="stats?.avg_change_pct ?? 0" :max="gaugeMax(stats?.avg_change_pct, 10)" />
+          <span>中位数 {{ signed(stats?.median_pct) }}</span>
+        </article>
+
+        <article class="metric">
+          <small>持有中浮动</small>
+          <b :class="pctClass(stats?.unrealized_sum_pct)">{{ signed(stats?.unrealized_sum_pct) }}</b>
+          <MiniChart kind="gauge" :value="stats?.unrealized_sum_pct ?? 0" :max="gaugeMax(stats?.unrealized_sum_pct, 10)" />
+          <span>{{ stats?.holding_picks || 0 }} 笔 · 均 {{ signed(stats?.unrealized_avg_pct) }}</span>
+        </article>
+
+        <article class="metric">
+          <small>标准盈亏因子</small>
+          <b>{{ stats?.profit_factor == null ? ((stats?.wins || 0) > 0 && (stats?.losses || 0) === 0 ? '∞' : '—') : stats.profit_factor.toFixed(2) }}</b>
+          <MiniChart kind="split" :segments="profitSegments" />
+          <span>盈 {{ signed(stats?.gross_profit_pct) }} · 亏 {{ signed(stats?.gross_loss_pct) }}</span>
+        </article>
+
+        <article class="metric">
+          <small>平均持有时间</small>
+          <b>{{ stats?.avg_hold_days == null ? '—' : `${stats.avg_hold_days.toFixed(1)} 天` }}</b>
+          <MiniChart kind="bar" :value="stats?.avg_hold_days ?? 0" :max="15" />
+          <span>上限 15 天 · 仅已退出</span>
+        </article>
+
+        <article class="metric">
+          <small>生命周期分布</small>
+          <b>{{ stats?.lifecycle_picks || 0 }} 笔</b>
+          <MiniChart kind="stack" :segments="lifecycleSegments" />
+          <span class="legend-inline">
+            <i class="k warn" />待建 {{ stats?.pending_picks || 0 }}
+            <i class="k up" />持有 {{ stats?.holding_picks || 0 }}
+            <i class="k down" />退出 {{ stats?.exited_picks || 0 }}
+            <i class="k flat" />过期 {{ stats?.expired_picks || 0 }}
+          </span>
+        </article>
+
+        <article class="metric reference">
+          <small>历史参考胜率</small>
+          <b :class="(stats?.reference_win_rate ?? 0) >= 50 ? 'up' : 'down'">{{ stats?.reference_win_rate == null ? '0.0%' : `${stats.reference_win_rate.toFixed(1)}%` }}</b>
+          <MiniChart kind="split" :segments="referenceWinSegments" />
+          <span>{{ stats?.reference_frozen_picks || 0 }} 笔规则退出</span>
+        </article>
+
+        <article class="metric reference">
+          <small>历史参考收益点数</small>
+          <b :class="pctClass(stats?.reference_sum_change_pct)">{{ signedPoints(stats?.reference_sum_change_pct) }}</b>
+          <MiniChart kind="gauge" :value="stats?.reference_sum_change_pct ?? 0" :max="gaugeMax(stats?.reference_sum_change_pct, 30)" />
+          <span>{{ stats?.reference_picks || 0 }} 只旧推荐 · 不计入真实交易</span>
+        </article>
+
+        <article class="metric">
+          <small>已退出极值</small>
+          <b class="range"><i class="up">{{ signed(stats?.best_pct) }}</i><em>/</em><i class="down">{{ signed(stats?.worst_pct) }}</i></b>
+          <MiniChart kind="split" :segments="extremeSegments" />
+          <span>{{ stats?.best_name || '—' }} / {{ stats?.worst_name || '—' }}</span>
+        </article>
       </section>
 
       <section class="dashboard-grid">
@@ -330,7 +432,10 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
         </article>
 
         <article class="panel reason-panel">
-          <header><div><b>最新推荐依据</b><small>动量强度与安全度并排比较，点击查看个股</small></div></header>
+          <header>
+            <div><b>最新推荐</b><small>趋势强度与安全度对比，点击查看个股</small></div>
+            <button type="button" class="link-btn" @click="openTradeTab">历史推荐 →</button>
+          </header>
           <div v-if="reasonRows.length" class="reason-list"><button v-for="item in reasonRows" :key="item.symbol" type="button" class="reason-row" @click="openStock(item.symbol)">
             <span class="rank">{{ item.rank }}</span><span class="stock"><b>{{ item.name }}</b><small>{{ item.code }} · {{ item.sector }}</small></span>
             <span class="bars"><i><em>趋势</em><u><b :style="{width:`${item.strength}%`}"></b></u><strong>{{ item.probability.toFixed(1) }}</strong></i><i><em>安全</em><u class="safe"><b :style="{width:`${item.safety}%`}"></b></u><strong>{{ item.safety.toFixed(0) }}</strong></i></span>
@@ -338,15 +443,19 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
           </button></div><div v-else class="empty">暂无推荐数据</div>
         </article>
 
-        <article class="panel lifecycle-panel">
-          <header><div><b>最近生命周期明细</b><small>收益已扣除往返交易成本；减仓后按仓位加权计算</small></div></header>
-          <div v-if="lifecycleRows.length" class="lifecycle-table">
-            <button v-for="item in lifecycleRows" :key="item.id" type="button" class="lifecycle-row" @click="openStock(item.symbol)">
-              <span class="stock"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }} · 入池 {{ item.pick_date }}</small></span>
+        <!-- 待办：只保留「需要你动手」的持仓。完整历史明细、建平仓确认与
+             蒙特卡洛都在「交易」Tab，首页不再重复整张表。 -->
+        <article class="panel action-panel">
+          <header>
+            <div><b>待办持仓</b><small>仅列出等待建仓与持有中；收益已扣往返成本</small></div>
+            <button type="button" class="link-btn" @click="openTradeTab">全部明细与建平仓 →</button>
+          </header>
+          <div v-if="actionRows.length" class="action-table">
+            <button v-for="item in actionRows" :key="item.id" type="button" class="action-row" @click="openStock(item.symbol)">
               <span class="status" :class="item.status">{{ statusLabel(item.status) }}</span>
-              <span><small>成本</small>{{ item.entry_price == null ? '—' : item.entry_price.toFixed(2) }}</span>
-              <span><small>{{ item.status === 'exited' ? '平仓价' : '参考价' }}</small>{{ referenceLabel(item) }}</span>
-              <span><small>仓位</small>{{ item.status === 'holding' ? `${(item.position_pct ?? 100).toFixed(0)}%` : '—' }}</span>
+              <span class="stock"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }}</small></span>
+              <span class="num"><small>成本</small>{{ item.entry_price == null ? '—' : item.entry_price.toFixed(2) }}</span>
+              <span class="num"><small>现价</small>{{ referenceLabel(item) }}</span>
               <strong :class="pctClass(item.change_pct)">{{ signed(item.change_pct) }}</strong>
               <span class="reason">
                 <em v-if="item.exit_kind" class="exit-kind" :class="item.exit_kind">{{ exitKindLabel(item.exit_kind) }}</em>
@@ -354,7 +463,7 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
               </span>
             </button>
           </div>
-          <div v-else class="empty">尚无真实持仓生命周期记录</div>
+          <div v-else class="empty">当前没有需要处理的持仓</div>
         </article>
       </section>
     </template>
@@ -362,6 +471,45 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
 </template>
 
 <style scoped>
-.overview{min-width:0;min-height:0;overflow:auto;padding:14px;background:#0f1826;color:#e7ecf4}.overview-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.overview-header>div{display:flex;align-items:baseline;gap:10px}.overview-header strong{font-size:17px}.overview-header small{color:#8895ab;font-size:11px}.overview-header>button{width:30px;height:30px;border:1px solid #3a496a;border-radius:0;background:#1c2a47;color:#c4cddc;cursor:pointer;font-size:18px}.state,.empty{display:grid;min-height:120px;place-items:center;color:#75839a;font-size:13px}.state.error{color:#ef7d84}.risk-band{display:grid;grid-template-columns:190px repeat(4,minmax(150px,1fr));gap:8px;margin-bottom:10px;padding:9px;border:1px solid #26324a;border-left:4px solid #6b7b94;background:#131e33}.risk-band.lv-green{border-left-color:#55b996}.risk-band.lv-yellow{border-left-color:#e9c16c}.risk-band.lv-red{border-left-color:#ef6a72}.risk-band>button{display:flex;min-width:0;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid #26324a;border-radius:0;background:#0f1826;color:#e7ecf4;cursor:pointer;text-align:left}.risk-band>button:hover{background:#182338}.risk-band small{display:flex;align-items:center;gap:5px;color:#8895ab;font-size:10px}.risk-band small em{padding:1px 4px;background:#25334b;color:#93a0b6;font-size:9px;font-style:normal}.risk-band b{display:flex;align-items:baseline;gap:6px;font-size:17px}.risk-band b i{color:#8895ab;font-size:10px;font-style:normal;font-weight:400}.risk-band span{overflow:hidden;color:#93a0b6;font-size:10px;line-height:1.4;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}.risk-main b{font-size:23px}.risk-band .lv-green{color:#55b996}.risk-band .lv-yellow{color:#e9c16c}.risk-band .lv-red{color:#ef6a72}.risk-band .on{color:#55b996}.risk-band .off{color:#e9c16c}.risk-band.lv-green .risk-main b{color:#55b996}.risk-band.lv-yellow .risk-main b{color:#e9c16c}.risk-band.lv-red .risk-main b{color:#ef6a72}.risk-alert{grid-column:1/-1;margin:0;padding:6px 9px;background:#3a2226;color:#ef8b91;font-size:10px}
-.metric-band{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:8px}.metric{display:flex;min-width:0;flex-direction:column;gap:5px;padding:11px 12px;border:1px solid #26324a;background:#131e33}.metric.primary{border-color:#476188;background:#1b2a46}.metric.reference{border-color:#554d39;background:#211f1b}.metric.reference>small{color:#c7ac69}.metric>small{color:#8895ab;font-size:10px}.metric>b{overflow:hidden;font-size:21px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}.metric>span{overflow:hidden;color:#8895ab;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.range{display:flex;align-items:center;gap:5px;font-size:16px!important}.range i,.range em{font-style:normal}.range em{color:#5f6d85}.up{color:#ef6a72!important}.down{color:#55b996!important}.dim{color:#93a0b6!important}.dashboard-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:10px;margin-top:10px}.panel{min-width:0;border:1px solid #26324a;background:#131e33}.panel>header{display:flex;min-height:48px;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border-bottom:1px solid #26324a}.panel>header>div{display:flex;min-width:0;flex-direction:column;gap:3px}.panel>header b{font-size:13px}.panel>header small{color:#8895ab;font-size:10px}.panel>header>strong{font-size:20px;font-variant-numeric:tabular-nums}.basket-panel{grid-column:1/-1;width:100%}.basket-header{align-items:stretch!important}.basket-header>div:first-child{justify-content:center}.basket-summary{display:grid!important;grid-template-columns:repeat(3,minmax(78px,1fr));flex:0 0 auto;border-left:1px solid #26324a}.basket-summary>span{display:flex;min-width:78px;flex-direction:column;justify-content:center;gap:2px;padding:0 14px}.basket-summary small{font-size:9px!important}.basket-summary strong{font-size:14px;font-variant-numeric:tabular-nums}.basket-panel>footer{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:8px 12px;border-top:1px solid #26324a;color:#8895ab;font-size:10px}.basket-panel>footer strong{margin-left:auto;color:#b9c2d1;font-weight:500}.basket-chart{width:100%;height:224px;padding:0;overflow:hidden}.basket-chart svg{overflow:visible}.basket-grid line{stroke:#212d42;stroke-width:1}.basket-grid text{fill:#6b7b94;font-size:9px;text-anchor:end;font-variant-numeric:tabular-nums}.basket-zero{stroke:#7286a3;stroke-width:1.1;stroke-dasharray:5 4}.basket-area.gain{fill:#d95561;opacity:.17}.basket-area.loss{fill:#35a37d;opacity:.17}.basket-line{fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.basket-line.gain{stroke:#f2606d}.basket-line.loss{stroke:#2eb98a}.basket-target{fill:transparent}.basket-point{stroke:#101a2c;stroke-width:2;vector-effect:non-scaling-stroke;transition:r .12s ease,stroke .12s ease}.basket-point.gain{fill:#f2606d}.basket-point.loss{fill:#2eb98a}.basket-point.active{stroke:#f4f7fb;stroke-width:2.5}.basket-hit{cursor:crosshair;outline:none}.basket-tooltip{pointer-events:none}.basket-tooltip rect{fill:#0b1220;stroke:#42536e;stroke-width:1}.basket-tooltip text{fill:#c2cbdb;font-size:9px;text-anchor:middle;font-variant-numeric:tabular-nums}.basket-tooltip text.gain{fill:#f2606d}.basket-tooltip text.loss{fill:#2eb98a}.legend{display:flex;align-items:center;gap:5px;font-style:normal;color:#7c8aa2}.legend em{width:9px;height:9px;margin-left:7px;border-radius:2px}.legend em.gain{background:#d95561}.legend em.loss{background:#35a37d}.rule-entry{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 14px;padding:9px 12px;border-top:1px solid #26324a;background:#101b2e;color:#8895ab;font-size:10px;line-height:1.6}.rule-entry a{padding:4px 11px;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;font-size:10px;white-space:nowrap;transition:background .15s ease,color .15s ease}.rule-entry a:hover,.rule-entry a:focus-visible{background:#1d3050;color:#bcd6f5;outline:none}.chart-wrap{height:224px;padding:3px 8px 0}.chart-wrap svg{display:block;width:100%;height:100%}.zero{stroke:#3a496a;stroke-width:1;stroke-dasharray:4 4}.area{fill:#39648a;opacity:.17}.line{fill:none;stroke:#67a9d8;stroke-width:2.2;vector-effect:non-scaling-stroke}.point{fill:#e9c16c;stroke:#131e33;stroke-width:1.5}.point.tracking{fill:#7b879a}.axis{fill:#71809a;font-size:10px}.axis.y{text-anchor:end}.axis.x{text-anchor:middle}.signal-panel>header i{padding:3px 7px;font-size:10px;font-style:normal}.paused{background:#3d3423;color:#e9c16c}.watching{background:#19352e;color:#55b996}.signal{display:flex;min-height:108px;flex-direction:column;justify-content:center;gap:6px;padding:13px}.signal.entry{border-left:3px solid #ef6a72;background:#251f2a}.signal.exit{border-left:3px solid #e9c16c;background:#2b2620}.signal.waiting{border-left:3px solid #55b996}.signal small{color:#8895ab;font-size:10px}.signal button{align-self:flex-start;padding:0;border:0;background:transparent;color:#ef8b91;cursor:pointer;font-size:19px;font-weight:700}.signal button em{margin-left:7px;color:#8895ab;font-size:11px;font-style:normal;font-weight:400}.signal>b{font-size:18px}.signal p,.daily-pick p{margin:0;color:#b4bece;font-size:11px;line-height:1.5}.daily-pick{display:grid;grid-template-columns:62px 1fr;gap:4px 8px;padding:10px 13px;border-top:1px solid #26324a;background:#182338}.daily-pick>span{grid-row:1/3;align-self:center;color:#e9c16c;font-size:10px}.daily-pick button{justify-self:start;padding:0;border:0;background:transparent;color:#e7ecf4;cursor:pointer;font-size:13px;font-weight:700}.daily-pick button small{margin-left:5px;color:#8895ab;font-size:10px}.daily-pick p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.reason-panel{grid-column:1/-1}.reason-list{display:grid}.reason-row{display:grid;grid-template-columns:34px 150px minmax(220px,.8fr) minmax(220px,1.2fr) 85px;gap:12px;align-items:center;padding:11px 12px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}.reason-row:hover{background:#182338}.rank{display:grid;width:25px;height:25px;place-items:center;background:#2a3a5c;color:#e9c16c;font-weight:700}.stock b{display:block;font-size:13px}.stock small{display:block;margin-top:2px;color:#8895ab;font-size:10px}.bars{display:flex;flex-direction:column;gap:5px}.bars>i{display:grid;grid-template-columns:30px minmax(80px,1fr) 34px;gap:6px;align-items:center;font-style:normal}.bars em{color:#8895ab;font-size:9px;font-style:normal}.bars u{height:5px;overflow:hidden;background:#25334b;text-decoration:none}.bars u>b{display:block;height:100%;background:#df6a71}.bars u.safe>b{background:#55b996}.bars strong{color:#aeb8c9;font-size:10px;font-weight:400}.reason{color:#b8c1d0;font-size:11px;line-height:1.45}.return{text-align:right;font-size:14px;font-weight:700}.return small{display:block;margin-top:3px;color:#8895ab;font-size:9px;font-weight:400}.lifecycle-panel{grid-column:1/-1}.lifecycle-table{display:grid}.lifecycle-row{display:grid;grid-template-columns:150px 88px 76px 76px 58px 76px minmax(160px,1fr);gap:10px;align-items:center;padding:9px 12px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}.exit-kind{margin-right:6px;padding:2px 5px;background:#25334b;color:#aeb8c9;font-size:9px;font-style:normal}.exit-kind.stop_loss{background:#3a2226;color:#ef8b91}.exit-kind.trailing_stop,.exit-kind.take_profit{background:#19352e;color:#55b996}.exit-kind.time_stop{background:#3d3423;color:#e9c16c}.exit-kind.systemic{background:#3a2226;color:#ef8b91}.lifecycle-row:hover{background:#182338}.lifecycle-row>span{font-size:11px}.lifecycle-row>span>small{display:block;margin-bottom:2px;color:#71809a;font-size:9px}.lifecycle-row .status{justify-self:start;padding:3px 6px;background:#25334b;font-size:9px}.lifecycle-row .status.holding{background:#34272d;color:#ef8b91}.lifecycle-row .status.pending_entry{background:#3d3423;color:#e9c16c}.lifecycle-row .status.exited{background:#19352e;color:#55b996}.lifecycle-row .status.expired{color:#8895ab}.lifecycle-row>strong{text-align:right;font-size:13px}.lifecycle-row .reason{overflow:hidden;color:#8895ab;text-overflow:ellipsis;white-space:nowrap}@media(max-width:1200px){.risk-band{grid-template-columns:repeat(2,minmax(0,1fr))}.metric-band{grid-template-columns:repeat(3,minmax(130px,1fr))}.dashboard-grid{grid-template-columns:1fr}.reason-panel{grid-column:auto}.reason-row{grid-template-columns:34px 130px minmax(180px,1fr) 70px}.reason-row .reason{display:none}}@media(max-width:700px){.overview{padding:8px}.risk-band{grid-template-columns:1fr}.metric-band{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-header small{display:none}.basket-header{flex-direction:column}.basket-header>div:first-child{min-height:38px}.basket-summary{width:100%;border-top:1px solid #26324a;border-left:0}.basket-summary>span{min-width:0;padding:7px 9px}.basket-chart{height:210px}.basket-panel>footer strong{margin-left:0}.reason-row{grid-template-columns:30px minmax(90px,1fr) 70px;gap:7px}.reason-row .bars,.reason-row .reason{display:none}.baseline-row{grid-template-columns:90px minmax(50px,1fr) 58px}.baseline-row>em{display:none}}
+.overview{min-width:0;min-height:0;overflow:auto;padding:14px;background:#0f1826;color:#e7ecf4}.overview-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.overview-header>div{display:flex;align-items:baseline;gap:10px}.overview-header strong{font-size:17px}.overview-header small{color:#8895ab;font-size:11px}.overview-header>button{width:30px;height:30px;border:1px solid #3a496a;border-radius:0;background:#1c2a47;color:#c4cddc;cursor:pointer;font-size:18px}.state,.empty{display:grid;min-height:120px;place-items:center;color:#75839a;font-size:13px}.state.error{color:#ef7d84}/* ---- 风险灯条 ---- */
+.risk-strip{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin-bottom:10px;border:1px solid #26324a;border-left:4px solid #6b7b94;background:#131e33}
+.risk-strip.lv-green{border-left-color:#55b996}.risk-strip.lv-yellow{border-left-color:#e9c16c}.risk-strip.lv-red{border-left-color:#ef6a72}
+.risk-strip button{border:0;border-radius:0;background:transparent;color:#e7ecf4;cursor:pointer;text-align:left}
+.risk-light{display:flex;align-items:center;gap:11px;padding:10px 16px 10px 14px;border-right:1px solid #26324a!important}
+.risk-light:hover,.risk-entry:hover,.dot-item:hover{background:#182338}
+.lamp{width:14px;height:14px;flex:0 0 auto;border-radius:50%;background:#6b7b94}
+.lv-green .lamp{background:#55b996;box-shadow:0 0 0 4px rgba(85,185,150,.16)}
+.lv-yellow .lamp{background:#e9c16c;box-shadow:0 0 0 4px rgba(233,193,108,.16)}
+.lv-red .lamp{background:#ef6a72;box-shadow:0 0 0 4px rgba(239,106,114,.18)}
+.light-text{display:flex;flex-direction:column;gap:2px}
+.light-text b{font-size:19px;line-height:1.1}
+.lv-green .light-text b{color:#55b996}.lv-yellow .light-text b{color:#e9c16c}.lv-red .light-text b{color:#ef6a72}
+.light-text em{color:#93a0b6;font-size:10.5px;font-style:normal}
+/* 自动建仓：用开关形态表达状态，比文字更快识别 */
+.risk-entry{display:flex;align-items:center;gap:9px;padding:10px 16px;border-right:1px solid #26324a!important}
+.risk-entry .switch{position:relative;display:block;width:30px;height:15px;flex:0 0 auto;border-radius:9px;background:#39445c}
+.risk-entry .switch u{position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:#93a0b6;text-decoration:none;transition:left .16s ease,background .16s ease}
+.risk-entry.on .switch{background:#1f4c3f}.risk-entry.on .switch u{left:17px;background:#55b996}
+.risk-entry span{display:flex;flex-direction:column;gap:2px}
+.risk-entry small{color:#8895ab;font-size:10px}
+.risk-entry b{font-size:13px}
+.risk-entry.on b{color:#55b996}.risk-entry.off b{color:#e9c16c}
+/* 三道门收敛为状态点 */
+.risk-dots{display:flex;flex:1 1 auto;flex-wrap:wrap;align-items:stretch}
+.dot-item{display:flex;align-items:center;gap:8px;padding:10px 16px;border-right:1px solid #26324a!important}
+.dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:#6b7b94}
+.dot.lv-green{background:#55b996}.dot.lv-yellow{background:#e9c16c}.dot.lv-red{background:#ef6a72}.dot.lv-plain{background:#67a9d8}
+.dot-item span{display:flex;flex-direction:column;gap:2px}
+.dot-item small{color:#8895ab;font-size:10px}
+.dot-item b{font-size:13px;font-variant-numeric:tabular-nums}
+.risk-alert{width:100%;margin:0;padding:6px 12px;border-top:1px solid #3a2226;background:#3a2226;color:#ef8b91;font-size:10px}
+.metric-band{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:8px}.metric{display:flex;min-width:0;flex-direction:column;gap:6px;padding:11px 12px;border:1px solid #26324a;background:#131e33}
+/* 指标卡内的迷你图与图例 */
+.metric .mini{margin:1px 0 2px}
+.legend-inline{display:flex;flex-wrap:wrap;align-items:center;gap:3px 7px;white-space:normal!important}
+.legend-inline .k{width:7px;height:7px;flex:0 0 auto;border-radius:1px}
+.legend-inline .k.up{background:#ef6a72}.legend-inline .k.down{background:#55b996}.legend-inline .k.warn{background:#e9c16c}.legend-inline .k.flat{background:#7b879a}
+.metric>span>i{font-style:normal;font-variant-numeric:tabular-nums}
+.link-btn{flex:0 0 auto;padding:4px 10px;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;cursor:pointer;font-size:10px;white-space:nowrap}
+.link-btn:hover,.link-btn:focus-visible{background:#1d3050;color:#bcd6f5;outline:none}.metric.primary{border-color:#476188;background:#1b2a46}.metric.reference{border-color:#554d39;background:#211f1b}.metric.reference>small{color:#c7ac69}.metric>small{color:#8895ab;font-size:10px}.metric>b{overflow:hidden;font-size:21px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}.metric>span{overflow:hidden;color:#8895ab;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.range{display:flex;align-items:center;gap:5px;font-size:16px!important}.range i,.range em{font-style:normal}.range em{color:#5f6d85}.up{color:#ef6a72!important}.down{color:#55b996!important}.dim{color:#93a0b6!important}.dashboard-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:10px;margin-top:10px}.panel{min-width:0;border:1px solid #26324a;background:#131e33}.panel>header{display:flex;min-height:48px;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border-bottom:1px solid #26324a}.panel>header>div{display:flex;min-width:0;flex-direction:column;gap:3px}.panel>header b{font-size:13px}.panel>header small{color:#8895ab;font-size:10px}.panel>header>strong{font-size:20px;font-variant-numeric:tabular-nums}.basket-panel{grid-column:1/-1;width:100%}.basket-header{align-items:stretch!important}.basket-header>div:first-child{justify-content:center}.basket-summary{display:grid!important;grid-template-columns:repeat(3,minmax(78px,1fr));flex:0 0 auto;border-left:1px solid #26324a}.basket-summary>span{display:flex;min-width:78px;flex-direction:column;justify-content:center;gap:2px;padding:0 14px}.basket-summary small{font-size:9px!important}.basket-summary strong{font-size:14px;font-variant-numeric:tabular-nums}.basket-panel>footer{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:8px 12px;border-top:1px solid #26324a;color:#8895ab;font-size:10px}.basket-panel>footer strong{margin-left:auto;color:#b9c2d1;font-weight:500}.basket-chart{width:100%;height:224px;padding:0;overflow:hidden}.basket-chart svg{overflow:visible}.basket-grid line{stroke:#212d42;stroke-width:1}.basket-grid text{fill:#6b7b94;font-size:9px;text-anchor:end;font-variant-numeric:tabular-nums}.basket-zero{stroke:#7286a3;stroke-width:1.1;stroke-dasharray:5 4}.basket-area.gain{fill:#d95561;opacity:.17}.basket-area.loss{fill:#35a37d;opacity:.17}.basket-line{fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.basket-line.gain{stroke:#f2606d}.basket-line.loss{stroke:#2eb98a}.basket-target{fill:transparent}.basket-point{stroke:#101a2c;stroke-width:2;vector-effect:non-scaling-stroke;transition:r .12s ease,stroke .12s ease}.basket-point.gain{fill:#f2606d}.basket-point.loss{fill:#2eb98a}.basket-point.active{stroke:#f4f7fb;stroke-width:2.5}.basket-hit{cursor:crosshair;outline:none}.basket-tooltip{pointer-events:none}.basket-tooltip rect{fill:#0b1220;stroke:#42536e;stroke-width:1}.basket-tooltip text{fill:#c2cbdb;font-size:9px;text-anchor:middle;font-variant-numeric:tabular-nums}.basket-tooltip text.gain{fill:#f2606d}.basket-tooltip text.loss{fill:#2eb98a}.legend{display:flex;align-items:center;gap:5px;font-style:normal;color:#7c8aa2}.legend em{width:9px;height:9px;margin-left:7px;border-radius:2px}.legend em.gain{background:#d95561}.legend em.loss{background:#35a37d}.rule-entry{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 14px;padding:9px 12px;border-top:1px solid #26324a;background:#101b2e;color:#8895ab;font-size:10px;line-height:1.6}.rule-entry a{padding:4px 11px;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;font-size:10px;white-space:nowrap;transition:background .15s ease,color .15s ease}.rule-entry a:hover,.rule-entry a:focus-visible{background:#1d3050;color:#bcd6f5;outline:none}.chart-wrap{height:224px;padding:3px 8px 0}.chart-wrap svg{display:block;width:100%;height:100%}.zero{stroke:#3a496a;stroke-width:1;stroke-dasharray:4 4}.area{fill:#39648a;opacity:.17}.line{fill:none;stroke:#67a9d8;stroke-width:2.2;vector-effect:non-scaling-stroke}.point{fill:#e9c16c;stroke:#131e33;stroke-width:1.5}.point.tracking{fill:#7b879a}.axis{fill:#71809a;font-size:10px}.axis.y{text-anchor:end}.axis.x{text-anchor:middle}.signal-panel>header i{padding:3px 7px;font-size:10px;font-style:normal}.paused{background:#3d3423;color:#e9c16c}.watching{background:#19352e;color:#55b996}.signal{display:flex;min-height:108px;flex-direction:column;justify-content:center;gap:6px;padding:13px}.signal.entry{border-left:3px solid #ef6a72;background:#251f2a}.signal.exit{border-left:3px solid #e9c16c;background:#2b2620}.signal.waiting{border-left:3px solid #55b996}.signal small{color:#8895ab;font-size:10px}.signal button{align-self:flex-start;padding:0;border:0;background:transparent;color:#ef8b91;cursor:pointer;font-size:19px;font-weight:700}.signal button em{margin-left:7px;color:#8895ab;font-size:11px;font-style:normal;font-weight:400}.signal>b{font-size:18px}.signal p,.daily-pick p{margin:0;color:#b4bece;font-size:11px;line-height:1.5}.daily-pick{display:grid;grid-template-columns:62px 1fr;gap:4px 8px;padding:10px 13px;border-top:1px solid #26324a;background:#182338}.daily-pick>span{grid-row:1/3;align-self:center;color:#e9c16c;font-size:10px}.daily-pick button{justify-self:start;padding:0;border:0;background:transparent;color:#e7ecf4;cursor:pointer;font-size:13px;font-weight:700}.daily-pick button small{margin-left:5px;color:#8895ab;font-size:10px}.daily-pick p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.reason-panel{grid-column:1/-1}.reason-list{display:grid}.reason-row{display:grid;grid-template-columns:34px 150px minmax(220px,.8fr) minmax(220px,1.2fr) 85px;gap:12px;align-items:center;padding:11px 12px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}.reason-row:hover{background:#182338}.rank{display:grid;width:25px;height:25px;place-items:center;background:#2a3a5c;color:#e9c16c;font-weight:700}.stock b{display:block;font-size:13px}.stock small{display:block;margin-top:2px;color:#8895ab;font-size:10px}.bars{display:flex;flex-direction:column;gap:5px}.bars>i{display:grid;grid-template-columns:30px minmax(80px,1fr) 34px;gap:6px;align-items:center;font-style:normal}.bars em{color:#8895ab;font-size:9px;font-style:normal}.bars u{height:5px;overflow:hidden;background:#25334b;text-decoration:none}.bars u>b{display:block;height:100%;background:#df6a71}.bars u.safe>b{background:#55b996}.bars strong{color:#aeb8c9;font-size:10px;font-weight:400}.reason{color:#b8c1d0;font-size:11px;line-height:1.45}.return{text-align:right;font-size:14px;font-weight:700}.return small{display:block;margin-top:3px;color:#8895ab;font-size:9px;font-weight:400}.action-panel{grid-column:1/-1}.action-table{display:grid}.action-row{display:grid;grid-template-columns:76px minmax(120px,180px) 82px 82px 82px minmax(160px,1fr);gap:10px;align-items:center;padding:9px 12px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}.action-row:hover{background:#182338}.action-row>span{font-size:11px}.action-row .num>small{display:block;margin-bottom:2px;color:#71809a;font-size:9px}.action-row .status{justify-self:start;padding:3px 7px;background:#25334b;font-size:9px}.action-row .status.holding{background:#34272d;color:#ef8b91}.action-row .status.pending_entry{background:#3d3423;color:#e9c16c}.action-row>strong{text-align:right;font-size:13px;font-variant-numeric:tabular-nums}.exit-kind{margin-right:6px;padding:2px 5px;background:#25334b;color:#aeb8c9;font-size:9px;font-style:normal}.exit-kind.stop_loss{background:#3a2226;color:#ef8b91}.exit-kind.trailing_stop,.exit-kind.take_profit{background:#19352e;color:#55b996}.exit-kind.time_stop{background:#3d3423;color:#e9c16c}.exit-kind.systemic{background:#3a2226;color:#ef8b91}@media(max-width:1200px){.metric-band{grid-template-columns:repeat(3,minmax(140px,1fr))}.dashboard-grid{grid-template-columns:1fr}.reason-panel{grid-column:auto}.reason-row{grid-template-columns:34px 130px minmax(180px,1fr) 70px}.reason-row .reason{display:none}.action-row{grid-template-columns:76px minmax(110px,1fr) 82px 82px}.action-row .num:nth-of-type(2),.action-row .reason{display:none}}@media(max-width:700px){.overview{padding:8px}.metric-band{grid-template-columns:repeat(2,minmax(0,1fr))}.risk-light,.risk-entry,.dot-item{padding:8px 12px}.risk-dots{width:100%;border-top:1px solid #26324a}.overview-header small{display:none}.basket-header{flex-direction:column}.basket-header>div:first-child{min-height:38px}.basket-summary{width:100%;border-top:1px solid #26324a;border-left:0}.basket-summary>span{min-width:0;padding:7px 9px}.basket-chart{height:210px}.basket-panel>footer strong{margin-left:0}.reason-row{grid-template-columns:30px minmax(90px,1fr) 70px;gap:7px}.reason-row .bars,.reason-row .reason{display:none}.baseline-row{grid-template-columns:90px minmax(50px,1fr) 58px}.baseline-row>em{display:none}}
 </style>
