@@ -26,6 +26,9 @@ type Config struct {
 	Prompt        string
 	HotspotPrompt string
 	ReviewPrompt  string
+	// AutoEntryEnabled 为 false 时，盘前只生成推荐供观察，不建立持仓生命周期。
+	// 默认关闭，详见 config.Config.AutoEntryEnabled 的说明。
+	AutoEntryEnabled bool
 }
 
 type marketQuoteProvider interface {
@@ -391,15 +394,22 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	// 推荐落库成功后，从 3 只中确定性选出最适合建仓的一只并自动加入自选
 	// （自选上限 10 只，AddWatchlist 内部自动淘汰最旧条目保持数据同步）。
 	// 该步骤失败只告警，不影响推荐主结果。
-	// 指数风向非绿灯时只生成推荐供观察，不自动建仓——大盘转弱期强行开仓
-	// 是近期连续亏损的主要来源。
-	if gate.AllowAutoEntry() {
+	// 自动建仓需同时满足两个条件：
+	//  1. 全局开关开启（默认关闭，等待策略被证明正期望后再打开）；
+	//  2. 指数风向绿灯——大盘转弱期强行开仓是此前连续亏损的主要来源。
+	switch {
+	case !s.config.AutoEntryEnabled:
+		slog.Info("自动建仓已停用，仅生成推荐观察", "date", analysisDate, "picks", len(result.Recommendations))
+	case gate.AllowAutoEntry():
 		s.autoWatchBestEntryPick(ctx, now, analysisDate, result.Recommendations)
-	} else {
+	default:
 		slog.Info("指数风向非绿灯，仅生成推荐观察，不自动建仓", "level", gate.Level, "reason", gate.Reason)
 	}
 	return nil
 }
+
+// AutoEntryEnabled 供 API 层向前端暴露当前自动建仓开关状态。
+func (s *Service) AutoEntryEnabled() bool { return s.config.AutoEntryEnabled }
 
 // DailyEntryPickCount 是每个推荐日纳入生命周期的唯一最强标的数量。
 const DailyEntryPickCount = 1
@@ -522,6 +532,13 @@ func (s *Service) candidatesReusingHotspot(ctx context.Context, analysisDate str
 	candidates, err := s.st.RecommendationCandidates(ctx, maxRisk)
 	if err != nil {
 		return nil, "", err
+	}
+	// 泛概念熔断：回退池按题材人气排序，一旦规模闸门与名称黑名单都没拦住新的
+	// 统计标签（例如交易所新增概念），选出的就是没有产业逻辑的「伪题材」股。
+	// 此时宁可当日不推荐，也不能把这类标的送进 AI 评审——2026-08-11~14 的
+	// 连续亏损正是由「融资融券」类回退候选造成的。
+	if blocked := store.GenericConceptNames(candidates); len(blocked) > 0 {
+		return nil, "", fmt.Errorf("回退候选池命中泛概念，放弃当日推荐: %s", strings.Join(blocked, "/"))
 	}
 	return candidates, "sector_heat", nil
 }

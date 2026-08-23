@@ -20,12 +20,35 @@ const (
 	// 说明当日可选机会太少，跳过本次推荐而不是强行凑 3 只。
 	RecommendationCandidateMin = 5
 
-	// 候选风险上限由最近一次 AI 复盘的 market_phase 自动调节（不做人工配置）：
-	// up 放宽以保留强趋势机会，down 收紧以优先控制回撤，无复盘记录时取基准值。
+	// 风险分软阈值：由最近一次 AI 复盘的 market_phase 自动调节（不做人工配置）。
+	//
+	// 语义变更（2026-08）：原先该值是硬剔除上限，改为「排序惩罚起点」。
+	//
+	// 改动依据是候选池容量，不是收益提升——这一点务必不要误读：
+	//  · 硬剔除会让候选数在 down 档腰斩（回测日均 62.6 vs 142.4，-56%），
+	//    候选一旦跌破 RecommendationCandidateMin 就回退题材热度池，
+	//    进而选出「融资融券/深股通」等泛概念下无产业逻辑的标的。
+	//    2026-08-11~14 的连续亏损正是由这条回退路径造成的。
+	//  · 收益层面，四组对照回测（A纯趋势/B硬剔除/C排序惩罚/D低risk优先，
+	//    3 档 × 5&10 日 × n=153~168）显示各方案均值差异仅 0.1~0.5 个百分点，
+	//    在样本标准差面前属噪音，**不能声称排序惩罚能提高收益**。
+	//    详见 riskpolicy_backtest_test.go（-tags backtest）。
+	//
+	// 因此本改动的唯一目标是「保证候选池不枯竭、不触发泛概念回退」，
+	// 让高风险强趋势股降权后仍可竞争，而不是押注高风险等于高收益。
 	recommendationBaseMaxRisk  = 70.0
 	recommendationMaxRiskUp    = 85.0
 	recommendationMaxRiskRange = 75.0
 	recommendationMaxRiskDown  = 65.0
+
+	// recommendationHardRiskCeiling 是唯一保留的风险硬剔除线（安全阀），不随
+	// market_phase 变化：只挡极端垃圾股，正常强趋势票不会触及。
+	recommendationHardRiskCeiling = 92.0
+	// recommendationRiskMaxPenalty 是风险惩罚封顶幅度：风险分从软阈值线性
+	// 增长到硬安全阀时，排序分最多被打到 (1-0.35)=65%。取值刻意温和——
+	// 回测未发现风险分与前向收益存在稳定单调关系，惩罚过重会退化成硬剔除
+	// 并重新引发候选枯竭，过轻则失去风险区分度。
+	recommendationRiskMaxPenalty = 0.35
 
 	// 计分口径的买入价是分析日后首个交易日开盘价，昨日封板/近端暴涨的候选
 	// 高开损耗最大：涨停判定按“昨日涨幅 ≥ 交易所涨跌幅上限 × 0.93”近似，
@@ -42,6 +65,12 @@ const (
 	//   - 收盘价高于 MA5 超过 8%（短期乖离过大，均值回归风险高）。
 	recommendationHardOverheat5 = 0.25
 	recommendationMaxBiasMA5    = 0.08
+
+	// 题材成分股规模闸门（与 HotspotCandidates 的 5~150 口径一致）：
+	// 低于下限说明样本太少不足以形成题材效应，高于上限基本都是「融资融券 /
+	// 深股通 / 央国企改革 / 昨日高振幅」这类覆盖全市场的统计标签。
+	recommendationSectorMinConstituents = 5
+	recommendationSectorMaxConstituents = 150
 
 	// 龙头加权：落实「热点板块 → 板块龙头 → 优质个股」的选择链路。
 	// 同一热点板块内按当日成交额排名，第 1 名视为人气龙头加权 10%，
@@ -66,8 +95,9 @@ func isBrokerCandidate(industry, name string) bool {
 // 券商的申万/东财行业名均含“证券”，个别互金券商用名称兜底）。
 const recommendationExcludeBrokerSQL = " AND b.industry NOT LIKE '%证券%' AND b.name NOT LIKE '%证券%' "
 
-// RecommendationMaxRiskScore 返回给定复盘市场阶段下的候选风险分上限：
-// up=85、range=75、down=65，其余（含尚无复盘）为基准 70。
+// RecommendationMaxRiskScore 返回给定复盘市场阶段下的风险分软阈值（排序惩罚
+// 起点）：up=85、range=75、down=65，其余（含尚无复盘）为基准 70。
+// 注意：该值不再是硬剔除线，硬剔除只由 recommendationHardRiskCeiling 决定。
 func RecommendationMaxRiskScore(marketPhase string) float64 {
 	switch marketPhase {
 	case "up":
@@ -136,9 +166,14 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		return []RecommendationCandidate{}, nil
 	}
 
+	// 成分股规模闸门与热点漏斗（HotspotCandidates）保持同一口径：
+	// 融资融券(3838)/深股通(1875)/央国企改革(1438)/昨日高振幅(672)/百元股(201)
+	// 这类纯统计标签成分股数以千计，成交额与市值求和后必然霸榜人气排名，
+	// 但贴到个股上没有任何产业逻辑。仅靠名称黑名单无法穷举，改用规模判据兜底。
 	sectorRows, err := s.DB.QueryContext(ctx, `
 		SELECT sb.sector_code,sb.sector_type,sb.sector_name,
-               LOG10(SUM(k.amount)+1)*0.45 + LOG10(SUM(COALESCE(NULLIF(d.circ_mv,0),NULLIF(ms.circ_mv,0),1))+1)*0.30 + GREATEST(AVG(k.change_pct),0)*0.25 popularity
+               LOG10(SUM(k.amount)+1)*0.45 + LOG10(SUM(COALESCE(NULLIF(d.circ_mv,0),NULLIF(ms.circ_mv,0),1))+1)*0.30 + GREATEST(AVG(k.change_pct),0)*0.25 popularity,
+               COUNT(DISTINCT b.symbol) constituent_count
 		FROM sector_basic sb
 		INNER JOIN sector_constituent sc ON sc.sector_code=sb.sector_code
 		INNER JOIN stock_basic b ON b.symbol=sc.symbol
@@ -147,15 +182,16 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		LEFT JOIN (SELECT snap.symbol,snap.circ_mv FROM market_snapshot snap INNER JOIN (SELECT symbol,MAX(snapshot_at) snapshot_at FROM market_snapshot GROUP BY symbol) latest ON latest.symbol=snap.symbol AND latest.snapshot_at=snap.snapshot_at) ms ON ms.symbol=b.symbol
 		WHERE b.status='listed' AND b.sec_type='stock'
 		GROUP BY sb.sector_code,sb.sector_type,sb.sector_name
-		HAVING popularity>0
-		ORDER BY popularity DESC,sb.sector_code ASC`, tradeDate)
+		HAVING popularity>0 AND constituent_count BETWEEN ? AND ?
+		ORDER BY popularity DESC,sb.sector_code ASC`, tradeDate, recommendationSectorMinConstituents, recommendationSectorMaxConstituents)
 	if err != nil {
 		return nil, fmt.Errorf("query popular recommendation sectors: %w", err)
 	}
 	var sectors []recommendationSector
 	for sectorRows.Next() {
 		var sector recommendationSector
-		if err := sectorRows.Scan(&sector.Code, &sector.Type, &sector.Name, &sector.Popularity); err != nil {
+		var constituentCount int
+		if err := sectorRows.Scan(&sector.Code, &sector.Type, &sector.Name, &sector.Popularity, &constituentCount); err != nil {
 			sectorRows.Close()
 			return nil, err
 		}
@@ -229,9 +265,11 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 }
 
 // rankRecommendationPool 是候选池的统一收口：只接受完整 60 根日 K 的证券，
-// 先按趋势筛选，再剔除风险过高（高波动/深回撤/短期过热）与昨日涨停（次日
-// 高开损耗大）的股票，最后按“趋势分 × 过热惩罚”排序统一取前 10。
-// TrendScore 字段保留原始趋势分。券商候选在此兜底剔除（SQL 层已过滤一次）。
+// 先按趋势筛选，再剔除昨日涨停（次日高开损耗大）、短线追高与风险触及硬安全阀
+// 的股票，最后按“趋势分 × 过热惩罚 × 龙头加权 × 风险惩罚”排序统一取前 10。
+// TrendScore / RiskScore 字段保留原始分值。风险分不再硬剔除（见常量注释），
+// 避免砍掉右尾并导致候选枯竭回退泛概念池。
+// 券商候选在此兜底剔除（SQL 层已过滤一次）。
 func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, pool []RecommendationCandidate, maxRiskScore float64) ([]RecommendationCandidate, error) {
 	leaderBoosts := recommendationLeaderBoosts(pool)
 	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
@@ -249,7 +287,8 @@ func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, po
 			continue
 		}
 		risk, ok := recommendationRiskScore(klines)
-		if !ok || risk > maxRiskScore {
+		// 风险分只在触及硬安全阀时剔除；软阈值以上改为排序降权（见常量注释）。
+		if !ok || risk > recommendationHardRiskCeiling {
 			continue
 		}
 		if recommendationGapRiskHigh(klines, candidate.Code) {
@@ -265,7 +304,7 @@ func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, po
 		if boost <= 0 {
 			boost = 1
 		}
-		sortScores[candidate.Symbol] = recommendationSortScore(score, klines) * boost
+		sortScores[candidate.Symbol] = recommendationSortScore(score, klines) * boost * recommendationRiskPenalty(risk, maxRiskScore)
 		trendCandidates = append(trendCandidates, candidate)
 	}
 	sort.Slice(trendCandidates, func(i, j int) bool {
@@ -418,6 +457,30 @@ func recommendationSortScore(trendScore float64, klines []model.Kline) float64 {
 		ratio = 1
 	}
 	return trendScore * (1 - recommendationOverheatMaxPenalty*ratio)
+}
+
+// recommendationRiskPenalty 返回风险分对排序分的乘性惩罚系数。
+// 风险分不超过软阈值 soft 时不惩罚（返回 1）；超过后按到硬安全阀的距离线性
+// 递减，最低 1-recommendationRiskMaxPenalty。soft 非法时回退基准值。
+//
+// 与原「硬剔除」的区别：高风险强趋势候选仍留在池内竞争，只是需要更高的趋势
+// 分才能胜出；同时候选数量不会因风险收紧而跌破 RecommendationCandidateMin。
+func recommendationRiskPenalty(risk, soft float64) float64 {
+	if soft <= 0 || soft > 100 {
+		soft = recommendationBaseMaxRisk
+	}
+	if risk <= soft {
+		return 1
+	}
+	span := recommendationHardRiskCeiling - soft
+	if span <= 0 {
+		return 1 - recommendationRiskMaxPenalty
+	}
+	ratio := (risk - soft) / span
+	if ratio > 1 {
+		ratio = 1
+	}
+	return 1 - recommendationRiskMaxPenalty*ratio
 }
 
 // recommendationOverextended 是短线追高硬过滤：近 5 日涨幅超过 25%，或收盘价

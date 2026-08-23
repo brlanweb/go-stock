@@ -168,8 +168,21 @@ func (s *Service) runDailyReview(ctx context.Context, now time.Time, requireToda
 	}
 	if report.RiskControls.StopLossPct > 0 {
 		rationale := fmt.Sprintf("复盘%s阶段建议止损%.1f%%；由样本门槛、单步幅度与冻结回滚约束执行", report.MarketPhase, report.RiskControls.StopLossPct)
-		if _, err := s.st.ApplyStrategyParamProposal(ctx, "stop_loss_pct", report.RiskControls.StopLossPct, scorecard, tradeDate, "daily_review", rationale); err != nil {
-			slog.Warn("应用策略参数提案失败", "date", tradeDate, "error", err)
+		applied, skipped, err := s.st.ApplyStrategyParamProposal(ctx, "stop_loss_pct", report.RiskControls.StopLossPct, scorecard, tradeDate, "daily_review", rationale)
+		switch {
+		case err != nil:
+			slog.Warn("应用策略参数提案失败", "date", tradeDate, "param", "stop_loss_pct", "error", err)
+		case applied:
+			slog.Info("复盘参数提案已生效", "date", tradeDate, "param", "stop_loss_pct",
+				"proposed", report.RiskControls.StopLossPct, "trade_samples", scorecard.Overall.Samples,
+				"selection_samples", scorecard.Stages.Selection.Samples)
+		default:
+			// 此前这里是静默丢弃，导致复盘连续多日建议调整却无人察觉、
+			// 参数长期停留在默认值。改为显式留痕，便于监控闭环是否在运转。
+			slog.Warn("复盘参数提案未生效", "date", tradeDate, "param", "stop_loss_pct",
+				"proposed", report.RiskControls.StopLossPct, "reason", skipped,
+				"trade_samples", scorecard.Overall.Samples,
+				"selection_samples", scorecard.Stages.Selection.Samples)
 		}
 	}
 	return nil

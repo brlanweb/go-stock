@@ -286,7 +286,8 @@ export interface RecommendationShadowStats {
   day_win_rate: number | null
 }
 
-// 下一次盘前推荐的候选风险上限：由最近一次 AI 复盘的市场阶段自动决定，仅展示。
+// 下一次盘前推荐的风险分软阈值（排序惩罚起点，非硬剔除线）：
+// 由最近一次 AI 复盘的市场阶段自动决定，仅展示。
 export interface RecommendationRiskPolicy {
   review_date: string
   market_phase: string
@@ -710,6 +711,9 @@ export interface RiskGateOverview {
   market_gate: MarketGate | null
   global_gate: GlobalRiskGate | null
   final_level: 'green' | 'yellow' | 'red'
+  // 系统是否会自动建仓。为 false 时即使绿灯也只输出观察性推荐，
+  // 用于区分「风险门放行」与「系统真的会开仓」。
+  auto_entry_enabled: boolean
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {

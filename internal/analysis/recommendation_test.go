@@ -108,3 +108,15 @@ func TestNextHotspotRunMorningSchedule(t *testing.T) {
 		t.Fatalf("next run = %s, want %s", next, want)
 	}
 }
+
+// 自动建仓开关必须默认关闭：策略正期望尚未被回测证明前，
+// 推荐只能作为观察项输出，绝不能因为默认值漂移而擅自开仓。
+func TestAutoEntryDisabledByDefault(t *testing.T) {
+	service := New(nil, Config{})
+	if service.AutoEntryEnabled() {
+		t.Fatal("自动建仓必须默认关闭")
+	}
+	if enabled := New(nil, Config{AutoEntryEnabled: true}); !enabled.AutoEntryEnabled() {
+		t.Fatal("显式开启后 AutoEntryEnabled 必须为 true")
+	}
+}

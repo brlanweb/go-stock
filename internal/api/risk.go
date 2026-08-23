@@ -42,11 +42,18 @@ func (s *Server) handleRiskGate(w http.ResponseWriter, r *http.Request) {
 	if globalGate != nil {
 		globalLevel = globalGate.Level
 	}
+	// auto_entry_enabled 让前端能区分「风险门放行」与「系统真的会建仓」：
+	// 开关关闭时即使绿灯也只输出观察性推荐，必须显式告知，避免照单手动追买。
+	autoEntry := false
+	if s.Analysis != nil {
+		autoEntry = s.Analysis.AutoEntryEnabled()
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"analysis_date": analysisDate,
-		"market_gate":   marketGate,
-		"global_gate":   globalGate,
-		"final_level":   store.StricterGateLevel(marketLevel, globalLevel),
+		"analysis_date":      analysisDate,
+		"market_gate":        marketGate,
+		"global_gate":        globalGate,
+		"final_level":        store.StricterGateLevel(marketLevel, globalLevel),
+		"auto_entry_enabled": autoEntry,
 	})
 }
 

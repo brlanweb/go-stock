@@ -54,6 +54,12 @@ type Config struct {
 	AIReviewPrompt      string // 每日收盘复盘 AI 提示词
 	AIReviewPromptFile  string // 每日收盘复盘提示词文件路径
 
+	// AutoEntryEnabled 控制盘前是否自动把当日最强推荐建成持仓生命周期。
+	// 默认关闭：四组对照回测（见 riskpolicy_backtest_test.go）显示候选排序层
+	// 在 2026-03~08 窗口内前向收益为负，在积累足够样本证明正期望之前，
+	// 推荐只作为观察项输出，开仓交由人工决策。
+	AutoEntryEnabled bool
+
 	LogLevel string
 }
 
@@ -79,6 +85,7 @@ func Load() (*Config, error) {
 		BackfillWorkers:      getEnvInt("GOSTOCK_BACKFILL_WORKERS", 1),
 		BackfillQPS:          getEnvFloat("GOSTOCK_BACKFILL_QPS", 0.35),
 		SyncSectors:          getEnvBool("GOSTOCK_SYNC_SECTORS", false),
+		AutoEntryEnabled:     getEnvBool("GOSTOCK_AUTO_ENTRY", false),
 		PythonCommand:        getEnv("GOSTOCK_PYTHON_COMMAND", "python3"),
 		PythonKlineScript:    getEnv("GOSTOCK_PYTHON_KLINE_SCRIPT", "python-provider/fetch_kline.py"),
 		QuoteTTLSeconds:      getEnvInt("GOSTOCK_QUOTE_TTL", 3),

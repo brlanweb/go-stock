@@ -301,3 +301,61 @@ func TestApplyRecommendationPerformanceBlendsReducedPosition(t *testing.T) {
 		t.Fatalf("blended performance want %.4f, got %+v", want, item.ChangePct)
 	}
 }
+
+// 风险分改为排序惩罚后，必须满足三条不变量：
+// 1. 软阈值以内不惩罚；2. 惩罚随风险线性加深且封顶；3. 只有触及硬安全阀才剔除。
+func TestRecommendationRiskPenaltyIsGradualNotCliff(t *testing.T) {
+	soft := RecommendationMaxRiskScore("down") // 65
+	if got := recommendationRiskPenalty(soft-10, soft); got != 1 {
+		t.Fatalf("risk below soft threshold must not be penalized, got %.4f", got)
+	}
+	if got := recommendationRiskPenalty(soft, soft); got != 1 {
+		t.Fatalf("risk at soft threshold must not be penalized, got %.4f", got)
+	}
+	mid := recommendationRiskPenalty((soft+recommendationHardRiskCeiling)/2, soft)
+	wantMid := 1 - recommendationRiskMaxPenalty/2
+	if math.Abs(mid-wantMid) > 1e-9 {
+		t.Fatalf("midpoint penalty want %.4f, got %.4f", wantMid, mid)
+	}
+	full := recommendationRiskPenalty(recommendationHardRiskCeiling, soft)
+	wantFull := 1 - recommendationRiskMaxPenalty
+	if math.Abs(full-wantFull) > 1e-9 {
+		t.Fatalf("penalty must cap at %.4f, got %.4f", wantFull, full)
+	}
+	// 超出硬安全阀后惩罚不再加深（该候选已在上游被剔除，此处仅保证函数单调有界）
+	if got := recommendationRiskPenalty(200, soft); math.Abs(got-wantFull) > 1e-9 {
+		t.Fatalf("penalty must stay bounded, got %.4f", got)
+	}
+	// 关键回归：高风险候选不得被判定为「应剔除」，只应被降权。
+	// 目的是保证候选池容量、避免枯竭后回退泛概念池（2026-08-11~14 的亏损路径），
+	// 而非假设高风险带来高收益——回测未支持后者。
+	highRisk := soft + 15
+	if highRisk > recommendationHardRiskCeiling {
+		t.Fatalf("test fixture invalid: %v exceeds hard ceiling", highRisk)
+	}
+	if p := recommendationRiskPenalty(highRisk, soft); p <= 0 || p >= 1 {
+		t.Fatalf("high risk candidate must stay in pool with 0<penalty<1, got %.4f", p)
+	}
+}
+
+// 泛概念熔断：回退候选池只要命中黑名单就必须被识别出来，供调用方放弃当日推荐。
+func TestGenericConceptNamesDetectsFallbackPollution(t *testing.T) {
+	polluted := []RecommendationCandidate{
+		{Symbol: "SH600663", Industry: "融资融券"},
+		{Symbol: "SZ300119", Industry: "深股通"},
+		{Symbol: "SH603444", Industry: "百元股"},
+		{Symbol: "SZ002556", Industry: "磷化工"},
+	}
+	got := GenericConceptNames(polluted)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 generic concepts flagged, got %d: %v", len(got), got)
+	}
+	clean := []RecommendationCandidate{
+		{Symbol: "SZ002556", Industry: "磷化工"},
+		{Symbol: "SH603228", Industry: "CPO概念"},
+		{Symbol: "SH600354", Industry: "转基因"},
+	}
+	if got := GenericConceptNames(clean); len(got) != 0 {
+		t.Fatalf("real sector candidates must not be flagged, got %v", got)
+	}
+}

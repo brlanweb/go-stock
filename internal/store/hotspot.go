@@ -312,7 +312,7 @@ func (s *Store) RebuildSectorOverlaps(ctx context.Context) error {
 // genericConceptNames 是泛概念黑名单的内置兜底，需与 config/hotspot_blacklist.txt
 // 保持同步（有一致性测试守护）：外部文件读取失败时仅靠本列表过滤。
 var (
-	genericConceptNames  = []string{"融资融券", "深股通", "沪股通", "MSCI", "富时罗素", "标普", "机构重仓", "基金重仓", "证金持股", "转融券", "预盈预增", "昨日涨停", "昨日连板", "AH股", "QFII重仓", "社保重仓", "参股新三板"}
+	genericConceptNames  = []string{"融资融券", "深股通", "沪股通", "MSCI", "富时罗素", "标普", "机构重仓", "基金重仓", "证金持股", "转融券", "预盈预增", "昨日涨停", "昨日连板", "AH股", "QFII重仓", "社保重仓", "参股新三板", "百元股", "东方财富热股", "昨日", "高送转", "机构调研", "破净股", "含GDR"}
 	hotspotBlacklistOnce sync.Once
 )
 
@@ -336,6 +336,24 @@ func hotspotBlacklist() []string {
 		}
 	})
 	return genericConceptNames
+}
+
+// GenericConceptNames 返回候选池中命中泛概念黑名单的板块名（去重、稳定顺序）。
+// 供推荐链路在回退路径上做熔断校验：正常题材候选应返回空切片。
+func GenericConceptNames(candidates []RecommendationCandidate) []string {
+	seen := make(map[string]bool, len(candidates))
+	out := make([]string, 0)
+	for _, candidate := range candidates {
+		if candidate.Industry == "" || seen[candidate.Industry] {
+			continue
+		}
+		if isGenericConcept(candidate.Industry) {
+			seen[candidate.Industry] = true
+			out = append(out, candidate.Industry)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isGenericConcept(name string) bool {

@@ -10,10 +10,29 @@ import (
 )
 
 const (
-	StrategyMinSamples           = 30
+	// StrategyMinSamples 是「整步」调参所需的真实已退出交易样本数。
+	//
+	// 原值 30 在实盘中被证明不可达：每交易日最多产生 1 笔生命周期，且需用户
+	// 手动确认建仓/平仓，上线一个月仅积累到 1 笔已退出样本，导致复盘连续 8 天
+	// 建议 stop_loss_pct=7~8 却始终无法写入，strategy_param 长期停留在默认值，
+	// 反哺闭环事实上从未运转。下调到 12 使其在合理周期内可达。
+	StrategyMinSamples = 12
+	// StrategyMinSelectionSamples 是「半步」调参的兜底门槛：真实交易样本不足
+	// 时，改用选股阶段的机械基线样本（每条推荐都会产生，积累快得多）。
+	// 机械基线不含建仓与退出择时，只反映选股质量，因此单次仅允许移动半个
+	// step，用更慢的速度换取更早开始学习。
+	StrategyMinSelectionSamples  = 20
 	StrategyEvaluationMinSamples = 10
 	StrategyFreezeDays           = 10
 	StrategyRollbackDrop         = 2.0
+)
+
+// 参数提案未生效的原因，用于日志与告警（均非错误，属于正常约束拦截）。
+const (
+	StrategySkipInsufficientSamples = "样本不足：真实交易与机械基线样本均未达门槛"
+	StrategySkipFrozen              = "参数处于冻结期，等待上一次调整完成评估"
+	StrategySkipDeltaTooSmall       = "建议值与当前值差异小于半个步长，无需调整"
+	StrategySkipAtBoundary          = "已处于数据库允许的边界值，无法继续移动"
 )
 
 // StrategyRiskPolicy 是确定性风控引擎的动态参数快照。数据库不可用或参数异常时
@@ -160,53 +179,72 @@ func (s *Store) RecentStrategyParamChanges(ctx context.Context, limit int) ([]St
 	return out, rows.Err()
 }
 
-// ApplyStrategyParamProposal 应用一个受约束参数提案：至少30个已结算样本；冻结期内拒绝；
-// 单次最多移动一个 step；数据库 min/max 是最终边界。AI 无权绕过这些约束。
-func (s *Store) ApplyStrategyParamProposal(ctx context.Context, key string, proposed float64, score StrategyScorecard, effectiveDate, source, rationale string) (bool, error) {
+// ApplyStrategyParamProposal 应用一个受约束参数提案：样本量达标；冻结期内拒绝；
+// 单次最多移动一个 step（样本仅机械基线达标时为半个 step）；数据库 min/max 是
+// 最终边界。AI 无权绕过这些约束。
+//
+// 返回值：applied 表示是否真的写入；skipped 非空表示被约束拦截的原因（非错误，
+// 供调用方告警留痕，避免像此前那样静默失败导致闭环长期空转）。
+func (s *Store) ApplyStrategyParamProposal(ctx context.Context, key string, proposed float64, score StrategyScorecard, effectiveDate, source, rationale string) (applied bool, skipped string, err error) {
+	// 优先用真实交易样本走整步；不足时回退到选股机械基线样本走半步。
+	stepScale := 1.0
 	if score.Overall.Samples < StrategyMinSamples {
-		return false, nil
+		if score.Stages.Selection.Samples < StrategyMinSelectionSamples {
+			return false, StrategySkipInsufficientSamples, nil
+		}
+		stepScale = 0.5
 	}
 	if effectiveDate == "" {
 		effectiveDate = time.Now().Format("2006-01-02")
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer tx.Rollback()
 	var current, minValue, maxValue, step float64
 	var frozen sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT value_num,min_num,max_num,step_num,DATE_FORMAT(frozen_until,'%Y-%m-%d') FROM strategy_param WHERE param_key=? FOR UPDATE`, key).Scan(&current, &minValue, &maxValue, &step, &frozen)
 	if err == sql.ErrNoRows {
-		return false, fmt.Errorf("未知策略参数: %s", key)
+		return false, "", fmt.Errorf("未知策略参数: %s", key)
 	}
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if frozen.Valid && frozen.String >= effectiveDate {
-		return false, nil
+		return false, StrategySkipFrozen, nil
 	}
+	moveStep := step * stepScale
 	delta := proposed - current
-	if math.Abs(delta) < step/2 {
-		return false, nil
+	if math.Abs(delta) < moveStep/2 {
+		return false, StrategySkipDeltaTooSmall, nil
 	}
-	applied := current + math.Copysign(step, delta)
-	applied = math.Max(minValue, math.Min(maxValue, applied))
-	if applied == current {
-		return false, nil
+	appliedValue := current + math.Copysign(moveStep, delta)
+	appliedValue = math.Max(minValue, math.Min(maxValue, appliedValue))
+	if appliedValue == current {
+		return false, StrategySkipAtBoundary, nil
 	}
 	effective, err := time.Parse("2006-01-02", effectiveDate)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	evaluateAfter := effective.AddDate(0, 0, StrategyFreezeDays).Format("2006-01-02")
-	if _, err = tx.ExecContext(ctx, `UPDATE strategy_param SET value_num=?,frozen_until=?,updated_source=? WHERE param_key=?`, applied, evaluateAfter, source, key); err != nil {
-		return false, err
+	if _, err = tx.ExecContext(ctx, `UPDATE strategy_param SET value_num=?,frozen_until=?,updated_source=? WHERE param_key=?`, appliedValue, evaluateAfter, source, key); err != nil {
+		return false, "", err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO strategy_param_change(param_key,previous_num,proposed_num,applied_num,baseline_score,sample_count,source,rationale,status,effective_date,evaluate_after) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, key, current, proposed, applied, score.Overall.Score, score.Overall.Samples, source, rationale, "active", effectiveDate, evaluateAfter); err != nil {
-		return false, err
+	// sample_count 记录本次决策依据的样本数：整步用真实交易样本，半步用选股
+	// 机械样本，便于事后审计「这次调整到底基于多少证据」。
+	sampleCount := score.Overall.Samples
+	if stepScale < 1 {
+		sampleCount = score.Stages.Selection.Samples
 	}
-	return true, tx.Commit()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO strategy_param_change(param_key,previous_num,proposed_num,applied_num,baseline_score,sample_count,source,rationale,status,effective_date,evaluate_after) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, key, current, proposed, appliedValue, score.Overall.Score, sampleCount, source, rationale, "active", effectiveDate, evaluateAfter); err != nil {
+		return false, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", err
+	}
+	return true, "", nil
 }
 
 func strategyEvaluationReady(samples int) bool {
