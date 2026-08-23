@@ -95,6 +95,67 @@ func (s *Store) MarkSecuritiesWithStaleTradeDateDelisted(ctx context.Context, ta
 	return res.RowsAffected()
 }
 
+// NormalizeConvertibleBondSecurities 修正被上游误标为 stock 的定向可转债。
+//
+// 深交所定向可转债使用 810xxx 代码段、名称以「定转」结尾（如优机定转），
+// 上游全市场列表把它们与股票混在一起返回，导致：
+//  1. 走股票回填链路，但日 K 接口对该类标的不返回日期列，akshare 直接抛
+//     'date' KeyError，每轮必失败且永远无法成功；
+//  2. 计入股票池，污染同步失败计数。
+//
+// 归类为 bond 后即退出 ClaimPending（要求 sec_type='stock'）与推荐候选池。
+func (s *Store) NormalizeConvertibleBondSecurities(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE stock_basic SET sec_type='bond',updated_at=NOW()
+		WHERE sec_type='stock' AND (code LIKE '810%' OR name LIKE '%定转')`)
+	if err != nil {
+		return 0, fmt.Errorf("normalize convertible bond securities: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// MarkDelistedByStaleFailure 收敛「上游已无数据 + 本地历史长期停滞」的证券。
+//
+// 与 MarkSecuritiesWithStaleTradeDateDelisted 的 180 天兜底相比，这条规则针对的是
+// 已经明确失败、且上游返回“无数据可解析”的标的：此类标的继续留在 listed 只会每轮
+// 重复请求并失败。判定需同时满足：
+//   - 断点处于 failed，且错误信息属于上游无数据签名（noDataErrorPatterns）；
+//   - 最后一根日 K 早于 lagTradingDays 个交易日之前（按库内真实交易日计数，
+//     不用自然日，避免长假误判）。
+//
+// 该标记不是单向门：证券若恢复交易，上游列表会重新给出行情，UpsertSecurities
+// 会把状态改回 listed，下一轮即恢复同步。
+func (s *Store) MarkDelistedByStaleFailure(ctx context.Context, task, targetDate string, lagTradingDays int) (int64, error) {
+	if lagTradingDays <= 0 {
+		return 0, nil
+	}
+	conds := make([]string, 0, len(noDataErrorPatterns))
+	args := []interface{}{task}
+	for _, pattern := range noDataErrorPatterns {
+		conds = append(conds, "cp.last_error LIKE ?")
+		args = append(args, "%"+pattern+"%")
+	}
+	// LIMIT 取 lag+1 根交易日再取最小值，得到「lagTradingDays 个交易日之前」的界限。
+	args = append(args, targetDate, lagTradingDays+1)
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE stock_basic b
+		INNER JOIN (SELECT symbol,MAX(trade_date) last_date FROM kline_daily GROUP BY symbol) k
+			ON k.symbol=b.symbol
+		INNER JOIN sync_checkpoint cp ON cp.symbol=b.symbol AND cp.task=? AND cp.status='failed'
+		SET b.status='delisted',b.last_trade_date=k.last_date,b.updated_at=NOW()
+		WHERE b.status='listed' AND b.sec_type='stock'
+		  AND (`+strings.Join(conds, " OR ")+`)
+		  AND k.last_date < (
+			SELECT MIN(d) FROM (
+				SELECT DISTINCT trade_date d FROM kline_daily WHERE trade_date<=? ORDER BY d DESC LIMIT ?
+			) recent
+		  )`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("mark delisted by stale failure: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // MarkDelistedByName 按退市整理期命名规范识别退市股票：沪市"退市XX"、深市/北交所
 // "XX退"。上游全市场列表在摘牌后一段时间仍包含这些代码，而 180 天兜底阈值尚未触发，
 // 若不提前收敛会反复请求上游并失败。

@@ -117,6 +117,56 @@ func (s *Store) MarkFailed(ctx context.Context, task, symbol, errMsg string) err
 	return err
 }
 
+// FailedCheckpoint 是失败断点的最小信息，供调用方按错误类型决定是否重试。
+type FailedCheckpoint struct {
+	Symbol     string
+	RetryCount int
+	LastError  string
+}
+
+// FailedCheckpoints 列出当前失败断点，仅限仍在册的股票（非股票不该走股票回填）。
+func (s *Store) FailedCheckpoints(ctx context.Context, task string) ([]FailedCheckpoint, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT cp.symbol,cp.retry_count,cp.last_error
+		FROM sync_checkpoint cp
+		INNER JOIN stock_basic b ON b.symbol=cp.symbol
+		WHERE cp.task=? AND cp.status='failed' AND b.sec_type='stock' AND b.status='listed'
+		ORDER BY cp.symbol`, task)
+	if err != nil {
+		return nil, fmt.Errorf("list failed checkpoints: %w", err)
+	}
+	defer rows.Close()
+	out := make([]FailedCheckpoint, 0)
+	for rows.Next() {
+		var item FailedCheckpoint
+		if err := rows.Scan(&item.Symbol, &item.RetryCount, &item.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// RequeueSymbols 将指定失败断点重排为 pending，并保留 retry_count。
+// 保留计数是自动重试能够收敛的前提：达到上限后不再自动重排，转由人工处理。
+func (s *Store) RequeueSymbols(ctx context.Context, task string, symbols []string) (int64, error) {
+	if len(symbols) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(symbols)), ",")
+	args := make([]interface{}, 0, len(symbols)+1)
+	args = append(args, task)
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	res, err := s.DB.ExecContext(ctx,
+		"UPDATE sync_checkpoint SET status='pending',last_error='' WHERE task=? AND status='failed' AND symbol IN ("+placeholders+")", args...)
+	if err != nil {
+		return 0, fmt.Errorf("requeue symbols: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // RequeueFailed 仅供用户显式操作，将失败断点重排为 pending。
 // retry_count 保留，便于识别长期失败证券；同一轮失败后不会自动再次领取。
 func (s *Store) RequeueFailed(ctx context.Context, task string) (int64, error) {
@@ -167,9 +217,14 @@ func (s *Store) CompleteInactiveCheckpoints(ctx context.Context, task, targetDat
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status='done',cp.last_error=''
-		WHERE cp.task=? AND cp.status<>'done' AND b.sec_type='stock' AND (
-			b.list_date>? OR
-			(b.status<>'listed' AND (k.last_date IS NULL OR b.last_trade_date IS NULL OR k.last_date>=b.last_trade_date))
+		WHERE cp.task=? AND cp.status<>'done' AND (
+			-- 债券（定向可转债被上游误标为股票后经 NormalizeConvertibleBondSecurities 归类）
+			-- 不参与股票回填，断点直接收敛，否则会永远停在 failed。
+			b.sec_type='bond' OR
+			(b.sec_type='stock' AND (
+				b.list_date>? OR
+				(b.status<>'listed' AND (k.last_date IS NULL OR b.last_trade_date IS NULL OR k.last_date>=b.last_trade_date))
+			))
 		)`, task, targetDate)
 	if err != nil {
 		return 0, err
@@ -202,6 +257,8 @@ func (s *Store) ReconcileCheckpoints(ctx context.Context, task, targetDate strin
 			cp.last_synced_date=k.last_date,
 			cp.kline_count=IFNULL(k.kline_count,0),
 			cp.status=CASE
+				-- 债券不走股票回填链路，直接收敛，避免在 failed/pending 之间空转。
+				WHEN b.sec_type='bond' THEN 'done'
 				WHEN b.list_date>? THEN 'done'
 				WHEN b.list_date IS NULL AND k.last_date IS NULL THEN 'done'
 				WHEN b.status<>'listed' AND k.last_date IS NULL THEN 'done'

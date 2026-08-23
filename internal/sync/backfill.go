@@ -18,6 +18,14 @@ import (
 const (
 	TaskBackfill = "backfill_kline"
 	TaskDaily    = "daily_sync"
+
+	// maxTransientRetry 是网络/上游临时故障的自动重排次数上限。
+	// 超过后保留 failed 交由人工处理，避免结构性问题演变成每日空转。
+	maxTransientRetry = 3
+
+	// delistStaleTradingDays 是「上游无数据 + 历史停滞」判定退市的交易日阈值。
+	// 按库内真实交易日计数而非自然日，长假不会误判。
+	delistStaleTradingDays = 10
 )
 
 // Engine 同步引擎。
@@ -221,6 +229,30 @@ func (e *Engine) StopBackfill() {
 	}
 }
 
+// requeueTransientFailures 把「网络/上游临时故障且重试次数未达上限」的失败断点
+// 重排回 pending。错误分类采用白名单（store.IsTransientSyncError），未知错误一律
+// 不重试，保证结构性不可得的标的不会被反复请求。
+func (e *Engine) requeueTransientFailures(ctx context.Context) (int64, error) {
+	failures, err := e.st.FailedCheckpoints(ctx, TaskBackfill)
+	if err != nil {
+		return 0, err
+	}
+	retriable := make([]string, 0, len(failures))
+	for _, item := range failures {
+		if item.RetryCount >= maxTransientRetry {
+			continue
+		}
+		if !store.IsTransientSyncError(item.LastError) {
+			continue
+		}
+		retriable = append(retriable, item.Symbol)
+	}
+	if len(retriable) == 0 {
+		return 0, nil
+	}
+	return e.st.RequeueSymbols(ctx, TaskBackfill, retriable)
+}
+
 // runBackfill 主循环：领取断点 -> 并发拉取 -> 落库 -> 标记。
 func (e *Engine) runBackfill(ctx context.Context) error {
 	// 1. 残留 running 重置（上次进程退出导致）；failed 重置重试计数（新一轮机会）
@@ -229,8 +261,14 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 	} else if n > 0 {
 		slog.Info("重置残留 running 断点", "count", n)
 	}
-	// failed 断点仅允许通过显式“重试失败项”接口重排，启动时不自动恢复，
-	// 包括已具备北交所旧代码映射的证券，避免每次重启重复撞击上游。
+	// failed 分两类处理：网络/上游临时故障自动重排（有次数上限），结构性失败
+	// 仍需人工「重试失败项」。此前 failed 是终态，一次网络抖动就让证券数据永久
+	// 停更并被静默排除出候选池，这里给出有界的自愈路径。
+	if n, err := e.requeueTransientFailures(ctx); err != nil {
+		slog.Warn("重排临时失败断点失败", "err", err)
+	} else if n > 0 {
+		slog.Info("已重排临时失败断点", "count", n, "max_retry", maxTransientRetry)
+	}
 
 	// 2. 刷新证券列表（幂等 upsert，新股自动加入断点）。
 	if _, err := e.SyncSecurities(ctx); err != nil {
@@ -247,10 +285,24 @@ func (e *Engine) runBackfill(ctx context.Context) error {
 
 	// 3. 按目标交易日重新判定缺失。这样历史完整且已经更新的证券不会重复请求上游。
 	targetDate := latestExpectedTradeDate(time.Now())
+	// 先修正证券分类：定向可转债被上游混在股票列表里返回，日 K 接口对其无数据，
+	// 留在股票池只会每轮必失败。归类为 bond 后由断点收敛逻辑直接置 done。
+	if n, err := e.st.NormalizeConvertibleBondSecurities(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已修正被误标为股票的定向可转债", "count", n)
+	}
 	if n, err := e.st.MarkDelistedByName(ctx); err != nil {
 		return err
 	} else if n > 0 {
 		slog.Info("已按退市整理期名称识别退市证券", "count", n)
+	}
+	// 上游明确无数据且历史停滞超过 delistStaleTradingDays 个交易日的证券直接收敛。
+	// 180 天兜底规则对停牌数月的标的反应过慢，期间每轮都会重复请求并失败。
+	if n, err := e.st.MarkDelistedByStaleFailure(ctx, TaskBackfill, targetDate, delistStaleTradingDays); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("已按上游无数据+长期停滞识别退市证券", "count", n, "lag_trading_days", delistStaleTradingDays)
 	}
 	if n, err := e.st.MarkSecuritiesWithStaleTradeDateDelisted(ctx, targetDate); err != nil {
 		return err
