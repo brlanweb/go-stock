@@ -239,7 +239,15 @@ onUnmounted(() => {
 
 <template>
   <main class="heatmap-workspace">
-    <MarketSidebar :market="market" :group-by="groupBy" :metric="metric" :period="period" :controls="activeView === 'heatmap'" :security-count="itemCount" @change="options => { market = options.market; groupBy = options.groupBy; metric = options.metric; period = options.period; setOption() }" />
+    <!-- 云图筛选器与快速定位都只服务于大盘云图；其余 Tab 用页面内列表点选，
+         侧栏只保留品牌、自选股、数据新鲜度与口径说明。 -->
+    <MarketSidebar
+      :market="market" :group-by="groupBy" :metric="metric" :period="period"
+      :controls="activeView === 'heatmap'"
+      :show-search="activeView === 'heatmap'"
+      :security-count="itemCount"
+      @change="options => { market = options.market; groupBy = options.groupBy; metric = options.metric; period = options.period; setOption() }"
+    />
 
     <section class="heatmap-canvas" :class="{ 'hotspot-mode': activeView !== 'heatmap', 'has-subtabs': activeSubItems.length > 0 }">
       <header class="canvas-header">

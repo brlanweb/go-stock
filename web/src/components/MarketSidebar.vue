@@ -8,10 +8,17 @@ const props = withDefaults(defineProps<{
   groupBy?: string
   metric?: string
   period?: string
+  /** 云图专属控件：范围/划分/指标/区间筛选器、证券数量与历史同步面板。 */
   controls?: boolean
+  /**
+   * 快速定位搜索框。云图页靠筛选器浏览，其余 Tab 靠页面内列表点选，
+   * 都不需要它；个股详情页没有别的跳转入口，必须保留。
+   */
+  showSearch?: boolean
   securityCount?: number
 }>(), {
-  market: 'all', groupBy: 'industry', metric: 'change_pct', period: '1d', controls: true, securityCount: 0
+  market: 'all', groupBy: 'industry', metric: 'change_pct', period: '1d',
+  controls: true, showSearch: true, securityCount: 0
 })
 
 const emit = defineEmits<{
@@ -78,11 +85,36 @@ watch(() => [props.market, props.groupBy, props.metric, props.period], ([market,
   selectedPeriod.value = period
 })
 
+// 筛选器只在 controls=true 时渲染，因此这里只需向宿主派发变更。
 function setOption() {
-  const options = { market: selectedMarket.value, groupBy: selectedGroup.value, metric: selectedMetric.value, period: selectedPeriod.value }
-  if (props.controls) emit('change', options)
-  else router.push({ path: '/', query: options })
+  emit('change', { market: selectedMarket.value, groupBy: selectedGroup.value, metric: selectedMetric.value, period: selectedPeriod.value })
 }
+
+// 非云图页的一行数据状态：正常只报截止日期；同步中报进度；有失败项报警。
+// 失败与停滞会让下游全部分析静默失真，必须在任何页面都能看见。
+const freshness = computed(() => {
+  const backfill = syncStatus.value?.backfill
+  if (!backfill) return { text: '同步状态未知', tone: 'warn', tip: '无法读取同步状态' }
+  if (syncStatus.value?.backfill_running) {
+    return {
+      text: `同步中 ${backfill.complete}/${backfill.total}`,
+      tone: 'busy',
+      tip: `完整 ${backfill.complete} · 待处理 ${backfill.pending} · 失败 ${backfill.failed}`,
+    }
+  }
+  if (backfill.failed > 0) {
+    return {
+      text: `${backfill.failed} 项同步失败`,
+      tone: 'warn',
+      tip: '到「市场 › 大盘云图」页可重试失败项',
+    }
+  }
+  return {
+    text: backfill.latest_date ? `数据截至 ${backfill.latest_date}` : '暂无数据日期',
+    tone: 'ok',
+    tip: `完整 ${backfill.complete}/${backfill.total}`,
+  }
+})
 
 function onSearch() {
   window.clearTimeout(searchTimer)
@@ -161,18 +193,29 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <aside class="market-sidebar">
+  <aside class="market-sidebar" :class="{ 'nav-only': !controls && !showSearch }">
     <router-link to="/" class="brand">go-stock</router-link>
-    <label class="side-field"><span>范围</span><select v-model="selectedMarket" @change="setOption"><option v-for="[value, label] in marketOptions" :key="value" :value="value">{{ label }}</option></select></label>
-    <label class="side-field"><span>划分</span><select v-model="selectedGroup" @change="setOption"><option v-for="[value, label] in groupOptions" :key="value" :value="value">{{ label }}</option></select></label>
-    <label class="side-field"><span>指标</span><select v-model="selectedMetric" @change="setOption"><option v-for="[value, label] in metricOptions" :key="value" :value="value">{{ label }}</option></select></label>
-    <label class="side-field"><span>区间</span><select v-model="selectedPeriod" @change="setOption"><option v-for="[value, label] in periodOptions" :key="value" :value="value">{{ label }}</option></select></label>
 
-    <div class="side-search"><span>快速定位</span><input v-model="keyword" autocomplete="off" placeholder="输入代码/简称" @input="onSearch" @keydown.enter="searchResults[0] && openStock(searchResults[0].symbol)" />
+    <!-- 云图筛选器：只在大盘云图页出现，其余页面这些选项无处作用，属纯噪音。 -->
+    <template v-if="controls">
+      <label class="side-field"><span>范围</span><select v-model="selectedMarket" @change="setOption"><option v-for="[value, label] in marketOptions" :key="value" :value="value">{{ label }}</option></select></label>
+      <label class="side-field"><span>划分</span><select v-model="selectedGroup" @change="setOption"><option v-for="[value, label] in groupOptions" :key="value" :value="value">{{ label }}</option></select></label>
+      <label class="side-field"><span>指标</span><select v-model="selectedMetric" @change="setOption"><option v-for="[value, label] in metricOptions" :key="value" :value="value">{{ label }}</option></select></label>
+      <label class="side-field"><span>区间</span><select v-model="selectedPeriod" @change="setOption"><option v-for="[value, label] in periodOptions" :key="value" :value="value">{{ label }}</option></select></label>
+    </template>
+
+    <div v-if="showSearch" class="side-search"><span>快速定位</span><input v-model="keyword" autocomplete="off" placeholder="输入代码/简称" @input="onSearch" @keydown.enter="searchResults[0] && openStock(searchResults[0].symbol)" />
       <div v-if="searchResults.length" class="search-results"><button v-for="result in searchResults" :key="result.symbol" @click="openStock(result.symbol)"><b>{{ result.name }}</b><span>{{ result.symbol }}</span></button></div>
     </div>
-    <div v-if="securityCount" class="side-stats"><span>证券数量</span><strong>{{ securityCount }}</strong></div>
-    <div v-if="syncStatus" class="coverage-status" :class="{ active: syncStatus.backfill_running }">
+    <div v-if="controls && securityCount" class="side-stats"><span>证券数量</span><strong>{{ securityCount }}</strong></div>
+
+    <!-- 非云图页只留一行数据新鲜度：完整同步面板是运维视图，但「数据截至哪天」
+         决定了所有分析结论是否成立，静默掉会让人对着过期数据做决策。 -->
+    <div v-if="!controls && syncStatus" class="freshness" :class="freshness.tone" :title="freshness.tip">
+      <i /><span>{{ freshness.text }}</span>
+    </div>
+
+    <div v-if="controls && syncStatus" class="coverage-status" :class="{ active: syncStatus.backfill_running }">
       <div class="coverage-title"><span>历史数据同步</span><strong>{{ syncStatus.backfill_running ? '进行中' : syncStatus.backfill.pending > 0 ? '已暂停' : '已停止' }}</strong></div>
       <div class="coverage-progress"><i :style="{ width: `${syncProgress}%` }"></i></div>
       <span>完整 {{ syncStatus.backfill.complete }}/{{ syncStatus.backfill.total }} · {{ syncProgress.toFixed(1) }}%</span>
@@ -195,7 +238,16 @@ onUnmounted(() => {
 .side-search { position:relative; display:grid; gap:8px; margin-top:6px; padding-top:12px; border-top:1px solid #354157; color:#c3cbd7; font-size:13px; }.side-search input { padding:6px 8px; }
 .search-results { position:absolute; z-index:20; top:calc(100% + 3px); width:100%; max-height:260px; overflow:auto; border:1px solid #445067; background:#1d2739; box-shadow:0 12px 30px rgba(0,0,0,.4); }.search-results button { display:flex; width:100%; justify-content:space-between; gap:8px; padding:8px; border:0; border-bottom:1px solid #344056; border-radius:0; background:transparent; color:#edf2f9; text-align:left; }.search-results span { color:#9ba8bd; font-size:11px; }
 .side-stats { display:flex; align-items:center; justify-content:space-between; padding:8px 7px; border-top:1px solid #354157; border-bottom:1px solid #354157; color:#9da9bb; font-size:12px; }.side-stats strong { color:#e7ecf4; font-size:13px; }.coverage-status { display:grid; gap:4px; padding:7px; border-left:2px solid #68758a; background:#252f41; color:#d9e0e9; font-size:10px; }.coverage-status.active { border-left-color:#d6a12c; background:#2b2c32; }.coverage-title { display:flex; align-items:center; justify-content:space-between; font-size:11px; }.coverage-title strong { color:#aeb9ca; font-size:10px; }.coverage-status.active .coverage-title strong { color:#e9c16c; }.coverage-progress { height:4px; overflow:hidden; background:#111a28; }.coverage-progress i { display:block; height:100%; background:#4fbc91; transition:width .25s; }.coverage-status small { color:#9ba8bd; font-size:9px; }.retry-failed { margin-top:3px; padding:4px 7px; border:1px solid #8c5e34; background:#3a2e25; color:#e9c16c; font-size:10px; cursor:pointer; }.retry-failed:disabled { opacity:.6; cursor:wait; }.retry-message { color:#e9c16c!important; }
+/* 非云图页的一行数据新鲜度 */
+.freshness { display:flex; align-items:center; gap:7px; padding:7px; border-left:2px solid #68758a; background:#252f41; color:#c3cbd7; font-size:11px; }
+.freshness i { width:6px; height:6px; flex:0 0 auto; border-radius:50%; background:#68758a; }
+.freshness.ok { border-left-color:#4fbc91; }.freshness.ok i { background:#4fbc91; }
+.freshness.busy { border-left-color:#d6a12c; }.freshness.busy i { background:#e9c16c; }
+.freshness.warn { border-left-color:#c96a72; color:#e9a7ac; }.freshness.warn i { background:#ef6a72; }
 .sidebar-section { display:grid; gap:2px; }.sidebar-section header { display:flex; align-items:center; justify-content:space-between; padding:2px 7px 5px; color:#e2e7ef; font-size:12px; }.sidebar-section header small { color:#8390a4; font-size:10px; }.sidebar-section button { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:5px; padding:5px 7px; border:0; border-bottom:1px solid #303b50; border-radius:0; background:#222d41; color:#ecf0f6; text-align:left; }.sidebar-section button:hover { background:#2b374c; }.sidebar-section button span { min-width:0; }.sidebar-section button b,.sidebar-section button small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sidebar-section button b { font-size:11px; }.sidebar-section button small { margin-top:1px; color:#8996aa; font-size:9px; }.sidebar-section button em { flex:0 0 auto; color:#e9c16c; font-style:normal; font-size:11px; font-weight:700; }.sidebar-section button em.positive { color:#ef6a72; }.sidebar-section button em.negative { color:#28bd8b; }.sidebar-section p { padding:6px 7px; color:#738197; font-size:10px; }.side-help { display:grid; gap:7px; margin-top:auto; padding:10px 7px 4px; border-top:1px solid #354157; color:#9ba8bd; font-size:11px; line-height:1.4; }.side-help strong { color:#e2e7ef; font-size:12px; }
-@media (max-width:900px) { .market-sidebar { display:grid; min-height:auto; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; border-right:0; border-bottom:1px solid #354157; overflow:visible; }.brand,.side-help,.side-stats,.sidebar-section { display:none; }.coverage-status { grid-column:1/-1; }.side-search { margin:0; padding:0; border:0; } }
+@media (max-width:900px) { .market-sidebar { display:grid; min-height:auto; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; border-right:0; border-bottom:1px solid #354157; overflow:visible; }.brand,.side-help,.side-stats,.sidebar-section { display:none; }.coverage-status { grid-column:1/-1; }.side-search { margin:0; padding:0; border:0; }.freshness { grid-column:1/-1; }
+  /* 移动端非云图页：品牌/自选股/说明本就隐藏，此时只剩数据新鲜度一行，
+     收窄内边距让它退化成一条细状态条，而不是占位的空白区。 */
+  .market-sidebar.nav-only { padding:6px 8px; gap:0; } }
 @media (max-width:600px) { .market-sidebar { grid-template-columns:1fr 1fr; }.side-search { grid-column:1/-1; } }
 </style>
