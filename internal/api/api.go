@@ -74,6 +74,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/recommendations/montecarlo/{code}", s.handleRecommendationMonteCarlo)
 	mux.HandleFunc("GET /api/v1/entry/advice", s.handleEntryAdvice)
 	mux.HandleFunc("GET /api/v1/positions", s.handlePositions)
+	mux.HandleFunc("GET /api/v1/trading/account", s.handleTradeAccount)
+	mux.HandleFunc("GET /api/v1/trading/orders", s.handleTradeOrders)
+	mux.HandleFunc("POST /api/v1/trading/{code}/enter", s.handleSymbolEnter)
+	mux.HandleFunc("POST /api/v1/trading/{code}/exit", s.handleSymbolExit)
+	mux.HandleFunc("GET /api/v1/entry/advice/{code}", s.handleSymbolAdvice)
+	// 保留旧 id 路由兼容已打开的旧页面。
 	mux.HandleFunc("POST /api/v1/positions/{id}/enter", s.handlePositionEnter)
 	mux.HandleFunc("POST /api/v1/positions/{id}/exit", s.handlePositionExit)
 	mux.HandleFunc("GET /api/v1/entry/status", s.handleEntryStatus)
@@ -951,6 +957,81 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 }
 
+func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	account, err := s.St.TradeAccountOverview(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) handleTradeOrders(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.RecentTradeOrders(ctx, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+}
+
+func (s *Server) handleSymbolEnter(w http.ResponseWriter, r *http.Request) {
+	s.handleSymbolTrade(w, r, true)
+}
+
+func (s *Server) handleSymbolExit(w http.ResponseWriter, r *http.Request) {
+	s.handleSymbolTrade(w, r, false)
+}
+
+func (s *Server) handleSymbolTrade(w http.ResponseWriter, r *http.Request, enter bool) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	price, err := s.manualPositionPrice(ctx, symbol)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	date := time.Now().In(shanghaiLoc()).Format("2006-01-02")
+	var result store.TradeResult
+	if enter {
+		result, err = s.St.ManuallyBuySymbol(ctx, symbol, date, price)
+	} else {
+		result, err = s.St.ManuallySellSymbol(ctx, symbol, date, price)
+	}
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleSymbolAdvice(w http.ResponseWriter, r *http.Request) {
+	symbol := model.NormalizeSymbol(r.PathValue("code"))
+	if symbol == "" {
+		writeErr(w, http.StatusBadRequest, "无法识别的代码")
+		return
+	}
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.St.EntryAdviceForSymbol(ctx, symbol, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+}
+
 func (s *Server) manualPositionPrice(ctx context.Context, symbol string) (float64, error) {
 	var quote *model.Quote
 	var err error
@@ -1194,13 +1275,29 @@ func (s *Server) handleDailyReviewRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
-	if s.Watchlist == nil {
-		writeJSON(w, http.StatusOK, realtime.WatchlistResponse{Status: "unavailable", Symbols: []string{}, Quotes: []*model.Quote{}})
-		return
-	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	writeJSON(w, http.StatusOK, s.Watchlist.Response(ctx))
+	response := realtime.WatchlistResponse{Status: "unavailable", Symbols: []string{}, Quotes: []*model.Quote{}}
+	if s.Watchlist != nil {
+		response = s.Watchlist.Response(ctx)
+	}
+	recommendations := []model.StockRecommendation{}
+	signals := map[string]store.EntryAdvice{}
+	if s.St != nil {
+		var err error
+		recommendations, err = s.St.LatestRecommendations(ctx)
+		if err != nil {
+			recommendations = []model.StockRecommendation{}
+		}
+		signals, err = s.St.LatestWatchlistAdvice(ctx, response.Symbols)
+		if err != nil {
+			signals = map[string]store.EntryAdvice{}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": response.Status, "synced_at": response.SyncedAt, "symbols": response.Symbols,
+		"quotes": response.Quotes, "recommendations": recommendations, "signals": signals,
+	})
 }
 
 func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
@@ -1226,9 +1323,8 @@ func (s *Server) handleWatchlistDel(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	// 手动移除自选即放弃该标的的 AI 生命周期：撤销待建仓候选、终止持仓跟踪，
-	// 盘中调度不再分析；收益统计按 expired/removed 口径排除（见 store 注释）。
-	if err := s.St.RemoveWatchlistAndAbandonLifecycle(ctx, symbol, time.Now().In(shanghaiLoc()).Format("2006-01-02")); err != nil {
+	// 移出自选只停止 AI 每小时跟踪，不得隐式平仓或改写真实持仓。
+	if err := s.St.RemoveWatchlist(ctx, symbol); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}

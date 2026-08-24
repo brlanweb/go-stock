@@ -144,3 +144,57 @@ func (s *Store) EntryAdviceByDate(ctx context.Context, tradeDate string, limit i
 	}
 	return out, rows.Err()
 }
+
+// EntryAdviceForSymbol 返回单只自选股的 AI/规则/手动分析流水，供建仓记录展开查看。
+func (s *Store) EntryAdviceForSymbol(ctx context.Context, symbol string, limit int) ([]EntryAdvice, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT e.id,DATE_FORMAT(e.trade_date,'%Y-%m-%d'),e.symbol,COALESCE(b.name,''),COALESCE(b.code,''),
+		e.source,e.stage,e.action,e.reason,e.price_low,e.price_high,e.urgency,e.ref_price,e.model_name,
+		DATE_FORMAT(e.created_at,'%Y-%m-%d %H:%i')
+		FROM entry_advice e LEFT JOIN stock_basic b ON b.symbol=e.symbol
+		WHERE e.symbol=? ORDER BY e.id DESC LIMIT ?`, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []EntryAdvice{}
+	for rows.Next() {
+		var item EntryAdvice
+		var priceLow, priceHigh, refPrice sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.TradeDate, &item.Symbol, &item.Name, &item.Code,
+			&item.Source, &item.Stage, &item.Action, &item.Reason, &priceLow, &priceHigh,
+			&item.Urgency, &refPrice, &item.Model, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		if priceLow.Valid {
+			item.PriceLow = &priceLow.Float64
+		}
+		if priceHigh.Valid {
+			item.PriceHigh = &priceHigh.Float64
+		}
+		if refPrice.Valid {
+			item.RefPrice = &refPrice.Float64
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LatestWatchlistAdvice(ctx context.Context, symbols []string) (map[string]EntryAdvice, error) {
+	out := make(map[string]EntryAdvice, len(symbols))
+	for _, symbol := range symbols {
+		items, err := s.EntryAdviceForSymbol(ctx, symbol, 50)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if item.Source == EntrySourceHourlyAI {
+				out[symbol] = item
+				break
+			}
+		}
+	}
+	return out, nil
+}

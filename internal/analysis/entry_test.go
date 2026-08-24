@@ -78,8 +78,8 @@ func TestIsTailSlot(t *testing.T) {
 		hour, minute int
 		want         bool
 	}{
-		{10, 0, false}, {13, 30, false}, {14, 30, false},
-		{14, 51, false}, {14, 52, true}, {14, 58, true},
+		{10, 0, false}, {13, 30, false}, {14, 29, false},
+		{14, 30, true}, {14, 51, true}, {14, 58, true},
 	}
 	for _, tc := range cases {
 		got := isTailSlot(time.Date(2026, 8, 14, tc.hour, tc.minute, 0, 0, loc))
@@ -137,10 +137,10 @@ func TestNextEntryRunTradingSlots(t *testing.T) {
 	if next.Hour() != 13 || next.Minute() != 30 {
 		t.Fatalf("expected 13:30 after lunch, got %v", next)
 	}
-	// 14:31 → 14:52 尾盘风险检查
+	// 14:31 已过每小时最后一轮 → 下一交易日 10:00
 	now = time.Date(2026, 8, 14, 14, 31, 0, 0, loc)
 	next = nextEntryRun(now)
-	if next.Hour() != 14 || next.Minute() != 52 {
-		t.Fatalf("expected 14:52 tail check, got %v", next)
+	if next.Weekday() != time.Monday || next.Hour() != 10 || next.Minute() != 0 {
+		t.Fatalf("expected next trading day 10:00, got %v", next)
 	}
 }

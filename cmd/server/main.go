@@ -56,11 +56,7 @@ func main() {
 	watchlistSyncer := realtime.NewWatchlistSyncer(st, mgr, queryCache, time.Duration(cfg.WatchlistSyncSeconds)*time.Second)
 	watchlistSyncer.Start(rootCtx)
 	analysisService := analysis.New(st, analysis.Config{BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Prompt: cfg.AIPrompt, HotspotPrompt: cfg.AIHotspotPrompt, ReviewPrompt: cfg.AIReviewPrompt, AutoEntryEnabled: cfg.AutoEntryEnabled})
-	if cfg.AutoEntryEnabled {
-		slog.Warn("自动建仓已启用：盘前将按推荐自动建立持仓生命周期")
-	} else {
-		slog.Info("自动建仓已停用：推荐仅作观察输出，开仓由人工决策")
-	}
+	slog.Info("AI 仅提供推荐与每小时自选分析，建仓和平仓只能由用户手动操作")
 	analysisService.SetMarketProvider(mgr)
 	analysisService.StartScheduler(rootCtx)
 	if os.Getenv("GOSTOCK_AUTO_BACKFILL") != "false" {

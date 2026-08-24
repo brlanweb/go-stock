@@ -38,6 +38,8 @@ export interface WatchlistResponse {
   synced_at?: string
   symbols: string[]
   quotes: Quote[]
+  recommendations: Recommendation[]
+  signals: Record<string, EntryAdvice>
 }
 
 export interface Kline {
@@ -215,11 +217,63 @@ export interface Position {
   hold_days: number
   position_pct: number
   realized_pct: number
+  shares: number
+  buy_shares: number
+  buy_amount: number
+  sell_amount: number
+  realized_pnl: number
+  fee_amount: number
+  market_value?: number
+  unrealized_pnl?: number
   reference_price: number | null
   change_pct: number | null
   gross_change_pct: number | null
   created_at: string
   updated_at: string
+}
+
+export interface TradeAccount {
+  initial_cash: number
+  cash: number
+  market_value: number
+  total_assets: number
+  realized_pnl: number
+  unrealized_pnl: number
+  total_pnl: number
+  total_fee: number
+  buy_count: number
+  sell_count: number
+}
+
+export interface TradeOrder {
+  id: number
+  position_id: number
+  symbol: string
+  code: string
+  name: string
+  side: 'buy' | 'sell'
+  trade_date: string
+  price: number
+  shares: number
+  amount: number
+  fee: number
+  cash_delta: number
+  realized_pnl: number
+  note: string
+  created_at: string
+}
+
+export interface TradeResult {
+  position_id: number
+  symbol: string
+  side: 'buy' | 'sell'
+  price: number
+  shares: number
+  amount: number
+  fee: number
+  cash: number
+  realized_pnl: number
+  status: Position['status']
 }
 
 export interface EntryAdviceResponse {
@@ -750,6 +804,11 @@ export const api = {
   recommendationMonteCarlo: (code: string, days = 10) => req<MonteCarloResult>(`/recommendations/montecarlo/${encodeURIComponent(code)}?days=${days}`),
   entryAdvice: (date = '') => req<EntryAdviceResponse>(`/entry/advice${date ? `?date=${encodeURIComponent(date)}` : ''}`),
   positions: (limit = 30) => req<{ items: Position[] }>(`/positions?limit=${limit}`),
+  tradeAccount: () => req<TradeAccount>('/trading/account'),
+  tradeOrders: (limit = 100) => req<{ items: TradeOrder[] }>(`/trading/orders?limit=${limit}`),
+  enterSymbol: (symbol: string) => req<TradeResult>(`/trading/${encodeURIComponent(symbol)}/enter`, { method: 'POST' }),
+  exitSymbol: (symbol: string) => req<TradeResult>(`/trading/${encodeURIComponent(symbol)}/exit`, { method: 'POST' }),
+  symbolAdvice: (symbol: string, limit = 50) => req<{ items: EntryAdvice[] }>(`/entry/advice/${encodeURIComponent(symbol)}?limit=${limit}`),
   enterPosition: (id: number) => req<{ id: number; price: number; status: string }>(`/positions/${id}/enter`, { method: 'POST' }),
   exitPosition: (id: number) => req<{ id: number; price: number; status: string }>(`/positions/${id}/exit`, { method: 'POST' }),
   entryStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/entry/status'),

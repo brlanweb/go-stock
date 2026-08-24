@@ -391,25 +391,14 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if err := s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations); err != nil {
 		return err
 	}
-	// 推荐落库成功后，从 3 只中确定性选出最适合建仓的一只并自动加入自选
-	// （自选上限 10 只，AddWatchlist 内部自动淘汰最旧条目保持数据同步）。
-	// 该步骤失败只告警，不影响推荐主结果。
-	// 自动建仓需同时满足两个条件：
-	//  1. 全局开关开启（默认关闭，等待策略被证明正期望后再打开）；
-	//  2. 指数风向绿灯——大盘转弱期强行开仓是此前连续亏损的主要来源。
-	switch {
-	case !s.config.AutoEntryEnabled:
-		slog.Info("自动建仓已停用，仅生成推荐观察", "date", analysisDate, "picks", len(result.Recommendations))
-	case gate.AllowAutoEntry():
-		s.autoWatchBestEntryPick(ctx, now, analysisDate, result.Recommendations)
-	default:
-		slog.Info("指数风向非绿灯，仅生成推荐观察，不自动建仓", "level", gate.Level, "reason", gate.Reason)
-	}
+	// AI 只负责生成三只推荐。加入自选、建仓和平仓都必须由用户主动操作，
+	// 风险门和历史配置不再拥有改变持仓或自选的权限。
+	slog.Info("AI 推荐已生成，仅供用户选择加入自选", "date", analysisDate, "picks", len(result.Recommendations), "gate", gate.Level)
 	return nil
 }
 
-// AutoEntryEnabled 供 API 层向前端暴露当前自动建仓开关状态。
-func (s *Service) AutoEntryEnabled() bool { return s.config.AutoEntryEnabled }
+// AutoEntryEnabled 固定返回 false：AI 永不自动建仓。
+func (s *Service) AutoEntryEnabled() bool { return false }
 
 // DailyEntryPickCount 是每个推荐日纳入生命周期的唯一最强标的数量。
 const DailyEntryPickCount = 1

@@ -92,25 +92,36 @@ const (
 
 // Position 是一只 AI 推荐股的完整生命周期记录。
 type Position struct {
-	ID             int64    `json:"id"`
-	Symbol         string   `json:"symbol"`
-	Code           string   `json:"code"`
-	Name           string   `json:"name"`
-	PickDate       string   `json:"pick_date"`
-	AnalysisDate   string   `json:"analysis_date"`
-	Status         string   `json:"status"`
-	EntryDate      string   `json:"entry_date,omitempty"`
-	EntryPrice     *float64 `json:"entry_price"`
-	HighestPrice   *float64 `json:"highest_price"`
-	LowestPrice    *float64 `json:"lowest_price"`
-	ExitDate       string   `json:"exit_date,omitempty"`
-	ExitPrice      *float64 `json:"exit_price"`
-	ExitReason     string   `json:"exit_reason,omitempty"`
-	ExitKind       string   `json:"exit_kind,omitempty"`
-	DataQuality    string   `json:"data_quality,omitempty"`
-	HoldDays       int      `json:"hold_days"`
-	PositionPct    float64  `json:"position_pct"`
-	RealizedPct    float64  `json:"realized_pct"`
+	ID           int64    `json:"id"`
+	Symbol       string   `json:"symbol"`
+	Code         string   `json:"code"`
+	Name         string   `json:"name"`
+	PickDate     string   `json:"pick_date"`
+	AnalysisDate string   `json:"analysis_date"`
+	Status       string   `json:"status"`
+	EntryDate    string   `json:"entry_date,omitempty"`
+	EntryPrice   *float64 `json:"entry_price"`
+	HighestPrice *float64 `json:"highest_price"`
+	LowestPrice  *float64 `json:"lowest_price"`
+	ExitDate     string   `json:"exit_date,omitempty"`
+	ExitPrice    *float64 `json:"exit_price"`
+	ExitReason   string   `json:"exit_reason,omitempty"`
+	ExitKind     string   `json:"exit_kind,omitempty"`
+	DataQuality  string   `json:"data_quality,omitempty"`
+	HoldDays     int      `json:"hold_days"`
+	PositionPct  float64  `json:"position_pct"`
+	RealizedPct  float64  `json:"realized_pct"`
+	// 手动模拟交易的金额口径（026_manual_trading.sql）：
+	// Shares 当前持有股数；BuyAmount 累计买入金额（含费用）；SellAmount 累计卖出净额；
+	// RealizedPnl 已实现盈亏金额；FeeAmount 累计费用。
+	Shares         int      `json:"shares"`
+	BuyShares      int      `json:"buy_shares"`
+	BuyAmount      float64  `json:"buy_amount"`
+	SellAmount     float64  `json:"sell_amount"`
+	RealizedPnl    float64  `json:"realized_pnl"`
+	FeeAmount      float64  `json:"fee_amount"`
+	MarketValue    *float64 `json:"market_value,omitempty"`
+	UnrealizedPnl  *float64 `json:"unrealized_pnl,omitempty"`
 	ReferencePrice *float64 `json:"reference_price"`
 	ChangePct      *float64 `json:"change_pct"`
 	GrossChangePct *float64 `json:"gross_change_pct"`
@@ -123,6 +134,7 @@ const positionSelectColumns = `p.id,p.symbol,COALESCE(b.code,''),COALESCE(b.name
 	COALESCE(DATE_FORMAT(p.entry_date,'%Y-%m-%d'),''),p.entry_price,p.highest_price,p.lowest_price,
 	COALESCE(DATE_FORMAT(p.exit_date,'%Y-%m-%d'),''),p.exit_price,p.exit_reason,p.exit_kind,p.data_quality,
 	p.hold_days,p.position_pct,p.realized_pct,
+	p.shares,p.buy_shares,p.buy_amount,p.sell_amount,p.realized_pnl,p.fee_amount,
 	DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i'),DATE_FORMAT(p.updated_at,'%Y-%m-%d %H:%i')`
 
 func scanPositions(rows *sql.Rows) ([]Position, error) {
@@ -136,6 +148,7 @@ func scanPositions(rows *sql.Rows) ([]Position, error) {
 			&item.EntryDate, &entryPrice, &highestPrice, &lowestPrice,
 			&item.ExitDate, &exitPrice, &item.ExitReason, &item.ExitKind, &item.DataQuality,
 			&item.HoldDays, &item.PositionPct, &item.RealizedPct,
+			&item.Shares, &item.BuyShares, &item.BuyAmount, &item.SellAmount, &item.RealizedPnl, &item.FeeAmount,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -262,6 +275,14 @@ func (s *Store) enrichPositionPerformance(ctx context.Context, items []Position)
 			net := PositionNetChangePct(gross)
 			item.GrossChangePct = &gross
 			item.ChangePct = &net
+			// 金额口径：持有中按参考价折算市值与浮动盈亏（成本含买入费用）。
+			if item.Shares > 0 && item.BuyShares > 0 {
+				mv := float64(item.Shares) * *item.ReferencePrice
+				avgCost := item.BuyAmount / float64(item.BuyShares)
+				unreal := mv - avgCost*float64(item.Shares)
+				item.MarketValue = &mv
+				item.UnrealizedPnl = &unreal
+			}
 		}
 	}
 	return items, nil

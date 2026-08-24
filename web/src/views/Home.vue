@@ -144,9 +144,9 @@ const reasonRows = computed(() => recommendations.value.map(item => ({ ...item, 
 // green 正常推荐并自动建仓；yellow 只生成推荐观察、不自动建仓且风险上限压到 down 档；
 // red 直接跳过当日推荐与建仓。数据缺失一律按 yellow 保守显示，不显示为绿灯。
 const gateLevelMeta: Record<string, { label: string; action: string; cls: string }> = {
-  green: { label: '绿灯', action: '正常推荐并自动建仓', cls: 'lv-green' },
-  yellow: { label: '黄灯', action: '仅推荐观察 · 不自动建仓', cls: 'lv-yellow' },
-  red: { label: '红灯', action: '跳过当日推荐与建仓', cls: 'lv-red' },
+  green: { label: '绿灯', action: '正常生成推荐', cls: 'lv-green' },
+  yellow: { label: '黄灯', action: '谨慎生成推荐 · 人工决策', cls: 'lv-yellow' },
+  red: { label: '红灯', action: '暂停当日推荐', cls: 'lv-red' },
 }
 function gateMeta(level?: string | null) {
   return gateLevelMeta[level || ''] || { label: '未知', action: '风险数据不可用，按保守处理', cls: 'lv-yellow' }
@@ -158,16 +158,8 @@ const marketGate = computed(() => riskGate.value?.market_gate || null)
 // 「推荐可见 ≠ 系统已建仓」的关键提示，避免照着观察性推荐手动追单。
 const autoEntryOn = computed(() => riskGate.value?.auto_entry_enabled === true && riskGate.value?.final_level === 'green')
 // 区分两种未建仓原因：开关停用是策略性决定，非绿灯是当日风险拦截。
-const autoEntryHint = computed(() => {
-  if (!riskGate.value) return '风险数据不可用，请按最保守口径处理'
-  if (!riskGate.value.auto_entry_enabled) return '策略验证期：推荐仅作观察，开仓由你人工决策'
-  if (riskGate.value.final_level !== 'green') return '非绿灯仅生成推荐观察，请勿照单手动追买'
-  return '绿灯下盘前自动建仓最强标的'
-})
-const autoEntryLabel = computed(() => {
-  if (riskGate.value && !riskGate.value.auto_entry_enabled) return '已停用'
-  return autoEntryOn.value ? '已开启' : '已暂停'
-})
+const autoEntryHint = computed(() => 'AI 只提供推荐和每小时自选分析，建仓和平仓均由你手动确认')
+const autoEntryLabel = computed(() => '仅推荐')
 const phaseLabels: Record<string, string> = { up: '上行', range: '震荡', down: '下行' }
 const riskPolicyText = computed(() => {
   if (!riskPolicy.value) return '—'
@@ -272,7 +264,7 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
 
       <button type="button" class="risk-entry" :class="autoEntryOn ? 'on' : 'off'" :title="autoEntryHint" @click="openRiskTab">
         <i class="switch"><u /></i>
-        <span><small>自动建仓</small><b>{{ autoEntryLabel }}</b></span>
+        <span><small>AI 权限</small><b>{{ autoEntryLabel }}</b></span>
       </button>
 
       <div class="risk-dots">
@@ -424,7 +416,7 @@ onBeforeUnmount(() => basketResizeObserver?.disconnect())
         </article>
 
         <article class="panel signal-panel">
-          <header><div><b>当前趋势持仓</b><small>30分钟分析 · 大盘/板块/个股三层风控</small></div><i class="watching">活跃 {{ activePositionCount }}/10</i></header>
+          <header><div><b>当前趋势持仓</b><small>每小时分析 · 大盘/板块/个股三层风控</small></div><i class="watching">活跃 {{ activePositionCount }}/10</i></header>
           <div v-if="latestExit" class="signal exit"><small>{{ latestExit.source === 'manual' ? '最新手动平仓' : '最新平仓建议' }} · {{ latestExit.created_at.slice(11) }}</small><button type="button" @click="openStock(latestExit.symbol)">{{ latestExit.name || latestExit.symbol }}<em>{{ latestExit.code }}</em></button><p>{{ latestExit.reason }}</p></div>
           <div v-else-if="latestEntry" class="signal entry"><small>{{ latestEntry.source === 'manual' ? '最新手动建仓' : '最新建仓建议' }} · {{ latestEntry.created_at.slice(11) }}</small><button type="button" @click="openStock(latestEntry.symbol)">{{ latestEntry.name || latestEntry.symbol }}<em>{{ latestEntry.code }}</em></button><p>{{ latestEntry.reason }}</p></div>
           <div v-else class="signal waiting"><small>最新结论</small><b>等待趋势确认</b><p>{{ entryAdvice?.items.find(item => item.action === 'wait')?.reason || '当前尚未给出建仓建议。' }}</p></div>

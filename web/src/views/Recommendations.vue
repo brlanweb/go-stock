@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationRiskPolicy, type RecommendationStats } from '../api'
+import { api, fmt, fmtPct, pctClass, type EntryAdvice, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationRiskPolicy, type RecommendationStats, type TradeAccount, type TradeOrder, type WatchlistResponse } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -13,9 +13,14 @@ const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
 const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
 
-// 盘中趋势持仓分析（30分钟8档，建仓与退出双阶段）
+// 自选股 AI 分析（交易时段每小时，AI 只给建议）
 const entryAdvice = ref<EntryAdviceResponse | null>(null)
 const positions = ref<Position[]>([])
+const tradeAccount = ref<TradeAccount | null>(null)
+const tradeOrders = ref<TradeOrder[]>([])
+const watchlistData = ref<WatchlistResponse | null>(null)
+const expandedAdviceSymbol = ref('')
+const symbolAdvice = ref<Record<string, EntryAdvice[]>>({})
 const entryRunning = ref(false)
 const entryMessage = ref('')
 const positionActionID = ref<number | null>(null)
@@ -35,7 +40,11 @@ const exitLatest = computed(() => {
   const list = entryAdvice.value?.items ?? []
   return list.find(item => item.action === 'exit') || null
 })
-const activePositions = computed(() => positions.value.filter(item => item.status === 'pending_entry' || item.status === 'holding'))
+const activePositions = computed(() => positions.value.filter(item => item.status === 'holding'))
+const tradeRows = computed(() => {
+  const holding = new Map(activePositions.value.map(item => [item.symbol, item]))
+  return (watchlistData.value?.quotes || []).map(quote => ({ ...quote, position: holding.get(quote.symbol) || null }))
+})
 const entryDailyPick = computed(() => {
   const list = entryAdvice.value?.items ?? []
   return list.find(item => item.source === 'daily_pick') || null
@@ -46,12 +55,18 @@ const entryLastWait = computed(() => {
 })
 
 async function loadEntryAdvice() {
-  const [advice, lifecycle] = await Promise.all([
+  const [advice, lifecycle, account, orders, watchlist] = await Promise.all([
     api.entryAdvice().catch(() => null),
-    api.positions(40).catch(() => ({ items: [] as Position[] }))
+    api.positions(100).catch(() => ({ items: [] as Position[] })),
+    api.tradeAccount().catch(() => null),
+    api.tradeOrders(100).catch(() => ({ items: [] as TradeOrder[] })),
+    api.watchlist().catch(() => null),
   ])
   entryAdvice.value = advice
   positions.value = lifecycle.items
+  tradeAccount.value = account
+  tradeOrders.value = orders.items
+  watchlistData.value = watchlist
 }
 
 let entryPollTimer: number | undefined
@@ -80,20 +95,38 @@ async function runEntryNow() {
   }
 }
 
-async function confirmPositionAction(position: Position) {
-  const entering = position.status === 'pending_entry'
+async function confirmPositionAction(row: { symbol: string; name: string; position: Position | null }) {
+  const entering = !row.position
   const action = entering ? '建仓' : '平仓'
-  if (!window.confirm(`确认按当前行情参考价${action} ${position.name || position.symbol}？`)) return
-  positionActionID.value = position.id
+  const amountText = entering ? '默认买入 100 万元' : '按现价最多卖出 100 万元市值'
+  if (!window.confirm(`确认${action} ${row.name || row.symbol}？\n${amountText}`)) return
+  positionActionID.value = row.position?.id || -1
   entryMessage.value = ''
   try {
-    const result = entering ? await api.enterPosition(position.id) : await api.exitPosition(position.id)
-    entryMessage.value = `${position.name || position.symbol} 已${action}，参考价 ${fmt(result.price, 3)}`
+    const result = entering ? await api.enterSymbol(row.symbol) : await api.exitSymbol(row.symbol)
+    entryMessage.value = `${row.name || row.symbol} 已${action} ${result.shares} 股，成交额 ${formatMoney(result.amount)}，余额 ${formatMoney(result.cash)}`
     await Promise.all([loadEntryAdvice(), refreshDates()])
   } catch (e: any) {
     entryMessage.value = e?.message || `${action}失败`
   } finally {
     positionActionID.value = null
+  }
+}
+
+function formatMoney(value: number | null | undefined) {
+  if (value == null) return '—'
+  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(value)
+}
+
+async function toggleAdvice(symbol: string) {
+  if (expandedAdviceSymbol.value === symbol) {
+    expandedAdviceSymbol.value = ''
+    return
+  }
+  expandedAdviceSymbol.value = symbol
+  if (!symbolAdvice.value[symbol]) {
+    const result = await api.symbolAdvice(symbol, 50).catch(() => ({ items: [] as EntryAdvice[] }))
+    symbolAdvice.value[symbol] = result.items
   }
 }
 
@@ -206,13 +239,19 @@ async function runAnalysis() {
 onUnmounted(() => {
   window.clearInterval(pollTimer)
   window.clearInterval(entryPollTimer)
+  window.removeEventListener('gostock:watchlist-changed', onWatchlistChanged)
 })
 
 function openStock(symbol: string) {
   router.push(`/stock/${symbol}`)
 }
 
+function onWatchlistChanged() {
+  loadEntryAdvice()
+}
+
 onMounted(async () => {
+  window.addEventListener('gostock:watchlist-changed', onWatchlistChanged)
   await refreshDates()
   await loadEntryAdvice()
   // 页面加载时若已有推荐任务在执行（如刷新页面），继续轮询直至完成。
@@ -238,7 +277,7 @@ onMounted(async () => {
       <div class="entry-strip">
         <div class="perf-caption">
           <b>盘中趋势持仓分析</b>
-          <small>唯一最强标的进入建仓池；AI 每30分钟综合大盘、板块、个股记录建仓与退出建议，真实状态由手动操作确认</small>
+          <small>AI 每小时分析全部自选股，只记录买入、卖出或持有建议；真实资金与持仓仅由手动操作改变</small>
           <button class="run-btn small" :disabled="entryRunning" @click="runEntryNow">{{ entryRunning ? '分析中…' : '立即分析' }}</button>
         </div>
         <p v-if="entryMessage" class="reco-message">{{ entryMessage }}</p>
@@ -265,12 +304,38 @@ onMounted(async () => {
             <span>{{ entryDailyPick.reason }}</span>
           </div>
         </div>
-        <div v-if="activePositions.length" class="position-list">
-          <div v-for="position in activePositions" :key="position.id" class="position-chip" role="button" tabindex="0" @click="openStock(position.symbol)" @keydown.enter="openStock(position.symbol)">
-            <b>{{ position.name || position.symbol }}</b><span :class="position.status">{{ position.status === 'holding' ? `持有 ${position.hold_days} 天` : '等待建仓' }}</span><small>{{ position.entry_price == null ? '尚未建仓' : `成本 ${fmt(position.entry_price)}` }}</small>
-            <button type="button" class="position-action" :class="position.status === 'holding' ? 'exit' : 'enter'" :disabled="positionActionID === position.id" @click.stop="confirmPositionAction(position)">{{ positionActionID === position.id ? '处理中…' : position.status === 'holding' ? '平仓' : '建仓' }}</button>
+        <div v-if="tradeAccount" class="account-strip">
+          <span><small>可用余额</small><b>{{ formatMoney(tradeAccount.cash) }}</b></span>
+          <span><small>持仓市值</small><b>{{ formatMoney(tradeAccount.market_value) }}</b></span>
+          <span><small>账户总资产</small><b>{{ formatMoney(tradeAccount.total_assets) }}</b></span>
+          <span><small>已实现盈亏</small><b :class="pctClass(tradeAccount.realized_pnl)">{{ formatMoney(tradeAccount.realized_pnl) }}</b></span>
+          <span><small>浮动盈亏</small><b :class="pctClass(tradeAccount.unrealized_pnl)">{{ formatMoney(tradeAccount.unrealized_pnl) }}</b></span>
+          <span><small>操作总盈亏</small><b :class="pctClass(tradeAccount.total_pnl)">{{ formatMoney(tradeAccount.total_pnl) }}</b></span>
+        </div>
+        <div v-if="tradeRows.length" class="position-list">
+          <div v-for="row in tradeRows" :key="row.symbol" class="position-record">
+            <div class="position-chip" role="button" tabindex="0" @click="openStock(row.symbol)" @keydown.enter="openStock(row.symbol)">
+              <b>{{ row.name || row.symbol }}</b>
+              <span :class="row.position ? 'holding' : 'pending_entry'">{{ row.position ? `持有 ${row.position.shares} 股` : '自选观察' }}</span>
+              <small>{{ row.position ? `成本 ${fmt(row.position.entry_price)} · 市值 ${formatMoney(row.position.market_value)}` : `现价 ${fmt(row.price)}` }}</small>
+              <button type="button" class="position-action" :class="row.position ? 'exit' : 'enter'" :disabled="positionActionID !== null" @click.stop="confirmPositionAction(row)">{{ positionActionID === (row.position?.id || -1) ? '处理中…' : row.position ? '平仓' : '建仓' }}</button>
+              <button type="button" class="advice-action" @click.stop="toggleAdvice(row.symbol)">{{ expandedAdviceSymbol === row.symbol ? '收起分析' : '分析记录' }}</button>
+            </div>
+            <div v-if="expandedAdviceSymbol === row.symbol" class="advice-history">
+              <div v-for="advice in symbolAdvice[row.symbol] || []" :key="advice.id"><time>{{ advice.created_at }}</time><b>{{ advice.action === 'entry' ? '买入' : advice.action === 'exit' || advice.action === 'reduce' ? '卖出' : '持有' }}</b><span>{{ advice.reason }}</span></div>
+              <p v-if="!(symbolAdvice[row.symbol] || []).length">暂无 AI 分析记录</p>
+            </div>
           </div>
         </div>
+        <section v-if="tradeOrders.length" class="order-history">
+          <header><b>建仓与平仓记录</b><small>成交额、费用、余额与盈亏均按真实操作流水计算</small></header>
+          <div class="order-row head"><span>时间</span><span>股票</span><span>操作</span><span>股数</span><span>成交额</span><span>费用</span><span>本次盈亏</span><span>AI分析</span></div>
+          <div v-for="order in tradeOrders" :key="order.id" class="order-row"><span>{{ order.created_at }}</span><span>{{ order.name || order.symbol }}</span><span>{{ order.side === 'buy' ? '建仓' : '平仓' }}</span><span>{{ order.shares }}</span><span>{{ formatMoney(order.amount) }}</span><span>{{ formatMoney(order.fee) }}</span><span :class="pctClass(order.realized_pnl)">{{ order.side === 'buy' ? '—' : formatMoney(order.realized_pnl) }}</span><button class="order-advice-btn" @click="toggleAdvice(order.symbol)">查看</button></div>
+          <div v-if="expandedAdviceSymbol" class="advice-history order-advice">
+            <div v-for="advice in symbolAdvice[expandedAdviceSymbol] || []" :key="advice.id"><time>{{ advice.created_at }}</time><b>{{ advice.action === 'entry' ? '买入' : advice.action === 'exit' || advice.action === 'reduce' ? '卖出' : '持有' }}</b><span>{{ advice.reason }}</span></div>
+            <p v-if="!(symbolAdvice[expandedAdviceSymbol] || []).length">暂无 AI 分析记录</p>
+          </div>
+        </section>
       </div>
 
       <div v-if="stats" class="stats-bar">
@@ -339,7 +404,7 @@ onMounted(async () => {
                 <p v-if="mcResult" class="mc-note">基于最近 {{ mcResult.sample_days }} 个真实日收益率有放回抽样，模拟 {{ mcResult.paths }} 条未来 {{ mcResult.days }} 个交易日路径（基准价 {{ mcResult.base_price.toFixed(2) }}，确定性种子可复现）。模拟不构成投资建议。</p>
               </div>
             </template>
-            <p class="disclaimer">说明：每日仍推荐 3 只股票，其中唯一最强标的加入建仓池。AI 盘中持续给出建仓、持有、减仓和平仓建议，但不会自动改变持仓；用户点击建仓后开始按行情参考价记录，点击平仓后冻结收益。未加入建仓池的另外 2 只，以推荐后首个交易日开盘为起点，在第 10 个交易日收盘统一结算；窗口未满时展示最新收盘表现。首页“每日三只趋势推荐组合”按这 3 只等权汇总。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：每日推荐 3 只股票并固定显示在左侧，点击“+”后才加入自选。AI 每小时分析全部自选股并给出买入、卖出或持有建议，但不会改变持仓；只有用户点击建仓/平仓才产生资金流水。未手动交易的推荐仍按次日开盘至第 10 个交易日收盘展示参考走势，不计入真实账户盈亏。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
@@ -449,6 +514,14 @@ onMounted(async () => {
 .position-action.enter { border-color:#4f6f4f; color:#8fd09a; }
 .position-action.exit { border-color:#70434a; color:#ef8b91; }
 .position-action:disabled { cursor:wait; opacity:.6; }
+.account-strip { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); gap:1px; margin-top:9px; background:#26324a; }
+.account-strip span { display:grid; gap:3px; padding:8px 10px; background:#101a2b; }.account-strip small { color:#8895ab; font-size:9px; }.account-strip b { font-size:13px; font-variant-numeric:tabular-nums; }
+.position-record { min-width:260px; }.position-record .position-chip { min-width:260px; grid-template-columns:minmax(90px,1fr) auto auto; }.position-record .position-chip small { grid-column:1/2; }
+.advice-action { grid-row:2; grid-column:3; padding:3px 7px; border:1px solid #47536a; background:#1c293e; color:#b8c2d1; font-size:9px; cursor:pointer; }
+.advice-history { max-height:180px; overflow:auto; border:1px solid #26324a; border-top:0; background:#0d1625; }.advice-history div { display:grid; grid-template-columns:84px 32px minmax(140px,1fr); gap:6px; padding:5px 7px; border-bottom:1px solid #202b3e; font-size:9px; }.advice-history time { color:#78859b; }.advice-history b { color:#e9c16c; }.advice-history span { color:#b8c2d1; }.advice-history p { padding:7px; color:#78859b; font-size:9px; }
+.order-history { margin-top:10px; border:1px solid #26324a; background:#101a2b; }.order-history>header { display:flex; justify-content:space-between; padding:8px 10px; }.order-history>header b { font-size:12px; }.order-history>header small { color:#8895ab; font-size:10px; }.order-row { display:grid; grid-template-columns:120px minmax(100px,1fr) 55px 70px 130px 100px 130px 52px; gap:8px; align-items:center; padding:6px 10px; border-top:1px solid #202b3e; font-size:10px; font-variant-numeric:tabular-nums; }.order-row.head { color:#8895ab; background:#0d1625; }
+.order-advice-btn { padding:3px 5px; border:1px solid #47536a; background:#1c293e; color:#b8c2d1; font-size:9px; cursor:pointer; }.order-advice { margin:0 10px 10px; border-top:1px solid #26324a; }
+@media (max-width:900px) { .account-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }.order-history { overflow-x:auto; }.order-row { min-width:760px; } }
 /* 蒙特卡洛 */
 .mc-btn { padding:4px 8px; border:1px solid #3a496a; border-radius:0; background:#233150; color:#c4cddc; font-size:11px; cursor:pointer; }
 .mc-btn:hover, .mc-btn.active { border-color:#e9c16c; color:#e9c16c; }

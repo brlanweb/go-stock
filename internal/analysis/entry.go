@@ -16,8 +16,8 @@ import (
 	"github.com/hoax/go-stock/internal/store"
 )
 
-// 30 分钟节奏：避开开盘最初 30 分钟噪音，14:52 增加尾盘隔夜风险检查。
-var entryRunSlots = []int{10 * 60, 10*60 + 30, 11 * 60, 11*60 + 30, 13*60 + 30, 14 * 60, 14*60 + 30, 14*60 + 52}
+// 每小时分析一次自选股；午休后从 13:30 恢复，14:30 完成最后一轮。
+var entryRunSlots = []int{10 * 60, 11 * 60, 13*60 + 30, 14*60 + 30}
 
 // truncateRunes 按字符（而非字节）截断，避免截断中文时产生乱码。
 func truncateRunes(text string, max int) string {
@@ -28,7 +28,7 @@ func truncateRunes(text string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// isTailSlot 判断是否处于当日最后一档（14:52）。趋势破位用当时价格近似收盘价确认，
+// isTailSlot 判断是否处于当日最后一档（14:30）。趋势破位用当时价格近似收盘价确认，
 // 避免盘中插针击穿均线就不可逆清仓——A 股盘中下影线极常见，按盘中价判破位会被噪音扫出。
 func isTailSlot(now time.Time) bool {
 	tail := entryRunSlots[len(entryRunSlots)-1]
@@ -91,7 +91,8 @@ type positionAnalysisItem struct {
 }
 
 type positionDecision struct {
-	PositionID int64    `json:"position_id"`
+	PositionID int64    `json:"position_id,omitempty"`
+	Symbol     string   `json:"symbol"`
 	Action     string   `json:"action"`
 	Reason     string   `json:"reason"`
 	PriceLow   *float64 `json:"price_low"`
@@ -119,38 +120,33 @@ func (s *Service) runEntryAnalysis(ctx context.Context, now time.Time) error {
 	}
 	defer s.entryRunning.Store(false)
 
-	positions, err := s.st.ActivePositions(ctx)
+	// AI 分析对象严格来自自选列表。已有真实持仓的标的进入退出阶段，
+	// 其余标的仅进入买入建议阶段；这里不会创建 pending_entry 或任何持仓记录。
+	symbols, err := s.st.WatchlistSymbols(ctx)
 	if err != nil {
 		return err
 	}
-	if len(positions) == 0 {
-		return fmt.Errorf("没有待建仓或持有中的 AI 趋势标的")
+	if len(symbols) == 0 {
+		return fmt.Errorf("自选股为空，无需执行 AI 分析")
 	}
-
-	active := make([]store.Position, 0, len(positions))
-	for _, p := range positions {
-		if p.Status != store.PositionPendingEntry {
-			active = append(active, p)
-			continue
-		}
-		used, err := s.st.TradingDaysSince(ctx, p.PickDate, tradeDate)
-		if err != nil {
-			return err
-		}
-		if used <= store.PositionEntryGraceDays {
-			active = append(active, p)
-			continue
-		}
-		reason := fmt.Sprintf("入池后%d个交易日未出现合适建仓点，放弃并腾出自选位", store.PositionEntryGraceDays)
-		if err := s.st.ExpirePosition(ctx, p.ID, reason, p.Symbol); err != nil {
-			return err
-		}
-		if err := s.st.SaveEntryAdvice(ctx, store.EntryAdviceInput{TradeDate: tradeDate, Symbol: p.Symbol, Source: store.EntrySourceRule, Stage: store.EntryStageEntry, Action: store.PositionExpired, Reason: reason, Urgency: store.EntryUrgencyNormal, Model: "local-rule"}); err != nil {
-			return err
+	holdings, err := s.st.ActivePositions(ctx)
+	if err != nil {
+		return err
+	}
+	holdingBySymbol := make(map[string]store.Position, len(holdings))
+	for _, p := range holdings {
+		if p.Status == store.PositionHolding {
+			holdingBySymbol[p.Symbol] = p
 		}
 	}
-	if len(active) == 0 {
-		return nil
+	active := make([]store.Position, 0, len(symbols))
+	for index, symbol := range symbols {
+		if holding, ok := holdingBySymbol[symbol]; ok {
+			active = append(active, holding)
+			continue
+		}
+		// 负 ID 仅用于本轮 AI JSON 结果关联，绝不落入 position 表。
+		active = append(active, store.Position{ID: -int64(index + 1), Symbol: symbol, PickDate: tradeDate, AnalysisDate: tradeDate, Status: store.PositionPendingEntry})
 	}
 
 	items, market, err := s.buildPositionAnalysisContext(ctx, now, active)

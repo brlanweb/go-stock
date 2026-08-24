@@ -12,8 +12,8 @@ const running = ref(false)
 let timer: number | undefined
 
 const levelMeta: Record<string, { label: string; desc: string }> = {
-  green: { label: '绿灯', desc: '正常推荐并自动建仓' },
-  yellow: { label: '黄灯', desc: '仅生成推荐观察，不自动建仓，风险上限收紧' },
+  green: { label: '绿灯', desc: '正常生成推荐，交易仍由用户手动确认' },
+  yellow: { label: '黄灯', desc: '谨慎生成推荐，风险上限收紧' },
   red: { label: '红灯', desc: '跳过当日推荐与建仓，持仓进入防御模式' }
 }
 

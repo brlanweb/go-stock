@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmtPct, type Quote, type SyncStatus, type WatchlistResponse } from '../api'
+import { api, fmtPct, type EntryAdvice, type Quote, type Recommendation, type SyncStatus, type WatchlistResponse } from '../api'
 
 const props = withDefaults(defineProps<{
   market?: string
@@ -35,6 +35,9 @@ const searchResults = ref<any[]>([])
 const watchlist = ref<Quote[]>([])
 const watchlistStatus = ref<WatchlistResponse['status']>('unavailable')
 const watchlistSymbols = ref<string[]>([])
+const dailyRecommendations = ref<Recommendation[]>([])
+const watchSignals = ref<Record<string, EntryAdvice>>({})
+const watchActionSymbol = ref('')
 const syncStatus = ref<SyncStatus | null>(null)
 const startingBackfill = ref(false)
 const retryingFailed = ref(false)
@@ -47,10 +50,47 @@ async function loadWatchlist() {
     const result = await api.watchlist()
     watchlistStatus.value = result.status
     watchlistSymbols.value = result.symbols
+    dailyRecommendations.value = result.recommendations || []
+    watchSignals.value = result.signals || {}
     watchlist.value = result.status === 'live' || result.status === 'closed' ? result.quotes : []
   } catch {
     watchlistStatus.value = 'unavailable'
     watchlist.value = []
+  }
+}
+
+function signalMeta(symbol: string) {
+  const action = watchSignals.value[symbol]?.action
+  if (action === 'entry') return { text: '买', cls: 'buy', title: 'AI 建议买入' }
+  if (action === 'exit' || action === 'reduce') return { text: '卖', cls: 'sell', title: 'AI 建议卖出' }
+  return { text: '持', cls: 'hold', title: action ? 'AI 建议持有或等待' : '等待 AI 每小时分析' }
+}
+
+async function addRecommended(symbol: string) {
+  if (watchlistSymbols.value.includes(symbol)) return
+  watchActionSymbol.value = symbol
+  try {
+    await api.addWatch(symbol)
+    await loadWatchlist()
+    window.dispatchEvent(new CustomEvent('gostock:watchlist-changed'))
+  } finally {
+    watchActionSymbol.value = ''
+  }
+}
+
+async function removeWatch(symbol: string) {
+  watchActionSymbol.value = symbol
+  // 先更新界面，再用接口结果校正，避免移除后仍残留到下一轮轮询。
+  watchlistSymbols.value = watchlistSymbols.value.filter(item => item !== symbol)
+  watchlist.value = watchlist.value.filter(item => item.symbol !== symbol)
+  try {
+    await api.delWatch(symbol)
+    await loadWatchlist()
+    window.dispatchEvent(new CustomEvent('gostock:watchlist-changed'))
+  } catch {
+    await loadWatchlist()
+  } finally {
+    watchActionSymbol.value = ''
   }
 }
 
@@ -226,7 +266,26 @@ onUnmounted(() => {
       <small v-if="retryMessage" class="retry-message">{{ retryMessage }}</small>
     </div>
 
-    <section class="sidebar-section watch-panel"><header><strong>自选股</strong><small>{{ watchlistSymbols.length }}/10</small></header><button v-for="item in watchlist" :key="item.symbol" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em></button><p v-if="watchlistMessage">{{ watchlistMessage }}</p></section>
+    <section class="sidebar-section recommendation-panel">
+      <header><strong>每日 AI 推荐</strong><small>{{ dailyRecommendations.length }}/3</small></header>
+      <div v-for="item in dailyRecommendations" :key="item.symbol" class="side-stock-row recommendation-row">
+        <button class="stock-main" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em>{{ item.probability.toFixed(0) }}</em></button>
+        <button class="row-icon add" :disabled="watchlistSymbols.includes(item.symbol) || watchActionSymbol === item.symbol" :title="watchlistSymbols.includes(item.symbol) ? '已在自选' : '加入自选'" @click="addRecommended(item.symbol)">{{ watchlistSymbols.includes(item.symbol) ? '✓' : '+' }}</button>
+      </div>
+      <p v-if="!dailyRecommendations.length">今日推荐尚未生成</p>
+    </section>
+
+    <section class="sidebar-section watch-panel">
+      <header><strong>自选股</strong><small>{{ watchlistSymbols.length }}/10 · 交易时段实时</small></header>
+      <div v-for="item in watchlist" :key="item.symbol" class="side-stock-row">
+        <button class="stock-main" @click="openStock(item.symbol)">
+          <span><b>{{ item.name }} <i v-if="watchSignals[item.symbol]" class="ai-signal" :class="signalMeta(item.symbol).cls" :title="signalMeta(item.symbol).title">{{ signalMeta(item.symbol).text }}</i></b><small>{{ item.code }}</small></span>
+          <em :class="item.change_pct && item.change_pct > 0 ? 'positive' : 'negative'">{{ fmtPct(item.change_pct) }}</em>
+        </button>
+        <button class="row-icon remove" :disabled="watchActionSymbol === item.symbol" title="移出自选" @click="removeWatch(item.symbol)">−</button>
+      </div>
+      <p v-if="watchlistMessage">{{ watchlistMessage }}</p>
+    </section>
     <div class="side-help"><strong>数据说明</strong><span>市场视图来自本地 MySQL</span><span>详情与自选股使用实时行情</span><span>交易日 08:10 盘前生成趋势分析</span><span>交易日 17:00 自动生成每日复盘</span><span>推荐仅供研究，不构成投资建议</span></div>
   </aside>
 </template>
@@ -244,7 +303,13 @@ onUnmounted(() => {
 .freshness.ok { border-left-color:#4fbc91; }.freshness.ok i { background:#4fbc91; }
 .freshness.busy { border-left-color:#d6a12c; }.freshness.busy i { background:#e9c16c; }
 .freshness.warn { border-left-color:#c96a72; color:#e9a7ac; }.freshness.warn i { background:#ef6a72; }
-.sidebar-section { display:grid; gap:2px; }.sidebar-section header { display:flex; align-items:center; justify-content:space-between; padding:2px 7px 5px; color:#e2e7ef; font-size:12px; }.sidebar-section header small { color:#8390a4; font-size:10px; }.sidebar-section button { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:5px; padding:5px 7px; border:0; border-bottom:1px solid #303b50; border-radius:0; background:#222d41; color:#ecf0f6; text-align:left; }.sidebar-section button:hover { background:#2b374c; }.sidebar-section button span { min-width:0; }.sidebar-section button b,.sidebar-section button small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sidebar-section button b { font-size:11px; }.sidebar-section button small { margin-top:1px; color:#8996aa; font-size:9px; }.sidebar-section button em { flex:0 0 auto; color:#e9c16c; font-style:normal; font-size:11px; font-weight:700; }.sidebar-section button em.positive { color:#ef6a72; }.sidebar-section button em.negative { color:#28bd8b; }.sidebar-section p { padding:6px 7px; color:#738197; font-size:10px; }.side-help { display:grid; gap:7px; margin-top:auto; padding:10px 7px 4px; border-top:1px solid #354157; color:#9ba8bd; font-size:11px; line-height:1.4; }.side-help strong { color:#e2e7ef; font-size:12px; }
+.sidebar-section { display:grid; gap:2px; }.sidebar-section header { display:flex; align-items:center; justify-content:space-between; padding:2px 7px 5px; color:#e2e7ef; font-size:12px; }.sidebar-section header small { color:#8390a4; font-size:10px; }
+.side-stock-row { display:grid; min-width:0; grid-template-columns:minmax(0,1fr) 25px; gap:2px; }
+.stock-main { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:5px; padding:5px 7px; border:0; border-bottom:1px solid #303b50; border-radius:0; background:#222d41; color:#ecf0f6; text-align:left; }.stock-main:hover { background:#2b374c; }.stock-main span { min-width:0; }.stock-main b,.stock-main small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.stock-main b { font-size:11px; }.stock-main small { margin-top:1px; color:#8996aa; font-size:9px; }.stock-main em { flex:0 0 auto; color:#e9c16c; font-style:normal; font-size:11px; font-weight:700; }.stock-main em.positive { color:#ef6a72; }.stock-main em.negative { color:#28bd8b; }
+.row-icon { width:25px; padding:0; border:1px solid #39455a; border-radius:0; background:#273348; color:#cbd4e1; font-size:16px; cursor:pointer; }.row-icon:hover { border-color:#71809a; background:#344159; }.row-icon:disabled { opacity:.45; cursor:default; }.row-icon.add { color:#55b996; }.row-icon.remove { color:#e48287; }
+.ai-signal { display:inline-grid; width:15px; height:15px; margin-left:2px; place-items:center; border:1px solid currentColor; font-size:9px; font-style:normal; line-height:1; vertical-align:1px; }.ai-signal.buy { color:#ef6a72; }.ai-signal.sell { color:#55b996; }.ai-signal.hold { color:#e9c16c; }
+.recommendation-panel { padding-bottom:8px; border-bottom:1px solid #354157; }
+.sidebar-section p { padding:6px 7px; color:#738197; font-size:10px; }.side-help { display:grid; gap:7px; margin-top:auto; padding:10px 7px 4px; border-top:1px solid #354157; color:#9ba8bd; font-size:11px; line-height:1.4; }.side-help strong { color:#e2e7ef; font-size:12px; }
 @media (max-width:900px) { .market-sidebar { display:grid; min-height:auto; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; border-right:0; border-bottom:1px solid #354157; overflow:visible; }.brand,.side-help,.side-stats,.sidebar-section { display:none; }.coverage-status { grid-column:1/-1; }.side-search { margin:0; padding:0; border:0; }.freshness { grid-column:1/-1; }
   /* 移动端非云图页：品牌/自选股/说明本就隐藏，此时只剩数据新鲜度一行，
      收窄内边距让它退化成一条细状态条，而不是占位的空白区。 */
