@@ -20,35 +20,17 @@ const (
 	// 说明当日可选机会太少，跳过本次推荐而不是强行凑 3 只。
 	RecommendationCandidateMin = 5
 
-	// 风险分软阈值：由最近一次 AI 复盘的 market_phase 自动调节（不做人工配置）。
-	//
-	// 语义变更（2026-08）：原先该值是硬剔除上限，改为「排序惩罚起点」。
-	//
-	// 改动依据是候选池容量，不是收益提升——这一点务必不要误读：
-	//  · 硬剔除会让候选数在 down 档腰斩（回测日均 62.6 vs 142.4，-56%），
-	//    候选一旦跌破 RecommendationCandidateMin 就回退题材热度池，
-	//    进而选出「融资融券/深股通」等泛概念下无产业逻辑的标的。
-	//    2026-08-11~14 的连续亏损正是由这条回退路径造成的。
-	//  · 收益层面，四组对照回测（A纯趋势/B硬剔除/C排序惩罚/D低risk优先，
-	//    3 档 × 5&10 日 × n=153~168）显示各方案均值差异仅 0.1~0.5 个百分点，
-	//    在样本标准差面前属噪音，**不能声称排序惩罚能提高收益**。
-	//    详见 riskpolicy_backtest_test.go（-tags backtest）。
-	//
-	// 因此本改动的唯一目标是「保证候选池不枯竭、不触发泛概念回退」，
-	// 让高风险强趋势股降权后仍可竞争，而不是押注高风险等于高收益。
+	// 以下阈值仅保留给历史回测对照，不参与生产推荐。生产链路中的 RiskScore
+	// 只计算、落库和展示，不用于候选剔除、排序或 AI 选举。
 	recommendationBaseMaxRisk  = 70.0
 	recommendationMaxRiskUp    = 85.0
 	recommendationMaxRiskRange = 75.0
 	recommendationMaxRiskDown  = 65.0
 
-	// recommendationHardRiskCeiling 是唯一保留的风险硬剔除线（安全阀），不随
-	// market_phase 变化：只挡极端垃圾股，正常强趋势票不会触及。
+	// 历史风险策略回测参数；生产推荐不再调用 recommendationRiskPenalty，
+	// 也不再应用硬风险上限。
 	recommendationHardRiskCeiling = 92.0
-	// recommendationRiskMaxPenalty 是风险惩罚封顶幅度：风险分从软阈值线性
-	// 增长到硬安全阀时，排序分最多被打到 (1-0.35)=65%。取值刻意温和——
-	// 回测未发现风险分与前向收益存在稳定单调关系，惩罚过重会退化成硬剔除
-	// 并重新引发候选枯竭，过轻则失去风险区分度。
-	recommendationRiskMaxPenalty = 0.35
+	recommendationRiskMaxPenalty  = 0.35
 
 	// 计分口径的买入价是分析日后首个交易日开盘价，昨日封板/近端暴涨的候选
 	// 高开损耗最大：涨停判定按“昨日涨幅 ≥ 交易所涨跌幅上限 × 0.93”近似，
@@ -95,9 +77,8 @@ func isBrokerCandidate(industry, name string) bool {
 // 券商的申万/东财行业名均含“证券”，个别互金券商用名称兜底）。
 const recommendationExcludeBrokerSQL = " AND b.industry NOT LIKE '%证券%' AND b.name NOT LIKE '%证券%' "
 
-// RecommendationMaxRiskScore 返回给定复盘市场阶段下的风险分软阈值（排序惩罚
-// 起点）：up=85、range=75、down=65，其余（含尚无复盘）为基准 70。
-// 注意：该值不再是硬剔除线，硬剔除只由 recommendationHardRiskCeiling 决定。
+// RecommendationMaxRiskScore 仅供历史风险策略回测与旧接口兼容测试使用。
+// 生产推荐不调用该函数，也不存在按市场阶段变化的个股风险阈值。
 func RecommendationMaxRiskScore(marketPhase string) float64 {
 	switch marketPhase {
 	case "up":
@@ -122,6 +103,7 @@ type RecommendationCandidate struct {
 	SectorHeat float64       `json:"sector_heat"`
 	TrendScore float64       `json:"trend_score"`
 	RiskScore  float64       `json:"risk_score"`
+	LeaderRank int           `json:"leader_rank"`
 	Klines     []model.Kline `json:"klines"`
 }
 
@@ -150,14 +132,10 @@ func selectRecommendationSectors(sectors []recommendationSector) []recommendatio
 }
 
 // RecommendationCandidates 从行业和概念的统一热度排名取前 10 个题材，收集其
-// 成分股并去重；对全部候选读取最近 60 根前复权日 K，按确定性趋势分排序后取前 10。
-// maxRiskScore 是本次候选风险上限（由最近复盘 market_phase 决定，见
-// RecommendationMaxRiskScore）；非法值回退到基准值。所有排序均有稳定代码兜底，
-// AI 只会接收最终候选及其完整日 K 数据。
-func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float64) ([]RecommendationCandidate, error) {
-	if maxRiskScore <= 0 || maxRiskScore > 100 {
-		maxRiskScore = recommendationBaseMaxRisk
-	}
+// 成分股并去重；对全部候选读取最近 60 根前复权日 K，按确定性趋势、建仓空间
+// 与板块内龙头地位排序后取前 10。RiskScore 仅随候选传给前端展示，不参与
+// 过滤、排序或 AI 选举。所有排序均有稳定代码兜底。
+func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationCandidate, error) {
 	tradeDate, err := s.LatestKlineDate(ctx)
 	if err != nil {
 		return nil, err
@@ -261,16 +239,16 @@ func (s *Store) RecommendationCandidates(ctx context.Context, maxRiskScore float
 		return pool[i].Popularity > pool[j].Popularity
 	})
 
-	return s.rankRecommendationPool(ctx, tradeDate, pool, maxRiskScore)
+	return s.rankRecommendationPool(ctx, tradeDate, pool)
 }
 
 // rankRecommendationPool 是候选池的统一收口：只接受完整 60 根日 K 的证券，
-// 先按趋势筛选，再剔除昨日涨停（次日高开损耗大）、短线追高与风险触及硬安全阀
-// 的股票，最后按“趋势分 × 过热惩罚 × 龙头加权 × 风险惩罚”排序统一取前 10。
-// TrendScore / RiskScore 字段保留原始分值。风险分不再硬剔除（见常量注释），
-// 避免砍掉右尾并导致候选枯竭回退泛概念池。
+// 先按趋势筛选，再保留昨日涨停与短线追高过滤，最后按
+// “趋势分 × 过热惩罚 × 龙头加权”排序取前 10。RiskScore 始终保留原始分值，
+// 但不参与任何过滤或排序；风险判断完全交给用户。
 // 券商候选在此兜底剔除（SQL 层已过滤一次）。
-func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, pool []RecommendationCandidate, maxRiskScore float64) ([]RecommendationCandidate, error) {
+func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, pool []RecommendationCandidate) ([]RecommendationCandidate, error) {
+	leaderRanks := recommendationLeaderRanks(pool)
 	leaderBoosts := recommendationLeaderBoosts(pool)
 	trendCandidates := make([]RecommendationCandidate, 0, len(pool))
 	sortScores := make(map[string]float64, len(pool))
@@ -287,8 +265,9 @@ func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, po
 			continue
 		}
 		risk, ok := recommendationRiskScore(klines)
-		// 风险分只在触及硬安全阀时剔除；软阈值以上改为排序降权（见常量注释）。
-		if !ok || risk > recommendationHardRiskCeiling {
+		// 风险分只用于展示。计算失败说明行情窗口不完整，仍按既有完整数据要求跳过；
+		// 分值再高也不得剔除或降低候选排序。
+		if !ok {
 			continue
 		}
 		if recommendationGapRiskHigh(klines, candidate.Code) {
@@ -300,24 +279,47 @@ func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, po
 		candidate.Klines = klines
 		candidate.TrendScore = score
 		candidate.RiskScore = risk
+		candidate.LeaderRank = leaderRanks[candidate.Symbol]
 		boost := leaderBoosts[candidate.Symbol]
 		if boost <= 0 {
 			boost = 1
 		}
-		sortScores[candidate.Symbol] = recommendationSortScore(score, klines) * boost * recommendationRiskPenalty(risk, maxRiskScore)
+		sortScores[candidate.Symbol] = recommendationCandidateSortScore(score, klines, boost, risk)
 		trendCandidates = append(trendCandidates, candidate)
 	}
-	sort.Slice(trendCandidates, func(i, j int) bool {
-		si, sj := sortScores[trendCandidates[i].Symbol], sortScores[trendCandidates[j].Symbol]
+	return selectStrongSectorLeaders(trendCandidates, sortScores, recommendationCandidateLimit), nil
+}
+
+func selectStrongSectorLeaders(candidates []RecommendationCandidate, sortScores map[string]float64, limit int) []RecommendationCandidate {
+	if limit <= 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		// 先比较强板块，再比较板块内龙头的趋势与建仓空间得分。
+		if a.SectorHeat != b.SectorHeat {
+			return a.SectorHeat > b.SectorHeat
+		}
+		si, sj := sortScores[a.Symbol], sortScores[b.Symbol]
 		if si == sj {
-			return trendCandidates[i].Symbol < trendCandidates[j].Symbol
+			return a.Symbol < b.Symbol
 		}
 		return si > sj
 	})
-	if len(trendCandidates) > recommendationCandidateLimit {
-		trendCandidates = trendCandidates[:recommendationCandidateLimit]
+	// 每个强板块最多保留前三只龙头，避免单一板块铺满全部 AI 候选位。
+	selected := make([]RecommendationCandidate, 0, min(limit, len(candidates)))
+	sectorCounts := make(map[string]int, recommendationSectorLimit)
+	for _, candidate := range candidates {
+		if sectorCounts[candidate.Industry] >= recommendationLeaderRankLimit {
+			continue
+		}
+		sectorCounts[candidate.Industry]++
+		selected = append(selected, candidate)
+		if len(selected) == limit {
+			break
+		}
 	}
-	return trendCandidates, nil
+	return selected
 }
 
 // RecommendationHotspotConcept 是热点漏斗 final 报告中一个已回验概念的最小引用，
@@ -330,12 +332,9 @@ type RecommendationHotspotConcept struct {
 
 // RecommendationCandidatesFromHotspot 直接复用热点漏斗产出的概念作为候选来源：
 // 以漏斗卡点概念的成分股为唯一候选池（Industry 记为概念名、SectorHeat 记为
-// AI 置信度），再走与旧逻辑完全一致的趋势/风险统一收口。漏斗结果为空或
+// AI 置信度），再走与旧逻辑一致的趋势、过热、龙头与建仓空间收口。漏斗结果为空或
 // 过滤后候选不足时由调用方回退 RecommendationCandidates。
-func (s *Store) RecommendationCandidatesFromHotspot(ctx context.Context, maxRiskScore float64, concepts []RecommendationHotspotConcept) ([]RecommendationCandidate, error) {
-	if maxRiskScore <= 0 || maxRiskScore > 100 {
-		maxRiskScore = recommendationBaseMaxRisk
-	}
+func (s *Store) RecommendationCandidatesFromHotspot(ctx context.Context, concepts []RecommendationHotspotConcept) ([]RecommendationCandidate, error) {
 	if len(concepts) == 0 {
 		return []RecommendationCandidate{}, nil
 	}
@@ -406,7 +405,7 @@ func (s *Store) RecommendationCandidatesFromHotspot(ctx context.Context, maxRisk
 		}
 		return pool[i].Popularity > pool[j].Popularity
 	})
-	return s.rankRecommendationPool(ctx, tradeDate, pool, maxRiskScore)
+	return s.rankRecommendationPool(ctx, tradeDate, pool)
 }
 
 // recommendationLimitPct 按交易代码近似涨跌幅上限：创业板/科创板 20%，
@@ -459,12 +458,18 @@ func recommendationSortScore(trendScore float64, klines []model.Kline) float64 {
 	return trendScore * (1 - recommendationOverheatMaxPenalty*ratio)
 }
 
-// recommendationRiskPenalty 返回风险分对排序分的乘性惩罚系数。
-// 风险分不超过软阈值 soft 时不惩罚（返回 1）；超过后按到硬安全阀的距离线性
-// 递减，最低 1-recommendationRiskMaxPenalty。soft 非法时回退基准值。
-//
-// 与原「硬剔除」的区别：高风险强趋势候选仍留在池内竞争，只是需要更高的趋势
-// 分才能胜出；同时候选数量不会因风险收紧而跌破 RecommendationCandidateMin。
+// recommendationCandidateSortScore 是生产候选最终排序分。riskScore 参数刻意只接收
+// 不使用，用测试锁定“风险分只展示”的产品约束，防止后续再次悄悄加入降权。
+func recommendationCandidateSortScore(trendScore float64, klines []model.Kline, leaderBoost, riskScore float64) float64 {
+	_ = riskScore
+	if leaderBoost <= 0 {
+		leaderBoost = 1
+	}
+	return recommendationSortScore(trendScore, klines) * leaderBoost
+}
+
+// recommendationRiskPenalty 仅供 riskpolicy_backtest_test.go 复现历史策略。
+// 生产推荐禁止调用；当前排序由 recommendationCandidateSortScore 完成且忽略风险分。
 func recommendationRiskPenalty(risk, soft float64) float64 {
 	if soft <= 0 || soft > 100 {
 		soft = recommendationBaseMaxRisk
@@ -506,6 +511,26 @@ func recommendationOverextended(klines []model.Kline) bool {
 	}
 	ma5 := sum / 5
 	return ma5 > 0 && klines[last].Close/ma5-1 > recommendationMaxBiasMA5
+}
+
+// recommendationLeaderRanks 返回每只股票在所属热点板块内按成交额计算的人气排名，
+// 并作为结构化字段交给 AI，明确执行“先选强板块，再抓板块龙头”。
+func recommendationLeaderRanks(pool []RecommendationCandidate) map[string]int {
+	ranked := make([]RecommendationCandidate, len(pool))
+	copy(ranked, pool)
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Popularity == ranked[j].Popularity {
+			return ranked[i].Symbol < ranked[j].Symbol
+		}
+		return ranked[i].Popularity > ranked[j].Popularity
+	})
+	ranks := make(map[string]int, len(ranked))
+	rankBySector := make(map[string]int, len(ranked))
+	for _, candidate := range ranked {
+		rankBySector[candidate.Industry]++
+		ranks[candidate.Symbol] = rankBySector[candidate.Industry]
+	}
+	return ranks
 }
 
 // recommendationLeaderBoosts 按「同一热点板块内当日成交额排名」给出龙头排序
@@ -928,15 +953,15 @@ func recommendationPerformance(entryPrice, latestPrice sql.NullFloat64) (*float6
 // RecommendationStats 是真实持仓生命周期的整体表现统计。
 // 只有 exited 的有效结算进入胜率和已实现收益，holding 单独统计浮盈。
 type RecommendationStats struct {
-	TotalDays              int      `json:"total_days"`
-	LifecyclePicks         int      `json:"lifecycle_picks"`
-	PendingPicks           int      `json:"pending_picks"`
-	HoldingPicks           int      `json:"holding_picks"`
-	ExitedPicks            int      `json:"exited_picks"`
-	ExpiredPicks           int      `json:"expired_picks"`
+	TotalDays      int `json:"total_days"`
+	LifecyclePicks int `json:"lifecycle_picks"`
+	PendingPicks   int `json:"pending_picks"`
+	HoldingPicks   int `json:"holding_picks"`
+	ExitedPicks    int `json:"exited_picks"`
+	ExpiredPicks   int `json:"expired_picks"`
 	// RemovedPicks 是用户手动移除自选后放弃跟踪的样本数：无确认平仓价，
 	// 与 expired 一样不进入胜率与收益，显式计数避免统计口径悄悄变化。
-	RemovedPicks int `json:"removed_picks"`
+	RemovedPicks           int      `json:"removed_picks"`
 	FrozenPicks            int      `json:"frozen_picks"`
 	TrackingPicks          int      `json:"tracking_picks"`
 	Wins                   int      `json:"wins"`

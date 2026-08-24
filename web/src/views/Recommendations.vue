@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type EntryAdvice, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationRiskPolicy, type RecommendationStats, type TradeAccount, type TradeOrder, type WatchlistResponse } from '../api'
+import { api, fmt, fmtPct, pctClass, type EntryAdvice, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationStats, type TradeAccount, type TradeOrder, type WatchlistResponse } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -11,7 +11,6 @@ const loading = ref(false)
 const message = ref('')
 const running = ref(false)
 const stats = ref<RecommendationStats | null>(null)
-const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
 
 // 自选股 AI 分析（交易时段每小时，AI 只给建议）
 const entryAdvice = ref<EntryAdviceResponse | null>(null)
@@ -164,21 +163,12 @@ async function reloadMonteCarlo() {
   }
 }
 
-const phaseLabel: Record<string, string> = { up: '上升', range: '震荡', down: '下降' }
-// 候选风险上限由最近一次 AI 复盘的市场阶段自动决定：up 85 / range 75 / down 65，无复盘 70。
-const riskPolicyText = computed(() => {
-  if (!riskPolicy.value) return ''
-  const p = riskPolicy.value
-  const phase = phaseLabel[p.market_phase] || '无复盘'
-  return `候选风险上限 ${p.max_risk_score.toFixed(0)} · 复盘阶段：${phase}${p.review_date ? `（${p.review_date}）` : ''}`
-})
-
 function fmtSigned(value: number | null | undefined, suffix = '%') {
   if (value == null) return '—'
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}${suffix}`
 }
 
-// 风险分档位：≤40 低风险、41-60 中风险、>60 偏高（超过 70 的候选不会出现）。
+// 风险分仅按档位着色展示，不参与推荐过滤、降权或排序。
 function riskClass(value: number | null | undefined) {
   if (value == null) return ''
   if (value <= 40) return 'risk-low'
@@ -202,7 +192,6 @@ async function loadDate(date: string) {
 }
 
 async function refreshDates() {
-  riskPolicy.value = await api.recommendationRiskPolicy().catch(() => null)
   stats.value = await api.recommendationStats(60).catch(() => null)
   dates.value = await api.recommendationHistory(365).catch(() => [] as string[])
   if (dates.value.length) await loadDate(dates.value[0])
@@ -364,7 +353,7 @@ onMounted(async () => {
         <section class="reco-table">
           <div v-if="loading" class="empty">加载中…</div>
           <template v-else-if="items.length">
-            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓价</span><span>当前/退出价</span><span>涨跌幅</span><span>动量分</span><span>风险分</span><span>核心依据</span><span>板块</span><span>模拟</span></div>
+            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓价</span><span>当前/退出价</span><span>涨跌幅</span><span>动量分</span><span>风险分<small>仅展示</small></span><span>核心依据</span><span>板块</span><span>模拟</span></div>
             <template v-for="item in items" :key="item.symbol">
               <button class="reco-row" @click="openStock(item.symbol)">
                 <span class="rank">{{ item.rank }}</span>

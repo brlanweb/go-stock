@@ -841,28 +841,11 @@ func (s *Server) handleRecommendationShadowStats(w http.ResponseWriter, r *http.
 	writeJSON(w, 200, stats)
 }
 
-// handleRecommendationRiskPolicy 返回下一次盘前推荐将采用的候选风险上限。
-// 该值由最近一次 AI 复盘的市场阶段自动决定（up=85/range=75/down=65，无复盘=70），
-// 仅供展示，不提供人工配置入口。
+// handleRecommendationRiskPolicy 保留兼容字段供旧前端读取。
+// max_risk_score 固定为 100，表示风险分只展示、不设候选上限。
 func (s *Server) handleRecommendationRiskPolicy(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := reqCtx(r)
-	defer cancel()
-	guidance := store.LatestReviewGuidance{}
-	date, err := s.St.LatestKlineDate(ctx)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	if date != "" {
-		if guidance, err = s.St.LatestReviewGuidanceForRecommendation(ctx, date); err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-	}
-	writeJSON(w, 200, map[string]any{
-		"review_date":    guidance.ReviewDate,
-		"market_phase":   guidance.MarketPhase,
-		"max_risk_score": store.RecommendationMaxRiskScore(guidance.MarketPhase),
+	writeJSON(w, http.StatusOK, map[string]any{
+		"review_date": "", "market_phase": "", "max_risk_score": 100.0,
 	})
 }
 

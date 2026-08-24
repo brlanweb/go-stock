@@ -340,8 +340,7 @@ export interface RecommendationShadowStats {
   day_win_rate: number | null
 }
 
-// 下一次盘前推荐的风险分软阈值（排序惩罚起点，非硬剔除线）：
-// 由最近一次 AI 复盘的市场阶段自动决定，仅展示。
+// 兼容字段：max_risk_score 固定为 100，表示风险分只展示、不设推荐上限。
 export interface RecommendationRiskPolicy {
   review_date: string
   market_phase: string

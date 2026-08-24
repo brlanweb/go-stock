@@ -17,8 +17,8 @@ type StockRecommendation struct {
 	Name        string  `json:"name"`
 	Sector      string  `json:"sector"`
 	Probability float64 `json:"probability"`
-	// RiskScore 是本地确定性计算的 0-100 风险分（波动率/回撤/短期过热），
-	// 非 AI 输出；超过阈值的候选在进入 AI 评审前已被剔除。
+	// RiskScore 是本地确定性计算的 0-100 风险分（波动率/回撤/短期过热）。
+	// 只供页面展示和用户自行判断，不参与候选过滤、排序或 AI 选举。
 	RiskScore   *float64 `json:"risk_score"`
 	Reason      string   `json:"reason"`
 	Model       string   `json:"model"`

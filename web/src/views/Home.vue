@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmtPct, pctClass, type EntryAdviceResponse, type Position, type Recommendation, type RecommendationBasketPerformance, type RecommendationRiskPolicy, type RecommendationStats, type RiskGateOverview } from '../api'
+import { api, fmtPct, pctClass, type EntryAdviceResponse, type Position, type Recommendation, type RecommendationBasketPerformance, type RecommendationStats, type RiskGateOverview } from '../api'
 import MiniChart from '../components/MiniChart.vue'
 
 const router = useRouter()
@@ -10,7 +10,6 @@ const error = ref('')
 // 风险感知指标独立加载：外盘/风向门接口异常不得阻塞首页绩效主体，
 // 缺数据时按黄灯口径展示「未知」，绝不静默显示为安全。
 const riskGate = ref<RiskGateOverview | null>(null)
-const riskPolicy = ref<RecommendationRiskPolicy | null>(null)
 const riskError = ref('')
 const recommendations = ref<Recommendation[]>([])
 const basketPerformance = ref<RecommendationBasketPerformance[]>([])
@@ -140,9 +139,7 @@ const basketChart = computed(() => {
 const activeBasketPoint = computed(() => basketChart.value.values.find(item => item.date === activeBasketDate.value) || basketChart.value.latest)
 const reasonRows = computed(() => recommendations.value.map(item => ({ ...item, strength: Math.max(0, Math.min(100, item.probability)), safety: Math.max(0, Math.min(100, 100 - (item.risk_score ?? 50))) })))
 
-// 风险档位语义与推荐链路实际行为一一对应（见 analysis/recommendation.go runDailyAt）：
-// green 正常推荐并自动建仓；yellow 只生成推荐观察、不自动建仓且风险上限压到 down 档；
-// red 直接跳过当日推荐与建仓。数据缺失一律按 yellow 保守显示，不显示为绿灯。
+// 风险灯只表达市场环境是否生成推荐；个股 risk_score 始终仅展示，不参与选举。
 const gateLevelMeta: Record<string, { label: string; action: string; cls: string }> = {
   green: { label: '绿灯', action: '正常生成推荐', cls: 'lv-green' },
   yellow: { label: '黄灯', action: '谨慎生成推荐 · 人工决策', cls: 'lv-yellow' },
@@ -160,16 +157,8 @@ const autoEntryOn = computed(() => riskGate.value?.auto_entry_enabled === true &
 // 区分两种未建仓原因：开关停用是策略性决定，非绿灯是当日风险拦截。
 const autoEntryHint = computed(() => 'AI 只提供推荐和每小时自选分析，建仓和平仓均由你手动确认')
 const autoEntryLabel = computed(() => '仅推荐')
-const phaseLabels: Record<string, string> = { up: '上行', range: '震荡', down: '下行' }
-const riskPolicyText = computed(() => {
-  if (!riskPolicy.value) return '—'
-  return `${riskPolicy.value.max_risk_score.toFixed(0)}`
-})
-const riskPolicyHint = computed(() => {
-  if (!riskPolicy.value) return '复盘阶段未知 · 取基准 70'
-  const phase = phaseLabels[riskPolicy.value.market_phase] || '未知'
-  return `复盘${riskPolicy.value.review_date || '—'} · ${phase}阶段`
-})
+const riskPolicyText = computed(() => '仅展示')
+const riskPolicyHint = computed(() => '个股风险分不参与过滤或排序，由用户自行判断')
 function openRiskTab() { router.push({ path: '/', query: { view: 'risk' } }) }
 // 首页只做总览；完整推荐历史、持仓操作与蒙特卡洛都在「交易」Tab，避免两处重复维护。
 function openTradeTab() { router.push({ path: '/', query: { view: 'reco' } }) }
@@ -178,7 +167,7 @@ function openTradeTab() { router.push({ path: '/', query: { view: 'reco' } }) }
 const gateDots = computed(() => [
   { key: 'global', label: '外盘', cls: gateMeta(globalGate.value?.level).cls, text: globalGate.value ? `${gateMeta(globalGate.value.level).label} ${globalGate.value.score}` : '无数据', tip: globalGate.value?.reason || '今日尚未采集外盘因子' },
   { key: 'market', label: '境内', cls: gateMeta(marketGate.value?.level).cls, text: marketGate.value ? gateMeta(marketGate.value.level).label : '无数据', tip: marketGate.value?.reason || '指数风向数据不可用' },
-  { key: 'policy', label: '惩罚起点', cls: 'lv-plain', text: riskPolicyText.value, tip: riskPolicyHint.value },
+  { key: 'policy', label: '个股风险', cls: 'lv-plain', text: riskPolicyText.value, tip: riskPolicyHint.value },
 ])
 
 // ---- 指标卡图形化数据 ----
@@ -238,10 +227,10 @@ async function load() {
 // 但风险带会显式显示「不可用」，不会退化成看起来安全的空白。
 async function loadRisk() {
   try {
-    const [gate, policy] = await Promise.all([api.riskGate(), api.recommendationRiskPolicy()])
-    riskGate.value = gate; riskPolicy.value = policy; riskError.value = ''
+    riskGate.value = await api.riskGate()
+    riskError.value = ''
   } catch (e: any) {
-    riskGate.value = null; riskPolicy.value = null
+    riskGate.value = null
     riskError.value = e?.message || '风险感知数据不可用'
   }
 }

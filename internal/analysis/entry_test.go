@@ -13,17 +13,17 @@ func TestDailyEntryPickCountKeepsOnlyUniqueStrongest(t *testing.T) {
 	}
 }
 
-func TestSelectBestEntryPickPrefersProbabilityThenLowerRisk(t *testing.T) {
+func TestSelectBestEntryPickIgnoresRiskScore(t *testing.T) {
 	risk := func(v float64) *float64 { return &v }
 	items := []model.StockRecommendation{
-		{Rank: 1, Symbol: "SH600001", Probability: 70, RiskScore: risk(50), Sector: "A"},
-		{Rank: 2, Symbol: "SH600002", Probability: 80, RiskScore: risk(60), Sector: "B"},
-		{Rank: 3, Symbol: "SH600003", Probability: 80, RiskScore: risk(40), Sector: "C"},
+		{Rank: 1, Symbol: "SH600001", Probability: 70, RiskScore: risk(10), Sector: "A"},
+		{Rank: 2, Symbol: "SH600002", Probability: 80, RiskScore: risk(95), Sector: "B"},
+		{Rank: 3, Symbol: "SH600003", Probability: 80, RiskScore: risk(5), Sector: "C"},
 	}
-	// 概率最高优先；SH600002 与 SH600003 概率持平（80），取风险分更低的 SH600003。
+	// 概率持平时只按 AI 排名兜底，即使排名第二者风险分更高也不得降权。
 	best := selectBestEntryPick(items)
-	if best == nil || best.Symbol != "SH600003" {
-		t.Fatalf("expected SH600003 (prob 80, risk 40), got %+v", best)
+	if best == nil || best.Symbol != "SH600002" {
+		t.Fatalf("expected SH600002 by probability/rank with risk ignored, got %+v", best)
 	}
 }
 

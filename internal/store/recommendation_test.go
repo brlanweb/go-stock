@@ -76,7 +76,7 @@ func TestRecommendationRiskScore(t *testing.T) {
 		t.Fatalf("calm series risk=%f exceeds base threshold", calmScore)
 	}
 
-	// 剧烈波动 + 深回撤 + 近 5 日暴涨 → 高风险，任何阶段上限下都被剔除
+	// 剧烈波动 + 深回撤 + 近 5 日暴涨 → 高风险分，但该分值只用于展示。
 	risky := make([]model.Kline, recommendationKlineDays)
 	price := 10.0
 	for i := range risky {
@@ -302,39 +302,51 @@ func TestApplyRecommendationPerformanceBlendsReducedPosition(t *testing.T) {
 	}
 }
 
-// 风险分改为排序惩罚后，必须满足三条不变量：
-// 1. 软阈值以内不惩罚；2. 惩罚随风险线性加深且封顶；3. 只有触及硬安全阀才剔除。
-func TestRecommendationRiskPenaltyIsGradualNotCliff(t *testing.T) {
-	soft := RecommendationMaxRiskScore("down") // 65
-	if got := recommendationRiskPenalty(soft-10, soft); got != 1 {
-		t.Fatalf("risk below soft threshold must not be penalized, got %.4f", got)
+// 风险分只展示：无论分值高低，生产候选排序分必须完全一致。
+func TestRecommendationCandidateSortScoreIgnoresRisk(t *testing.T) {
+	klines := make([]model.Kline, recommendationKlineDays)
+	for i := range klines {
+		klines[i] = model.Kline{Close: 10 + float64(i)*0.01}
 	}
-	if got := recommendationRiskPenalty(soft, soft); got != 1 {
-		t.Fatalf("risk at soft threshold must not be penalized, got %.4f", got)
+	lowRisk := recommendationCandidateSortScore(100, klines, recommendationLeaderBoostTop1, 5)
+	highRisk := recommendationCandidateSortScore(100, klines, recommendationLeaderBoostTop1, 99)
+	if lowRisk != highRisk {
+		t.Fatalf("risk score must not affect production ranking: low=%.4f high=%.4f", lowRisk, highRisk)
 	}
-	mid := recommendationRiskPenalty((soft+recommendationHardRiskCeiling)/2, soft)
-	wantMid := 1 - recommendationRiskMaxPenalty/2
-	if math.Abs(mid-wantMid) > 1e-9 {
-		t.Fatalf("midpoint penalty want %.4f, got %.4f", wantMid, mid)
+}
+
+func TestRecommendationLeaderRanksBySectorPopularity(t *testing.T) {
+	pool := []RecommendationCandidate{
+		{Symbol: "A", Industry: "算力", Popularity: 80},
+		{Symbol: "B", Industry: "算力", Popularity: 100},
+		{Symbol: "C", Industry: "机器人", Popularity: 70},
 	}
-	full := recommendationRiskPenalty(recommendationHardRiskCeiling, soft)
-	wantFull := 1 - recommendationRiskMaxPenalty
-	if math.Abs(full-wantFull) > 1e-9 {
-		t.Fatalf("penalty must cap at %.4f, got %.4f", wantFull, full)
+	ranks := recommendationLeaderRanks(pool)
+	if ranks["B"] != 1 || ranks["A"] != 2 || ranks["C"] != 1 {
+		t.Fatalf("unexpected leader ranks: %+v", ranks)
 	}
-	// 超出硬安全阀后惩罚不再加深（该候选已在上游被剔除，此处仅保证函数单调有界）
-	if got := recommendationRiskPenalty(200, soft); math.Abs(got-wantFull) > 1e-9 {
-		t.Fatalf("penalty must stay bounded, got %.4f", got)
+}
+
+func TestSelectStrongSectorLeadersPrioritizesSectorThenLeader(t *testing.T) {
+	candidates := []RecommendationCandidate{
+		{Symbol: "A1", Industry: "强板块", SectorHeat: 90},
+		{Symbol: "A2", Industry: "强板块", SectorHeat: 90},
+		{Symbol: "A3", Industry: "强板块", SectorHeat: 90},
+		{Symbol: "A4", Industry: "强板块", SectorHeat: 90},
+		{Symbol: "B1", Industry: "次强板块", SectorHeat: 80},
 	}
-	// 关键回归：高风险候选不得被判定为「应剔除」，只应被降权。
-	// 目的是保证候选池容量、避免枯竭后回退泛概念池（2026-08-11~14 的亏损路径），
-	// 而非假设高风险带来高收益——回测未支持后者。
-	highRisk := soft + 15
-	if highRisk > recommendationHardRiskCeiling {
-		t.Fatalf("test fixture invalid: %v exceeds hard ceiling", highRisk)
+	scores := map[string]float64{"A1": 100, "A2": 90, "A3": 80, "A4": 70, "B1": 200}
+	selected := selectStrongSectorLeaders(candidates, scores, 4)
+	if len(selected) != 4 {
+		t.Fatalf("expected 4 candidates, got %+v", selected)
 	}
-	if p := recommendationRiskPenalty(highRisk, soft); p <= 0 || p >= 1 {
-		t.Fatalf("high risk candidate must stay in pool with 0<penalty<1, got %.4f", p)
+	// 板块强度先于个股分：即使 B1 个股分更高，仍排在强板块三只龙头之后；
+	// 同板块最多三只，A4 不得挤占次强板块龙头位置。
+	want := []string{"A1", "A2", "A3", "B1"}
+	for i, symbol := range want {
+		if selected[i].Symbol != symbol {
+			t.Fatalf("selected[%d]=%s want %s; all=%+v", i, selected[i].Symbol, symbol, selected)
+		}
 	}
 }
 

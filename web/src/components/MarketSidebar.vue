@@ -269,7 +269,7 @@ onUnmounted(() => {
     <section class="sidebar-section recommendation-panel">
       <header><strong>每日 AI 推荐</strong><small>{{ dailyRecommendations.length }}/3</small></header>
       <div v-for="item in dailyRecommendations" :key="item.symbol" class="side-stock-row recommendation-row">
-        <button class="stock-main" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em>{{ item.probability.toFixed(0) }}</em></button>
+        <button class="stock-main" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em class="reco-scores"><i>机 {{ item.probability.toFixed(0) }}</i><i :class="(item.risk_score ?? 0) > 60 ? 'high' : (item.risk_score ?? 0) > 40 ? 'mid' : 'low'" title="风险分仅展示，不参与推荐选举">险 {{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</i></em></button>
         <button class="row-icon add" :disabled="watchlistSymbols.includes(item.symbol) || watchActionSymbol === item.symbol" :title="watchlistSymbols.includes(item.symbol) ? '已在自选' : '加入自选'" @click="addRecommended(item.symbol)">{{ watchlistSymbols.includes(item.symbol) ? '✓' : '+' }}</button>
       </div>
       <p v-if="!dailyRecommendations.length">今日推荐尚未生成</p>
@@ -306,6 +306,7 @@ onUnmounted(() => {
 .sidebar-section { display:grid; gap:2px; }.sidebar-section header { display:flex; align-items:center; justify-content:space-between; padding:2px 7px 5px; color:#e2e7ef; font-size:12px; }.sidebar-section header small { color:#8390a4; font-size:10px; }
 .side-stock-row { display:grid; min-width:0; grid-template-columns:minmax(0,1fr) 25px; gap:2px; }
 .stock-main { display:flex; min-width:0; align-items:center; justify-content:space-between; gap:5px; padding:5px 7px; border:0; border-bottom:1px solid #303b50; border-radius:0; background:#222d41; color:#ecf0f6; text-align:left; }.stock-main:hover { background:#2b374c; }.stock-main span { min-width:0; }.stock-main b,.stock-main small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.stock-main b { font-size:11px; }.stock-main small { margin-top:1px; color:#8996aa; font-size:9px; }.stock-main em { flex:0 0 auto; color:#e9c16c; font-style:normal; font-size:11px; font-weight:700; }.stock-main em.positive { color:#ef6a72; }.stock-main em.negative { color:#28bd8b; }
+.stock-main .reco-scores { display:grid; gap:1px; text-align:right; }.stock-main .reco-scores i { color:#9aa8bc; font-size:9px; font-style:normal; }.stock-main .reco-scores i.low { color:#55b996; }.stock-main .reco-scores i.mid { color:#e9c16c; }.stock-main .reco-scores i.high { color:#ef8b91; }
 .row-icon { width:25px; padding:0; border:1px solid #39455a; border-radius:0; background:#273348; color:#cbd4e1; font-size:16px; cursor:pointer; }.row-icon:hover { border-color:#71809a; background:#344159; }.row-icon:disabled { opacity:.45; cursor:default; }.row-icon.add { color:#55b996; }.row-icon.remove { color:#e48287; }
 .ai-signal { display:inline-grid; width:15px; height:15px; margin-left:2px; place-items:center; border:1px solid currentColor; font-size:9px; font-style:normal; line-height:1; vertical-align:1px; }.ai-signal.buy { color:#ef6a72; }.ai-signal.sell { color:#55b996; }.ai-signal.hold { color:#e9c16c; }
 .recommendation-panel { padding-bottom:8px; border-bottom:1px solid #354157; }

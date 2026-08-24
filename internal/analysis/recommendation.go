@@ -233,17 +233,15 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if analysisDate == "" || analysisDate < previousTradingDay(now).Format("2006-01-02") {
 		return fmt.Errorf("最近收盘日 K 尚未就绪: latest=%s", analysisDate)
 	}
-	// 候选风险上限由最近一次复盘的 market_phase 自动决定（up 放宽 / down 收紧），
-	// 因此 guidance 必须先于候选池读取；读取失败时回退到基准风险上限。
+	// 最近复盘仍提供市场阶段与策略优化指令，但个股 risk_score 不再参与候选过滤、
+	// 排序或 AI 选举，只随结果展示给用户自行判断。
 	guidance, guidanceErr := s.st.LatestReviewGuidanceForRecommendation(ctx, analysisDate)
 	if guidanceErr != nil {
 		slog.Warn("读取每日复盘优化指令失败，本次按基础规则推荐", "err", guidanceErr)
 		guidance = store.LatestReviewGuidance{}
 	}
-	maxRisk := store.RecommendationMaxRiskScore(guidance.MarketPhase)
-	// 指数风向门：推荐链路的第一道确定性闸门，级别只能收紧 AI 复盘的结论，
-	// 不能放宽。red 直接跳过当日推荐与建仓；yellow 仍生成推荐供观察，但强制
-	// 把候选风险上限压到 down 档，且盘前不自动建仓；计算失败按黄灯保守处理。
+	// 指数风向门只控制当日是否生成推荐，不再修改个股风险分门槛。red 跳过当日
+	// 推荐；yellow 保留市场警示供 AI 说明，但不能因 risk_score 过滤或降权候选。
 	gate, gateErr := s.st.MarketDirectionGate(ctx, analysisDate)
 	if gateErr != nil {
 		slog.Warn("计算指数风向门失败，按黄灯保守处理", "err", gateErr)
@@ -260,22 +258,17 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		slog.Info("全球风险门收紧风向档位", "level", gate.Level, "global_score", globalGate.Score)
 	}
 	if gate.Level == store.MarketGateRed {
-		return fmt.Errorf("风险感知红灯，跳过当日推荐与自动建仓: %s", gate.Reason)
-	}
-	if gate.Level == store.MarketGateYellow {
-		if downRisk := store.RecommendationMaxRiskScore("down"); downRisk < maxRisk {
-			maxRisk = downRisk
-		}
+		return fmt.Errorf("风险感知红灯，跳过当日推荐: %s", gate.Reason)
 	}
 	// 候选池优先复用当日热点漏斗 final 报告（08:00 先于推荐运行）：漏斗已完成
 	// “数据筛选→AI 产业链分析→数据回验”，其卡点概念成分股即为热点候选；
 	// 漏斗缺失/过期或过滤后不足时回退到独立的题材热度候选池。
-	candidates, candidateSource, err := s.candidatesReusingHotspot(ctx, analysisDate, maxRisk)
+	candidates, candidateSource, err := s.candidatesReusingHotspot(ctx, analysisDate)
 	if err != nil {
 		return err
 	}
 	if len(candidates) < store.RecommendationCandidateMin {
-		return fmt.Errorf("趋势/风险过滤后可分析候选不足: got=%d min=%d maxRisk=%.0f source=%s", len(candidates), store.RecommendationCandidateMin, maxRisk, candidateSource)
+		return fmt.Errorf("趋势与建仓空间过滤后可分析候选不足: got=%d min=%d source=%s", len(candidates), store.RecommendationCandidateMin, candidateSource)
 	}
 	slog.Info("AI 推荐候选池就绪", "source", candidateSource, "count", len(candidates))
 	// 影子基线先于 AI 请求落库：AI 失败当天也保留确定性对照样本。
@@ -288,14 +281,18 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审目标是在趋势跟踪口径下选择结构最完整、可持续性最强的候选，不设固定持有天数，也不得承诺收益。"
 	}
 	if gate.Level == store.MarketGateYellow {
-		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：请在候选内优先选择低波动、低回撤、乖离小的稳健结构，回避高位加速形态。"
+		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：请在推荐理由中客观说明市场环境，但不得依据候选 risk_score 排除、降权或改变排名。"
 	}
 	if guidance.ReviewDate != "" {
 		guidanceJSON, _ := json.Marshal(guidance)
-		prompt += "\n以下是最近一次收盘复盘生成的结构化优化指令与风控参数：" + string(guidanceJSON) +
-			"。这些内容只能影响输入候选内的相对排序和风险偏好：directives 用于调整候选优先级，risk_controls 的 position_mode 与 avoid_conditions 用于压低匹配相应特征候选的优先级；均不得覆盖候选范围、数量、字段格式及风险硬约束。market_phase=up 时兼顾趋势强度与风险；range 时提高确认要求；down 时优先低风险、低过热和回撤控制。"
+		prompt += "\n以下是最近一次收盘复盘生成的结构化优化指令：" + string(guidanceJSON) +
+			"。directives 只能在不涉及 risk_score 的前提下调整趋势、板块强度、龙头地位与建仓空间判断；risk_controls 不得用于候选剔除、降权或排名。market_phase 只作为市场背景写入理由，不改变个股风险分的展示口径。"
 	}
-	prompt += fmt.Sprintf(" 只能从用户提供的%d只候选中选择，必须恰好选3只并按趋势持续性与可建仓性排序，代码不得重复；候选覆盖多个板块时3只不得全部来自同一板块；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。排名第一者将在当日盘中寻找合适建仓区间，建仓后由 AI 综合大盘、板块、个股持续寻找退出机会；请优先选择趋势结构完整、仍有合理建仓空间且可持续性强的候选；近5日涨幅过大的候选注意高开回落与趋势透支风险。", len(candidates))
+	prompt += fmt.Sprintf(` 只能从用户提供的%d只候选中选择，必须恰好选3只并按建仓机会排序，代码不得重复。选举顺序必须是：
+1. 先比较 sector_heat、题材持续性和板块趋势，锁定当前最强且具备持续性的板块；
+2. 再在强板块内优先选择 leader_rank 靠前、成交活跃、趋势结构完整的龙头；
+3. 最后确认龙头仍有合理建仓空间，避免昨日接近涨停、短线严重过热等既有禁入形态。
+risk_score 仅用于最终页面展示，禁止用它剔除候选、降低排序、打分或否决推荐，风险由用户自行判断。候选覆盖多个强板块时应兼顾分散，3只不得全部来自同一板块；sector 必须逐字使用候选的 industry 字段，reason 不超过80字，并明确写出“强板块+龙头地位+建仓机会”的核心依据。`, len(candidates))
 	request := map[string]interface{}{
 		"model":           s.config.Model,
 		"temperature":     0.2,
@@ -403,9 +400,8 @@ func (s *Service) AutoEntryEnabled() bool { return false }
 // DailyEntryPickCount 是每个推荐日纳入生命周期的唯一最强标的数量。
 const DailyEntryPickCount = 1
 
-// selectEntryPicks 按确定性规则排序当日推荐并取前 N 只作为建仓候选：
-// AI 概率降序 → 风险分升序 → AI 排名升序。同时保证板块分散：
-// 已选中某板块后，优先选择其他板块的候选，避免单一题材熄火拖累整个组合。
+// selectEntryPicks 按 AI 概率降序、AI 排名升序做确定性兜底；RiskScore
+// 只展示，不参与排序。同时保证板块分散。
 func selectEntryPicks(items []model.StockRecommendation, limit int) []model.StockRecommendation {
 	if limit <= 0 || len(items) == 0 {
 		return nil
@@ -416,15 +412,6 @@ func selectEntryPicks(items []model.StockRecommendation, limit int) []model.Stoc
 		a, b := ranked[i], ranked[j]
 		if a.Probability != b.Probability {
 			return a.Probability > b.Probability
-		}
-		if a.RiskScore != nil && b.RiskScore != nil && *a.RiskScore != *b.RiskScore {
-			return *a.RiskScore < *b.RiskScore
-		}
-		if a.RiskScore == nil && b.RiskScore != nil {
-			return false
-		}
-		if a.RiskScore != nil && b.RiskScore == nil {
-			return true
 		}
 		return a.Rank < b.Rank
 	})
@@ -504,12 +491,12 @@ func (s *Service) autoWatchBestEntryPick(ctx context.Context, now time.Time, ana
 
 // candidatesReusingHotspot 优先复用当日热点漏斗 final 报告生成候选池；
 // 返回值第二项标识候选来源（hotspot_funnel / sector_heat），用于日志与排错。
-func (s *Service) candidatesReusingHotspot(ctx context.Context, analysisDate string, maxRisk float64) ([]store.RecommendationCandidate, string, error) {
+func (s *Service) candidatesReusingHotspot(ctx context.Context, analysisDate string) ([]store.RecommendationCandidate, string, error) {
 	concepts, err := s.hotspotConceptsForDate(ctx, analysisDate)
 	if err != nil {
 		slog.Warn("读取热点漏斗报告失败，回退题材热度候选池", "err", err)
 	} else if len(concepts) > 0 {
-		candidates, err := s.st.RecommendationCandidatesFromHotspot(ctx, maxRisk, concepts)
+		candidates, err := s.st.RecommendationCandidatesFromHotspot(ctx, concepts)
 		if err != nil {
 			return nil, "", err
 		}
@@ -518,7 +505,7 @@ func (s *Service) candidatesReusingHotspot(ctx context.Context, analysisDate str
 		}
 		slog.Warn("热点漏斗候选过滤后不足，回退题材热度候选池", "got", len(candidates), "min", store.RecommendationCandidateMin)
 	}
-	candidates, err := s.st.RecommendationCandidates(ctx, maxRisk)
+	candidates, err := s.st.RecommendationCandidates(ctx)
 	if err != nil {
 		return nil, "", err
 	}
