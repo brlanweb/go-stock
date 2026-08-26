@@ -13,7 +13,7 @@ func gateIndex(name string, close, ma20, mom5 float64) MarketGateIndexFact {
 }
 
 func TestClassifyMarketGateRedOnIndexBreakdown(t *testing.T) {
-	// 3/4 指数收于 MA20 下方且 5 日动量为负 → 红灯，跳过推荐与建仓。
+	// 3/4 指数收于 MA20 下方且 5 日动量为负 → 红灯：推荐照常生成并附强警示，持仓进入防御模式。
 	indices := []MarketGateIndexFact{
 		gateIndex("上证指数", 3000, 3100, -2.5),
 		gateIndex("深证成指", 9500, 9800, -3.0),

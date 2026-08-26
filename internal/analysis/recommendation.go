@@ -240,8 +240,9 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		slog.Warn("读取每日复盘优化指令失败，本次按基础规则推荐", "err", guidanceErr)
 		guidance = store.LatestReviewGuidance{}
 	}
-	// 指数风向门只控制当日是否生成推荐，不再修改个股风险分门槛。red 跳过当日
-	// 推荐；yellow 保留市场警示供 AI 说明，但不能因 risk_score 过滤或降权候选。
+	// 风险指标尚不完善：指数风向门（含全球风险门）不再拥有跳过当日推荐的权限。
+	// red/yellow 只作为市场警示注入提示词供 AI 客观说明，风险由用户自行判断；
+	// 不能因 risk_score 或风向档位过滤、降权候选。红灯仍保留持仓防御模式（entry/risk 层）。
 	gate, gateErr := s.st.MarketDirectionGate(ctx, analysisDate)
 	if gateErr != nil {
 		slog.Warn("计算指数风向门失败，按黄灯保守处理", "err", gateErr)
@@ -258,7 +259,8 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		slog.Info("全球风险门收紧风向档位", "level", gate.Level, "global_score", globalGate.Score)
 	}
 	if gate.Level == store.MarketGateRed {
-		return fmt.Errorf("风险感知红灯，跳过当日推荐: %s", gate.Reason)
+		// 风险指标尚不完善，红灯不再跳过当日推荐，仅记录并在提示词中强警示。
+		slog.Warn("风险感知红灯，仍继续生成当日推荐，仅注入强警示", "reason", gate.Reason)
 	}
 	// 候选池优先复用当日热点漏斗 final 报告（08:00 先于推荐运行）：漏斗已完成
 	// “数据筛选→AI 产业链分析→数据回验”，其卡点概念成分股即为热点候选；
@@ -282,6 +284,9 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	}
 	if gate.Level == store.MarketGateYellow {
 		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：请在推荐理由中客观说明市场环境，但不得依据候选 risk_score 排除、降权或改变排名。"
+	}
+	if gate.Level == store.MarketGateRed {
+		prompt += "\n当前指数风向为红灯（" + gate.Reason + "）：市场系统性风险较高，请在推荐理由中明确提示该风险，但仍必须正常完成3只推荐，不得依据候选 risk_score 或风向档位排除、降权或改变排名，风险由用户自行判断。"
 	}
 	if guidance.ReviewDate != "" {
 		guidanceJSON, _ := json.Marshal(guidance)

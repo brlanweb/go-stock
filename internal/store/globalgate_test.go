@@ -12,7 +12,7 @@ func globalQuote(symbol string, price, chgPct float64) model.GlobalQuote {
 }
 
 // 千股跌停前夜的典型外盘组合：A50 夜盘暴跌 + 金龙重挫 + 美股大跌 + VIX 飙升。
-// 必须判红灯：跳过当日推荐与建仓，并触发持仓防御模式。
+// 必须判红灯：触发持仓防御模式并在推荐中注入强警示（不再跳过当日推荐）。
 func TestClassifyGlobalRiskGateRedOnOvernightCrash(t *testing.T) {
 	quotes := []model.GlobalQuote{
 		globalQuote("CN00Y", 14200, -2.2),
