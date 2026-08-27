@@ -112,17 +112,51 @@ func (s *Store) ManuallyBuySymbol(ctx context.Context, symbol, tradeDate string,
 	if cash < cost {
 		return TradeResult{}, fmt.Errorf("可用余额不足：需要 %.2f 元，当前 %.2f 元", cost, cash)
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO position
-		(symbol,pick_date,analysis_date,status,entry_date,entry_price,highest_price,lowest_price,hold_days,
-		 position_pct,realized_pct,shares,buy_shares,buy_amount,fee_amount)
-		 VALUES (?,?,?,?,?,?,?,?,1,100,0,?,?,?,?)`,
-		symbol, tradeDate, tradeDate, PositionHolding, tradeDate, price, price, price,
-		shares, shares, cost, fee)
-	if err != nil {
-		return TradeResult{}, err
-	}
-	positionID, err := result.LastInsertId()
-	if err != nil {
+	// 手动建仓必须衔接 AI 推荐生命周期，否则首页统计（按 symbol+analysis_date
+	// 匹配 stock_recommendation）永远看不到这笔真实交易：
+	//   1. 已有 pending_entry（盘前推荐入池）时直接在原记录上确认建仓，既避免
+	//      同一 symbol 出现重复生命周期，也避免入池记录白白过期；
+	//   2. 否则回溯最近 7 个自然日内该标的的推荐日作为 analysis_date，覆盖
+	//      「推荐次日甚至隔周末才买入」的常见节奏；同一推荐日已有生命周期时
+	//      不重复挂靠（卖出后再买属于用户自主的新交易，不能算推荐的第二次机会）；
+	//   3. 从未被推荐过的标的保持原行为：analysis_date=建仓日，不进推荐统计。
+	var positionID int64
+	var pendingID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM position WHERE symbol=? AND status=? ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+		symbol, PositionPendingEntry).Scan(&pendingID)
+	switch {
+	case err == nil:
+		if _, err := tx.ExecContext(ctx, `UPDATE position SET status=?,entry_date=?,entry_price=?,highest_price=?,lowest_price=?,
+			hold_days=1,position_pct=100,realized_pct=0,shares=?,buy_shares=?,buy_amount=?,fee_amount=? WHERE id=?`,
+			PositionHolding, tradeDate, price, price, price, shares, shares, cost, fee, pendingID); err != nil {
+			return TradeResult{}, err
+		}
+		positionID = pendingID
+	case err == sql.ErrNoRows:
+		analysisDate := tradeDate
+		var recoDate sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT DATE_FORMAT(MAX(r.analysis_date),'%Y-%m-%d') FROM stock_recommendation r
+			WHERE r.symbol=? AND r.analysis_date BETWEEN DATE_SUB(?, INTERVAL 7 DAY) AND ?
+			AND NOT EXISTS(SELECT 1 FROM position p WHERE p.symbol=r.symbol AND p.analysis_date=r.analysis_date)`,
+			symbol, tradeDate, tradeDate).Scan(&recoDate); err != nil {
+			return TradeResult{}, err
+		}
+		if recoDate.Valid && recoDate.String != "" {
+			analysisDate = recoDate.String
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO position
+			(symbol,pick_date,analysis_date,status,entry_date,entry_price,highest_price,lowest_price,hold_days,
+			 position_pct,realized_pct,shares,buy_shares,buy_amount,fee_amount)
+			 VALUES (?,?,?,?,?,?,?,?,1,100,0,?,?,?,?)`,
+			symbol, tradeDate, analysisDate, PositionHolding, tradeDate, price, price, price,
+			shares, shares, cost, fee)
+		if err != nil {
+			return TradeResult{}, err
+		}
+		if positionID, err = result.LastInsertId(); err != nil {
+			return TradeResult{}, err
+		}
+	default:
 		return TradeResult{}, err
 	}
 	note := fmt.Sprintf("用户手动建仓，默认买入100万元，实际成交%d股", shares)
