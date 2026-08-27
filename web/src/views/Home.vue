@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { selectActionRows, selectRecommendedRows } from '../homeOverview.js'
 import {
   api,
   fmtPct,
@@ -60,14 +61,8 @@ const sentimentCls = computed(() => {
   return 's-extreme-greed'
 })
 
-const actionRows = computed(() => positions.value
-  .filter(p => p.status === 'pending_entry' || p.status === 'holding')
-  .slice(0, 5))
-
-const recommendedRows = computed(() => positions.value
-  .filter(p => (p.status === 'pending_entry' || p.status === 'holding') && p.change_pct != null)
-  .sort((a, b) => b.change_pct! - a.change_pct!)
-  .slice(0, 5))
+const actionRows = computed(() => selectActionRows(positions.value))
+const recommendedRows = computed(() => selectRecommendedRows(positions.value))
 
 const hotConcepts = computed(() => {
   if (!hotspot.value?.concepts) return [] as NonNullable<HotspotReport['concepts']>
