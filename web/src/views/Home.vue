@@ -65,8 +65,8 @@ const actionRows = computed(() => positions.value
   .slice(0, 5))
 
 const recommendedRows = computed(() => positions.value
-  .filter(p => p.status === 'pending_entry' || p.status === 'holding')
-  .sort((a, b) => (b.change_pct ?? Number.NEGATIVE_INFINITY) - (a.change_pct ?? Number.NEGATIVE_INFINITY))
+  .filter(p => (p.status === 'pending_entry' || p.status === 'holding') && p.change_pct != null)
+  .sort((a, b) => b.change_pct! - a.change_pct!)
   .slice(0, 5))
 
 const hotConcepts = computed(() => {

@@ -61,7 +61,7 @@ assert.match(source, /\.review\{grid-column:1\/-1\}/)
 
 - [ ] **步骤 1：收敛派生数据**
 
-将 `actionRows` 改为有效状态最多 5 条。新增 `recommendedRows`：过滤 `pending_entry` 与 `holding`，按 `change_pct` 从高到低排序并截取前 5 条；这与用户确认的“当前有效未退出、盈利最高”一致。热点线索同步限制为最多 5 条。
+将 `actionRows` 改为有效状态最多 5 条。新增 `recommendedRows`：过滤 `pending_entry` 与 `holding` 中已有可计算 `change_pct` 的记录，按收益率从高到低排序并截取前 5 条；尚无建仓价的等待建仓记录只保留在持仓信息中。这与用户确认的“当前有效未退出、盈利最高”一致。热点线索同步限制为最多 5 条。
 
 - [ ] **步骤 2：实现第一行三列**
 

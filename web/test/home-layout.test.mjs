@@ -28,9 +28,13 @@ test('home presents the requested dashboard sections in strict order', () => {
   ])
 })
 
-test('home limits positions and active recommendations to five rows', () => {
-  assert.match(source, /const actionRows[\s\S]*?\.slice\(0, 5\)/)
-  assert.match(source, /const recommendedRows[\s\S]*?\.slice\(0, 5\)/)
+test('home limits positions and ranks profitable active recommendations to five rows', () => {
+  assert.match(source, /const actionRows[\s\S]*?\.filter\(p => p\.status === 'pending_entry' \|\| p\.status === 'holding'\)[\s\S]*?\.slice\(0, 5\)/)
+  assert.match(source, /const recommendedRows[\s\S]*?\.filter\(p => \(p\.status === 'pending_entry' \|\| p\.status === 'holding'\) && p\.change_pct != null\)[\s\S]*?\.sort\(\(a, b\) => b\.change_pct! - a\.change_pct!\)[\s\S]*?\.slice\(0, 5\)/)
+})
+
+test('desktop metrics and overview use the same strict three-column grid', () => {
+  assert.match(source, /\.hero,\.grid\{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/)
 })
 
 test('history chart and review each span the complete dashboard row', () => {
