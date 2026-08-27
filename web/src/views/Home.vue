@@ -189,19 +189,6 @@ onBeforeUnmount(() => basketObserver?.disconnect())
 <template>
   <main class="home-overview">
     <header class="home-header">
-      <div class="brand">
-        <strong>go-stock</strong>
-        <router-link to="/?view=risk" class="sentiment" :class="sentimentCls" title="点击查看风险板块">
-          <template v-if="sentiment">
-            <b>{{ sentiment.score }}</b>
-            <span><i>市场风险情绪</i><em>{{ sentiment.label }}</em></span>
-          </template>
-          <template v-else>
-            <b>—</b>
-            <span><i>市场风险情绪</i><em>数据不足</em></span>
-          </template>
-        </router-link>
-      </div>
       <button type="button" class="refresh" :disabled="accountLoading" title="刷新首页" aria-label="刷新首页" @click="load">↻</button>
     </header>
 
@@ -303,25 +290,7 @@ onBeforeUnmount(() => basketObserver?.disconnect())
 
 <style scoped>
 .home-overview{min-width:0;min-height:100%;overflow:auto;padding:18px;background:#0f1826;color:#e7ecf4;letter-spacing:0}
-.home-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.brand{display:flex;min-width:0;align-items:center;gap:14px}
-.brand>strong{font-size:18px;letter-spacing:.5px}
-.sentiment{display:grid;grid-template-columns:auto auto;align-items:center;gap:6px 12px;padding:7px 14px;border:1px solid #2d3b54;border-radius:6px;color:#e7ecf4;text-decoration:none;background:#131e33}
-.sentiment:hover{background:#182338}
-.sentiment b{font-size:22px;line-height:1;font-variant-numeric:tabular-nums}
-.sentiment span{display:grid;gap:1px}
-.sentiment small{color:#8895ab;font-size:10px}
-.sentiment em{font-size:13px;font-style:normal}
-.sentiment.s-extreme-fear b,.sentiment.s-fear b{color:#55b996}
-.sentiment.s-neutral b{color:#e9c16c}
-.sentiment.s-greed b{color:#df9462}
-.sentiment.s-extreme-greed b{color:#ef6a72}
-.sentiment.s-extreme-fear{border-left:4px solid #28755d}
-.sentiment.s-fear{border-left:4px solid #55b996}
-.sentiment.s-neutral{border-left:4px solid #e9c16c}
-.sentiment.s-greed{border-left:4px solid #df9462}
-.sentiment.s-extreme-greed{border-left:4px solid #ef6a72}
-.sentiment.s-none{border-left:4px solid #6b7b94}
+.home-header{display:flex;align-items:center;justify-content:flex-end;margin-bottom:14px}
 .refresh{display:grid;width:32px;height:32px;place-items:center;border:1px solid #3a496a;border-radius:3px;background:#18243a;color:#c4cddc;cursor:pointer;font-size:19px}
 .refresh:hover{background:#21304b}.refresh:disabled{cursor:wait;opacity:.55}
 .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-bottom:14px}
