@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -75,6 +76,96 @@ type MarketGate struct {
 	Reason    string                `json:"reason"`
 	Indices   []MarketGateIndexFact `json:"indices"`
 	Breadth   MarketGateBreadthFact `json:"breadth"`
+}
+
+// MarketSentiment 将风险事实压缩为 0-100 的 A 股恐惧贪婪指数。
+// 参考 Alternative.me 的波动率与动量权重，并用 A 股可稳定获得的市场宽度、
+// MA20 趋势和隔夜外盘风险替代币圈的社交热度、币种占比与搜索趋势。
+type MarketSentiment struct {
+	Score          int     `json:"score"`
+	Label          string  `json:"label"`
+	Volatility     float64 `json:"volatility"`
+	Momentum       float64 `json:"momentum"`
+	Breadth        float64 `json:"breadth"`
+	Trend          float64 `json:"trend"`
+	GlobalAppetite float64 `json:"global_appetite"`
+}
+
+func clampSentiment(value float64) float64 {
+	return math.Max(0, math.Min(100, value))
+}
+
+func sentimentLabel(score int) string {
+	switch {
+	case score <= 24:
+		return "极度恐惧"
+	case score <= 44:
+		return "恐惧"
+	case score <= 55:
+		return "中性"
+	case score <= 74:
+		return "贪婪"
+	default:
+		return "极度贪婪"
+	}
+}
+
+// CalculateMarketSentiment 使用确定性行情因子计算市场情绪：
+// 波动率 25% + 5日动量 25% + 市场宽度 25% + MA20趋势 15% + 外盘风险偏好 10%。
+// 因子缺失时按 50 分中性处理，避免把「无数据」错误解释成恐惧或贪婪。
+func CalculateMarketSentiment(market *MarketGate, global *GlobalRiskGate) MarketSentiment {
+	out := MarketSentiment{Volatility: 50, Momentum: 50, Breadth: 50, Trend: 50, GlobalAppetite: 50}
+	if market != nil {
+		momentumSum, momentumCount := 0.0, 0
+		trendAbove, trendCount := 0, 0
+		for _, index := range market.Indices {
+			if index.HasMomentum {
+				momentumSum += index.Momentum5Pct
+				momentumCount++
+			}
+			if index.HasMA20 && index.Close > 0 && index.MA20 > 0 {
+				trendCount++
+				if index.Close >= index.MA20 {
+					trendAbove++
+				}
+			}
+		}
+		if momentumCount > 0 {
+			average := momentumSum / float64(momentumCount)
+			out.Momentum = clampSentiment((average + 5) / 10 * 100)
+		}
+		if trendCount > 0 {
+			out.Trend = float64(trendAbove) / float64(trendCount) * 100
+		}
+		if market.Breadth.Valid {
+			upRatio := clampSentiment(market.Breadth.UpRatio * 100)
+			averageChange := clampSentiment((market.Breadth.AvgChangePct + 2) / 4 * 100)
+			out.Breadth = upRatio*0.6 + averageChange*0.4
+		}
+	}
+	if global != nil {
+		nonVIXScore, nonVIXCount := 0, 0
+		for _, signal := range global.Signals {
+			if signal.Factor == "vix" {
+				if signal.HasData && signal.Price > 0 {
+					// VIX 约 12 视为低恐慌，40 及以上视为极端恐慌。
+					out.Volatility = clampSentiment((40 - signal.Price) / 28 * 100)
+				}
+				continue
+			}
+			if signal.HasData {
+				nonVIXScore += signal.Score
+				nonVIXCount++
+			}
+		}
+		if nonVIXCount > 0 {
+			out.GlobalAppetite = clampSentiment(75 + float64(nonVIXScore)*12.5)
+		}
+	}
+	score := int(math.Round(out.Volatility*0.25 + out.Momentum*0.25 + out.Breadth*0.25 + out.Trend*0.15 + out.GlobalAppetite*0.10))
+	out.Score = score
+	out.Label = sentimentLabel(score)
+	return out
 }
 
 // AllowAutoEntry 表示当前风向是否允许自动建仓（仅 green）。

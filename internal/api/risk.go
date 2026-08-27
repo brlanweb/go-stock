@@ -48,10 +48,18 @@ func (s *Server) handleRiskGate(w http.ResponseWriter, r *http.Request) {
 	if s.Analysis != nil {
 		autoEntry = s.Analysis.AutoEntryEnabled()
 	}
+	// 情绪指数只使用上海日期当天的隔夜风险结果；过期外盘数据按缺失因子中性处理，
+	// 避免采集失败时把数日前的恐慌或乐观情绪沿用到今天。
+	sentimentGlobal := globalGate
+	today := time.Now().In(shanghaiLoc()).Format("2006-01-02")
+	if sentimentGlobal == nil || sentimentGlobal.TradeDate != today {
+		sentimentGlobal = nil
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"analysis_date":      analysisDate,
 		"market_gate":        marketGate,
 		"global_gate":        globalGate,
+		"market_sentiment":   store.CalculateMarketSentiment(marketGate, sentimentGlobal),
 		"final_level":        store.StricterGateLevel(marketLevel, globalLevel),
 		"auto_entry_enabled": autoEntry,
 	})

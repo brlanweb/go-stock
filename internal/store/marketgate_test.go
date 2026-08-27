@@ -128,3 +128,58 @@ func TestClassifyMarketGateIgnoresIndicesWithoutMA20(t *testing.T) {
 		t.Fatalf("expected green when broken index lacks history, got %s (%s)", gate.Level, gate.Reason)
 	}
 }
+
+func TestCalculateMarketSentimentExtremeGreed(t *testing.T) {
+	market := &MarketGate{
+		Indices: []MarketGateIndexFact{
+			gateIndex("上证指数", 3300, 3100, 4),
+			gateIndex("深证成指", 10500, 9800, 4),
+		},
+		Breadth: MarketGateBreadthFact{Valid: true, UpRatio: 0.80, AvgChangePct: 1.5},
+	}
+	global := &GlobalRiskGate{Signals: []GlobalRiskSignal{
+		{Factor: "a50", HasData: true, Score: 0},
+		{Factor: "vix", HasData: true, Price: 15},
+	}}
+
+	got := CalculateMarketSentiment(market, global)
+	if got.Score != 88 || got.Label != "极度贪婪" {
+		t.Fatalf("强动量、强宽度与低波动应为极度贪婪 88，got=%d %s", got.Score, got.Label)
+	}
+}
+
+func TestCalculateMarketSentimentExtremeFear(t *testing.T) {
+	market := &MarketGate{
+		Indices: []MarketGateIndexFact{
+			gateIndex("上证指数", 2900, 3100, -4),
+			gateIndex("深证成指", 9000, 9800, -4),
+		},
+		Breadth: MarketGateBreadthFact{Valid: true, UpRatio: 0.20, AvgChangePct: -1.5},
+	}
+	global := &GlobalRiskGate{Signals: []GlobalRiskSignal{
+		{Factor: "a50", HasData: true, Score: -3},
+		{Factor: "china_adr", HasData: true, Score: -1},
+		{Factor: "us_equity", HasData: true, Score: -2},
+		{Factor: "vix", HasData: true, Price: 35, Score: -2},
+	}}
+
+	got := CalculateMarketSentiment(market, global)
+	if got.Score != 11 || got.Label != "极度恐惧" {
+		t.Fatalf("弱动量、弱宽度与高波动应为极度恐惧 11，got=%d %s", got.Score, got.Label)
+	}
+}
+
+func TestCalculateMarketSentimentNeutralWhenDataMissing(t *testing.T) {
+	got := CalculateMarketSentiment(nil, nil)
+	if got.Score != 50 || got.Label != "中性" {
+		t.Fatalf("数据全缺失时应返回中性 50，got=%d %s", got.Score, got.Label)
+	}
+}
+
+func TestCalculateMarketSentimentDoesNotCountVIXTwice(t *testing.T) {
+	global := &GlobalRiskGate{Score: -1, Signals: []GlobalRiskSignal{{Factor: "vix", HasData: true, Price: 26, Score: -1}}}
+	got := CalculateMarketSentiment(nil, global)
+	if got.GlobalAppetite != 50 {
+		t.Fatalf("只有VIX时外盘风险偏好应保持中性，避免VIX重复计权，got=%.2f", got.GlobalAppetite)
+	}
+}

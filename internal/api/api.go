@@ -943,7 +943,8 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqCtx(r)
 	defer cancel()
-	account, err := s.St.TradeAccountOverview(ctx)
+	today := time.Now().In(shanghaiLoc()).Format("2006-01-02")
+	account, err := s.St.TradeAccountOverview(ctx, today)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

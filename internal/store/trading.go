@@ -21,6 +21,7 @@ type TradeAccount struct {
 	RealizedPnl   float64 `json:"realized_pnl"`
 	UnrealizedPnl float64 `json:"unrealized_pnl"`
 	TotalPnl      float64 `json:"total_pnl"`
+	TodayPnl      float64 `json:"today_pnl"`
 	TotalFee      float64 `json:"total_fee"`
 	BuyCount      int     `json:"buy_count"`
 	SellCount     int     `json:"sell_count"`
@@ -258,7 +259,70 @@ func (s *Store) ManuallySellSymbol(ctx context.Context, symbol, tradeDate string
 	return TradeResult{PositionID: id, Symbol: symbol, Side: "sell", Price: price, Shares: shares, Amount: amount, Fee: fee, Cash: cash, RealizedPnl: tradePnl, Status: status}, nil
 }
 
-func (s *Store) TradeAccountOverview(ctx context.Context) (TradeAccount, error) {
+func holdingTodayPnl(entryDate, today string, shares int, referencePrice, previousClose, unrealizedPnl float64) float64 {
+	if entryDate == today {
+		return unrealizedPnl
+	}
+	return (referencePrice - previousClose) * float64(shares)
+}
+
+func soldTodayPnl(sellPrice, previousClose float64, shares int, fee float64) float64 {
+	return (sellPrice-previousClose)*float64(shares) - fee
+}
+
+func (s *Store) previousCloseBefore(ctx context.Context, symbol, tradeDate string) (*float64, error) {
+	var close sql.NullFloat64
+	err := s.DB.QueryRowContext(ctx, `SELECT close FROM kline_daily
+		WHERE symbol=? AND trade_date<? ORDER BY trade_date DESC LIMIT 1`, symbol, tradeDate).Scan(&close)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !close.Valid || close.Float64 <= 0 {
+		return nil, nil
+	}
+	return &close.Float64, nil
+}
+
+func (s *Store) soldPositionsTodayPnl(ctx context.Context, today string) (float64, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT symbol,price,shares,fee FROM trade_order
+		WHERE side='sell' AND trade_date=?`, today)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type sale struct {
+		symbol     string
+		price, fee float64
+		shares     int
+	}
+	var sales []sale
+	for rows.Next() {
+		var item sale
+		if err := rows.Scan(&item.symbol, &item.price, &item.shares, &item.fee); err != nil {
+			return 0, err
+		}
+		sales = append(sales, item)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var total float64
+	for _, item := range sales {
+		previousClose, err := s.previousCloseBefore(ctx, item.symbol, today)
+		if err != nil {
+			return 0, err
+		}
+		if previousClose != nil {
+			total += soldTodayPnl(item.price, *previousClose, item.shares, item.fee)
+		}
+	}
+	return total, nil
+}
+
+func (s *Store) TradeAccountOverview(ctx context.Context, today string) (TradeAccount, error) {
 	var out TradeAccount
 	if err := s.DB.QueryRowContext(ctx, `SELECT initial_cash,cash,realized_pnl,total_fee,buy_count,sell_count FROM trade_account WHERE id=1`).
 		Scan(&out.InitialCash, &out.Cash, &out.RealizedPnl, &out.TotalFee, &out.BuyCount, &out.SellCount); err != nil {
@@ -278,7 +342,24 @@ func (s *Store) TradeAccountOverview(ctx context.Context) (TradeAccount, error) 
 		if position.UnrealizedPnl != nil {
 			out.UnrealizedPnl += *position.UnrealizedPnl
 		}
+		if position.ReferencePrice == nil || position.UnrealizedPnl == nil {
+			continue
+		}
+		previousClose, err := s.previousCloseBefore(ctx, position.Symbol, today)
+		if err != nil {
+			return out, err
+		}
+		if position.EntryDate == today {
+			out.TodayPnl += holdingTodayPnl(position.EntryDate, today, position.Shares, *position.ReferencePrice, 0, *position.UnrealizedPnl)
+		} else if previousClose != nil {
+			out.TodayPnl += holdingTodayPnl(position.EntryDate, today, position.Shares, *position.ReferencePrice, *previousClose, *position.UnrealizedPnl)
+		}
 	}
+	soldPnl, err := s.soldPositionsTodayPnl(ctx, today)
+	if err != nil {
+		return out, err
+	}
+	out.TodayPnl += soldPnl
 	out.TotalAssets = out.Cash + out.MarketValue
 	out.TotalPnl = out.TotalAssets - out.InitialCash
 	return out, nil

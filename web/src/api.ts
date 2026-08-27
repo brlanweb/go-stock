@@ -240,6 +240,7 @@ export interface TradeAccount {
   realized_pnl: number
   unrealized_pnl: number
   total_pnl: number
+  today_pnl: number
   total_fee: number
   buy_count: number
   sell_count: number
@@ -759,10 +760,21 @@ export interface MarketGate {
   breadth: MarketGateBreadth
 }
 
+export interface MarketSentiment {
+  score: number
+  label: '极度恐惧' | '恐惧' | '中性' | '贪婪' | '极度贪婪'
+  volatility: number
+  momentum: number
+  breadth: number
+  trend: number
+  global_appetite: number
+}
+
 export interface RiskGateOverview {
   analysis_date: string
   market_gate: MarketGate | null
   global_gate: GlobalRiskGate | null
+  market_sentiment: MarketSentiment
   final_level: 'green' | 'yellow' | 'red'
   // 系统是否会自动建仓。为 false 时即使绿灯也只输出观察性推荐，
   // 用于区分「风险门放行」与「系统真的会开仓」。
