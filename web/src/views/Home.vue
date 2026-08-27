@@ -60,14 +60,21 @@ const sentimentCls = computed(() => {
   return 's-extreme-greed'
 })
 
-const actionRows = computed(() => positions.value.filter(p => p.status === 'pending_entry' || p.status === 'holding').slice(0, 6))
+const actionRows = computed(() => positions.value
+  .filter(p => p.status === 'pending_entry' || p.status === 'holding')
+  .slice(0, 5))
+
+const recommendedRows = computed(() => positions.value
+  .filter(p => p.status === 'pending_entry' || p.status === 'holding')
+  .sort((a, b) => (b.change_pct ?? Number.NEGATIVE_INFINITY) - (a.change_pct ?? Number.NEGATIVE_INFINITY))
+  .slice(0, 5))
 
 const hotConcepts = computed(() => {
   if (!hotspot.value?.concepts) return [] as NonNullable<HotspotReport['concepts']>
   return [...hotspot.value.concepts]
     .filter(c => c.stats && c.confidence > 0)
     .sort((a, b) => b.confidence - a.confidence)
-    .slice(0, 4)
+    .slice(0, 5)
 })
 
 const reviewKeypoints = computed(() => {
@@ -192,36 +199,58 @@ onBeforeUnmount(() => basketObserver?.disconnect())
       <button type="button" class="refresh" :disabled="accountLoading" title="刷新首页" aria-label="刷新首页" @click="load">↻</button>
     </header>
 
-    <section class="hero" aria-label="账户核心">
-      <article class="hero-card total">
-        <span>当前总盈亏</span>
-        <strong :class="pnlClass(account?.total_pnl)">{{ money(account?.total_pnl) }}</strong>
-        <small>账户总资产减去初始资金</small>
-      </article>
+    <section class="hero" aria-label="账户与市场核心指标">
       <article class="hero-card today">
         <span>今日盈亏</span>
         <strong :class="pnlClass(account?.today_pnl)">{{ money(account?.today_pnl) }}</strong>
         <small>今日持仓变动 + 今日卖出已扣费用</small>
+      </article>
+      <article class="hero-card total">
+        <span>账户总盈亏</span>
+        <strong :class="pnlClass(account?.total_pnl)">{{ money(account?.total_pnl) }}</strong>
+        <small>账户总资产减去初始资金</small>
+      </article>
+      <article class="hero-card sentiment-card" :class="sentimentCls">
+        <div class="metric-heading"><span>恐惧贪婪指数</span><button type="button" class="icon-link" title="查看风险板块" aria-label="查看风险板块" @click="openRisk">→</button></div>
+        <template v-if="sentiment">
+          <strong>{{ sentiment.score }}</strong>
+          <div class="sentiment-bar"><span :style="{ left: `${sentiment.score}%` }" /></div>
+          <small>{{ sentiment.label }} · 0 极度恐惧 / 100 极度贪婪</small>
+        </template>
+        <template v-else>
+          <strong class="flat">—</strong>
+          <small>市场情绪数据不可用</small>
+        </template>
       </article>
     </section>
 
     <section class="grid" aria-label="总览区块">
       <article class="panel positions">
         <header><div><b>持仓信息</b><small>等待建仓 / 持有中，扣往返成本</small></div><button type="button" class="link-btn" @click="openTrade">全部明细 →</button></header>
-        <div v-if="actionRows.length" class="rows">
-          <button v-for="item in actionRows" :key="item.id" type="button" class="row" @click="openStock(item.symbol)">
-            <span class="status" :class="item.status">{{ positionStatusLabel(item.status) }}</span>
-            <span class="name"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }}</small></span>
-            <span class="num"><small>成本</small>{{ item.entry_price == null ? '—' : item.entry_price.toFixed(2) }}</span>
-            <span class="num"><small>现价</small>{{ item.reference_price == null ? '—' : item.reference_price.toFixed(2) }}</span>
+        <div v-if="actionRows.length" class="compact-rows">
+          <button v-for="item in actionRows" :key="item.id" type="button" class="compact-row" @click="openStock(item.symbol)">
+            <span class="compact-name"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }} · {{ positionStatusLabel(item.status) }}</small></span>
+            <span class="compact-price"><small>成本 / 现价</small>{{ item.entry_price == null ? '—' : item.entry_price.toFixed(2) }} / {{ item.reference_price == null ? '—' : item.reference_price.toFixed(2) }}</span>
             <strong :class="pctClass(item.change_pct)">{{ signed(item.change_pct) }}</strong>
           </button>
         </div>
         <div v-else class="empty">当前没有需要处理的持仓</div>
       </article>
 
+      <article class="panel recommendations">
+        <header><div><b>AI 高分推荐股</b><small>当前有效未退出，按收益率从高到低</small></div><button type="button" class="link-btn" @click="openTrade">推荐详情 →</button></header>
+        <div v-if="recommendedRows.length" class="compact-rows">
+          <button v-for="item in recommendedRows" :key="item.id" type="button" class="compact-row" @click="openStock(item.symbol)">
+            <span class="compact-name"><b>{{ item.name || item.symbol }}</b><small>{{ item.code }} · {{ positionStatusLabel(item.status) }}</small></span>
+            <span class="compact-price"><small>{{ item.entry_price == null ? '参考价' : '成本 / 现价' }}</small>{{ item.entry_price == null ? (item.reference_price?.toFixed(2) || '—') : `${item.entry_price.toFixed(2)} / ${item.reference_price?.toFixed(2) || '—'}` }}</span>
+            <strong :class="pctClass(item.change_pct)">{{ signed(item.change_pct) }}</strong>
+          </button>
+        </div>
+        <div v-else class="empty">暂无当前有效且未退出的推荐股</div>
+      </article>
+
       <article class="panel hotspot">
-        <header><div><b>热点有效决策线索</b><small>当前主线与高置信概念，趋势可参与</small></div><button type="button" class="link-btn" @click="openHotspot">热点漏斗 →</button></header>
+        <header><div><b>热点决策线索</b><small>当前主线与高置信概念，趋势可参与</small></div><button type="button" class="link-btn" @click="openHotspot">热点漏斗 →</button></header>
         <ul v-if="hotConcepts.length" class="hot-list">
           <li v-for="concept in hotConcepts" :key="concept.sector_code">
             <button type="button" @click="router.push({ path: '/', query: { view: 'hotspot', sector: concept.sector_code } })">
@@ -232,30 +261,6 @@ onBeforeUnmount(() => basketObserver?.disconnect())
           </li>
         </ul>
         <div v-else class="empty">热点数据不可用，进入热点板块手动运行</div>
-      </article>
-
-      <article class="panel review">
-        <header><div><b>复盘关键信息</b><small>最近一次每日复盘的方向与板块结论</small></div><button type="button" class="link-btn" @click="openReview">每日复盘 →</button></header>
-        <div v-if="review && (reviewKeypoints.length || reviewTags.length)" class="review-body">
-          <ul v-if="reviewKeypoints.length">
-            <li v-for="(line, index) in reviewKeypoints" :key="index">{{ line }}</li>
-          </ul>
-          <div v-if="reviewTags.length" class="tags">
-            <i v-for="tag in reviewTags" :key="tag">{{ tag }}</i>
-          </div>
-          <p v-if="review.market_phase" class="phase">当前阶段：<b :class="review.market_phase">{{ review.market_phase === 'up' ? '上行' : review.market_phase === 'down' ? '下行' : '震荡' }}</b></p>
-        </div>
-        <div v-else class="empty">复盘数据未生成</div>
-      </article>
-
-      <article class="panel risk">
-        <header><div><b>风险关键信息</b><small>境内趋势与隔夜外盘综合判断</small></div><button type="button" class="link-btn" @click="openRisk">风险板块 →</button></header>
-        <div v-if="sentiment" class="risk-body">
-          <div class="sentiment-bar" :class="sentimentCls"><span :style="{ left: `${sentiment.score}%` }" /></div>
-          <p class="risk-score">综合分 <b>{{ sentiment.score }}</b> · 标签 <em>{{ sentiment.label }}</em></p>
-          <p class="risk-factors">波动率 <b>{{ sentiment.volatility.toFixed(0) }}</b> · 动量 <b>{{ sentiment.momentum.toFixed(0) }}</b> · 宽度 <b>{{ sentiment.breadth.toFixed(0) }}</b> · 趋势 <b>{{ sentiment.trend.toFixed(0) }}</b> · 外盘 <b>{{ sentiment.global_appetite.toFixed(0) }}</b></p>
-        </div>
-        <div v-else class="empty">风险数据不可用</div>
       </article>
 
       <article class="panel basket">
@@ -281,6 +286,20 @@ onBeforeUnmount(() => basketObserver?.disconnect())
         </div>
         <div v-else class="empty">等待推荐日数据</div>
       </article>
+
+      <article class="panel review">
+        <header><div><b>复盘关键信息</b><small>最近一次每日复盘的方向与板块结论</small></div><button type="button" class="link-btn" @click="openReview">每日复盘 →</button></header>
+        <div v-if="review && (reviewKeypoints.length || reviewTags.length)" class="review-body">
+          <ul v-if="reviewKeypoints.length">
+            <li v-for="(line, index) in reviewKeypoints" :key="index">{{ line }}</li>
+          </ul>
+          <div v-if="reviewTags.length" class="tags">
+            <i v-for="tag in reviewTags" :key="tag">{{ tag }}</i>
+          </div>
+          <p v-if="review.market_phase" class="phase">当前阶段：<b :class="review.market_phase">{{ review.market_phase === 'up' ? '上行' : review.market_phase === 'down' ? '下行' : '震荡' }}</b></p>
+        </div>
+        <div v-else class="empty">复盘数据未生成</div>
+      </article>
     </section>
 
     <p v-if="error" class="state-error">{{ error }}</p>
@@ -293,77 +312,53 @@ onBeforeUnmount(() => basketObserver?.disconnect())
 .home-header{display:flex;align-items:center;justify-content:flex-end;margin-bottom:14px}
 .refresh{display:grid;width:32px;height:32px;place-items:center;border:1px solid #3a496a;border-radius:3px;background:#18243a;color:#c4cddc;cursor:pointer;font-size:19px}
 .refresh:hover{background:#21304b}.refresh:disabled{cursor:wait;opacity:.55}
-.hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-bottom:14px}
-.hero-card{display:flex;min-width:0;min-height:142px;flex-direction:column;justify-content:center;gap:10px;padding:22px;border:1px solid #2d3b54;border-radius:6px;background:#131e33}
-.hero-card.total{border-top:4px solid #67a9d8}
-.hero-card.today{border-top:4px solid #e9c16c}
-.hero-card span{color:#98a5b9;font-size:13px}
-.hero-card strong{max-width:100%;font-size:clamp(28px,4.2vw,52px);font-variant-numeric:tabular-nums;line-height:1.05;overflow-wrap:anywhere}
+.hero,.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.hero{margin-bottom:12px}
+.hero-card{display:flex;min-width:0;min-height:148px;flex-direction:column;justify-content:center;gap:10px;padding:20px;border:1px solid #2d3b54;border-radius:6px;background:#131e33}
+.hero-card.today{border-top:4px solid #e9c16c}.hero-card.total{border-top:4px solid #67a9d8}.hero-card.sentiment-card{border-top:4px solid #8f7bd8}
+.hero-card>span,.metric-heading>span{color:#98a5b9;font-size:13px}
+.hero-card>strong{max-width:100%;font-size:38px;font-variant-numeric:tabular-nums;line-height:1.05;overflow-wrap:anywhere}
 .hero-card small{color:#6f7d97;font-size:11px}
+.metric-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.icon-link{display:grid;width:28px;height:28px;place-items:center;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;cursor:pointer;font-size:16px}
+.icon-link:hover{background:#1d3050;color:#bcd6f5}
 .up{color:#ef6a72}.down{color:#55b996}.flat{color:#d6dce6}
-.grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:12px}
-.panel{min-width:0;border:1px solid #2d3b54;border-radius:6px;background:#131e33;display:flex;flex-direction:column}
-.panel>header{display:flex;min-height:46px;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid #2d3b54}
-.panel>header>div{display:flex;flex-direction:column;gap:2px}
-.panel>header b{font-size:14px}
-.panel>header small{color:#8895ab;font-size:11px}
-.link-btn{flex:0 0 auto;padding:4px 10px;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;cursor:pointer;font-size:10px;white-space:nowrap}
+.panel{display:flex;min-width:0;flex-direction:column;border:1px solid #2d3b54;border-radius:6px;background:#131e33}
+.panel.positions,.panel.recommendations,.panel.hotspot{min-height:342px}
+.panel.basket{grid-column:1/-1}
+.panel.review{grid-column:1/-1}
+.panel>header{display:flex;min-height:54px;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid #2d3b54}
+.panel>header>div{display:flex;min-width:0;flex-direction:column;gap:2px}
+.panel>header b{font-size:14px}.panel>header small{color:#8895ab;font-size:11px;line-height:1.35}
+.link-btn{flex:0 0 auto;padding:4px 8px;border:1px solid #3d5680;border-radius:3px;background:#16233b;color:#8fb4e3;cursor:pointer;font-size:10px;white-space:nowrap}
 .link-btn:hover{background:#1d3050;color:#bcd6f5}
-.empty{padding:24px;color:#75839a;font-size:12px;text-align:center}
-.rows{display:grid}
-.row{display:grid;grid-template-columns:84px minmax(120px,1.4fr) 88px 88px 88px;gap:10px;align-items:center;padding:9px 14px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}
-.row:hover{background:#182338}
-.row:last-child{border-bottom:0}
-.row .status{justify-self:start;padding:2px 6px;background:#25334b;font-size:10px}
-.row .status.holding{background:#34272d;color:#ef8b91}
-.row .status.pending_entry{background:#3d3423;color:#e9c16c}
-.row .name b{display:block;font-size:12px}
-.row .name small{display:block;margin-top:2px;color:#8895ab;font-size:10px}
-.row .num>small{display:block;margin-bottom:2px;color:#71809a;font-size:9px}
-.row .num{font-size:12px;font-variant-numeric:tabular-nums}
-.row>strong{text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
-.hot-list{display:grid;gap:0}
-.hot-list li{padding:10px 14px;border-bottom:1px solid #202c42}
-.hot-list li:last-child{border-bottom:0}
+.empty{margin:auto 0;padding:24px;color:#75839a;font-size:12px;text-align:center}
+.compact-rows{display:grid}
+.compact-row{display:grid;min-height:56px;grid-template-columns:minmax(0,1.2fr) minmax(92px,.9fr) 66px;gap:8px;align-items:center;padding:8px 12px;border:0;border-bottom:1px solid #202c42;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}
+.compact-row:hover{background:#182338}.compact-row:last-child{border-bottom:0}
+.compact-name,.compact-price{min-width:0}.compact-name b{display:block;overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.compact-name small,.compact-price small{display:block;margin-top:3px;color:#7f8ca2;font-size:9px}
+.compact-price{font-size:11px;font-variant-numeric:tabular-nums;line-height:1.35}.compact-row>strong{text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+.hot-list{display:grid;margin:0;padding:0;list-style:none}.hot-list li{min-height:56px;padding:9px 12px;border-bottom:1px solid #202c42}.hot-list li:last-child{border-bottom:0}
 .hot-list button{display:flex;width:100%;align-items:center;justify-content:space-between;gap:10px;padding:0;border:0;background:transparent;color:#e7ecf4;text-align:left;cursor:pointer}
-.hot-name b{display:block;font-size:13px}
-.hot-name small{display:block;margin-top:2px;color:#8895ab;font-size:10px}
-.hot-stat{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
-.hot-list p{margin:6px 0 0;color:#9ba8bd;font-size:11px;line-height:1.4}
-.review-body{padding:12px 14px;display:grid;gap:10px}
-.review-body ul{margin:0;padding-left:18px;color:#b4bece;font-size:12px;line-height:1.5}
-.review-body .tags{display:flex;flex-wrap:wrap;gap:5px}
-.review-body .tags i{padding:2px 7px;background:#1f2c43;border-radius:3px;color:#cad5e7;font-size:10px;font-style:normal}
-.review-body .phase{margin:0;color:#8895ab;font-size:11px}
-.review-body .phase b{color:#e9c16c}
-.review-body .phase b.down{color:#55b996}
-.review-body .phase b.up{color:#ef6a72}
-.risk-body{padding:14px;display:grid;gap:10px}
-.sentiment-bar{position:relative;height:10px;border-radius:5px;background:linear-gradient(90deg,#28755d 0%,#55b996 20%,#e9c16c 44%,#df9462 56%,#ef6a72 80%,#ef6a72 100%);overflow:visible}
-.sentiment-bar>span{position:absolute;top:-3px;width:4px;height:16px;background:#f5f7fb;border-radius:2px;transform:translateX(-2px);box-shadow:0 0 0 2px #131e33}
-.risk-score,.risk-factors{margin:0;color:#b4bece;font-size:12px;line-height:1.5}
-.risk-score b{color:#e7ecf4;font-size:18px;font-weight:700;margin:0 4px}
-.risk-score em{color:#e9c16c;font-style:normal;font-weight:600}
-.risk-factors b{color:#e7ecf4;margin:0 2px;font-variant-numeric:tabular-nums;font-weight:500}
-.chart-wrap{width:100%;height:220px;padding:6px 10px 4px;overflow:hidden}
-.chart-wrap svg{display:block;width:100%;height:100%}
-.grid line{stroke:#212d42;stroke-width:1}
-.grid text{fill:#6b7b94;font-size:9px;text-anchor:end;font-variant-numeric:tabular-nums}
-.area.gain{fill:#d95561;opacity:.18}
-.area.loss{fill:#35a37d;opacity:.18}
-.line{fill:none;stroke-width:2;vector-effect:non-scaling-stroke}
-.line.gain{stroke:#f2606d}
-.line.loss{stroke:#2eb98a}
-.zero{stroke:#7286a3;stroke-width:1;stroke-dasharray:4 4}
-.pt.gain{fill:#f2606d;stroke:#131e33;stroke-width:1}
-.pt.loss{fill:#2eb98a;stroke:#131e33;stroke-width:1}
-.axis{fill:#71809a;font-size:10px;text-anchor:middle}
+.hot-name{min-width:0}.hot-name b{display:block;overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.hot-name small{display:block;margin-top:2px;color:#8895ab;font-size:9px}.hot-stat{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+.hot-list p{display:-webkit-box;margin:5px 0 0;overflow:hidden;color:#9ba8bd;font-size:10px;line-height:1.35;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.review-body{display:grid;gap:10px;padding:12px 14px}.review-body ul{margin:0;padding-left:18px;color:#b4bece;font-size:12px;line-height:1.5}.review-body .tags{display:flex;flex-wrap:wrap;gap:5px}.review-body .tags i{padding:2px 7px;border-radius:3px;background:#1f2c43;color:#cad5e7;font-size:10px;font-style:normal}.review-body .phase{margin:0;color:#8895ab;font-size:11px}.review-body .phase b{color:#e9c16c}.review-body .phase b.down{color:#55b996}.review-body .phase b.up{color:#ef6a72}
+.sentiment-bar{position:relative;height:9px;border-radius:5px;background:linear-gradient(90deg,#28755d 0%,#55b996 25%,#e9c16c 50%,#df9462 75%,#ef6a72 100%)}
+.sentiment-bar>span{position:absolute;top:-3px;width:4px;height:15px;border-radius:2px;background:#f5f7fb;box-shadow:0 0 0 2px #131e33;transform:translateX(-2px)}
+.chart-wrap{width:100%;height:240px;padding:6px 10px 4px;overflow:hidden}.chart-wrap svg{display:block;width:100%;height:100%}
+.grid line{stroke:#212d42;stroke-width:1}.grid text{fill:#6b7b94;font-size:9px;text-anchor:end;font-variant-numeric:tabular-nums}.area.gain{fill:#d95561;opacity:.18}.area.loss{fill:#35a37d;opacity:.18}.line{fill:none;stroke-width:2;vector-effect:non-scaling-stroke}.line.gain{stroke:#f2606d}.line.loss{stroke:#2eb98a}.zero{stroke:#7286a3;stroke-width:1;stroke-dasharray:4 4}.pt.gain{fill:#f2606d;stroke:#131e33;stroke-width:1}.pt.loss{fill:#2eb98a;stroke:#131e33;stroke-width:1}.axis{fill:#71809a;font-size:10px;text-anchor:middle}
 .state-error{margin:8px 0 0;color:#ef7d84;font-size:12px}
 @media(max-width:960px){
-  .grid{grid-template-columns:1fr}
-  .row{grid-template-columns:72px minmax(0,1fr) 80px 80px 80px}
-  .hero{grid-template-columns:1fr}
+  .hero,.grid{grid-template-columns:1fr}
+  .panel.basket,.panel.review{grid-column:auto}
+  .panel.positions,.panel.recommendations,.panel.hotspot{min-height:0}
   .hero-card{min-height:120px;padding:18px}
-  .hero-card strong{font-size:clamp(24px,9vw,38px)}
+  .hero-card>strong{font-size:32px}
+}
+@media(max-width:560px){
+  .home-overview{padding:12px}
+  .panel>header{align-items:flex-start}
+  .compact-row{grid-template-columns:minmax(0,1fr) 72px 58px;padding:8px 10px}
+  .compact-price{font-size:10px}
 }
 </style>
