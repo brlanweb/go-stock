@@ -4,6 +4,7 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -79,14 +80,34 @@ A股本地数据分析服务，所有工具的 arguments 必须是 JSON 对象�
 }
 
 // authMiddleware Bearer Token 鉴权。
+// 使用常量时间比较，避免 Token 被时序侧信道逐字节猜解。
 func authMiddleware(next http.Handler, token string) http.Handler {
+	expected := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+token {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		got := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(got, expected) != 1 {
+			writeUnauthorized(w)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// writeUnauthorized 以 JSON-RPC 错误体返回 401。
+// 原实现用 http.Error 发送 JSON 字符串，但 Content-Type 被写成 text/plain，
+// MCP 客户端无法解析，只能显示为笼统的“无返回结果”，掩盖了真实的鉴权失败原因。
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("WWW-Authenticate", `Bearer realm="go-stock mcp"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      nil,
+		"error": map[string]interface{}{
+			"code":    -32001,
+			"message": "unauthorized: 缺少或错误的 MCP Bearer Token，请核对客户端 Authorization 头与服务端 GOSTOCK_MCP_TOKEN 是否一致",
+		},
 	})
 }
 
@@ -121,15 +142,30 @@ func registerTools(s *server.MCPServer, d Deps) {
 		mcp.WithDescription("批量获取A股/ETF最近一次本地行情快照（最多100只，不访问外部行情源）"),
 		mcp.WithString("symbols", mcp.Required(), mcp.Description("逗号分隔的代码列表，如 600519,000001,510300")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		codes := strings.Split(req.GetString("symbols", ""), ",")
-		if len(codes) > 100 {
-			return mcp.NewToolResultError("单次最多100只"), nil
+		raw := strings.TrimSpace(req.GetString("symbols", ""))
+		if raw == "" {
+			return mcp.NewToolResultError("symbols 不能为空，请传入逗号分隔的代码列表"), nil
 		}
+		codes := strings.Split(raw, ",")
 		symbols := make([]string, 0, len(codes))
+		seen := make(map[string]struct{}, len(codes))
 		for _, code := range codes {
-			if symbol := model.NormalizeSymbol(code); symbol != "" {
-				symbols = append(symbols, symbol)
+			symbol := model.NormalizeSymbol(code)
+			if symbol == "" {
+				continue
 			}
+			if _, dup := seen[symbol]; dup {
+				continue
+			}
+			seen[symbol] = struct{}{}
+			symbols = append(symbols, symbol)
+		}
+		if len(symbols) == 0 {
+			return mcp.NewToolResultError("没有可识别的代码"), nil
+		}
+		// 按去重后的有效代码判上限，避免空串或重复项挤占额度
+		if len(symbols) > 100 {
+			return mcp.NewToolResultError("单次最多100只"), nil
 		}
 		quotes, err := d.St.LatestQuotes(ctx, symbols)
 		if err != nil {
@@ -256,14 +292,20 @@ func registerTools(s *server.MCPServer, d Deps) {
 		mcp.WithString("symbol", mcp.Required(), mcp.Description("股票代码")),
 		mcp.WithString("mode", mcp.Description("latest/missing/full，默认latest")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// 与其余工具保持一致做代码规范化，否则 SH601208 / 601208.SH 等写法会被原样下发同步引擎
+		symbol := model.NormalizeSymbol(req.GetString("symbol", ""))
+		if symbol == "" {
+			return mcp.NewToolResultError("无法识别的代码"), nil
+		}
 		mode := req.GetString("mode", "latest")
 		if mode != "latest" && mode != "missing" && mode != "full" {
 			return mcp.NewToolResultError("mode 仅支持 latest、missing 或 full"), nil
 		}
-		if err := d.Eng.SyncStock(context.Background(), req.GetString("symbol", ""), mode); err != nil {
+		// 同步是异步任务，需独立上下文，不能随本次 MCP 请求结束被取消
+		if err := d.Eng.SyncStock(context.Background(), symbol, mode); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return jsonResult(map[string]string{"status": "stock sync started", "mode": mode})
+		return jsonResult(map[string]string{"status": "stock sync started", "symbol": symbol, "mode": mode})
 	})
 
 	// 10. get_sync_status
