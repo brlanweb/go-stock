@@ -47,6 +47,18 @@ const (
 	globalGateFXLightChgPct   = 0.5
 	globalGateRedScore        = -4
 	globalGateYellowScore     = -2
+
+	// globalGateMinFactors 是可感知风险所需的最少有效因子数。
+	//
+	// 2026-09 生产数据显示：vix 与 china_adr 长期 has_data=false，5 个因子
+	// 实际只有 3 个在工作。因子缺失会静默削弱负分累积能力——VIX 与金龙合计
+	// 可贡献 -4 分，恰好等于红灯阈值，两者失效意味着红灯几乎不可能触发。
+	// 旧守卫只在「A50 与美股同时缺失」时降档，掩盖了这类部分失效：
+	// 近 10 个交易日全部判定为 green，风险门形同虚设。
+	//
+	// 因此改为按有效因子数量守卫：少于 3 个有效因子时无法可靠感知隔夜风险，
+	// 一律保守降档，并在 Reason 中点名缺失因子，便于定位数据源故障。
+	globalGateMinFactors = 3
 )
 
 // GlobalRiskSignal 是单一外盘因子的判定事实。
@@ -175,10 +187,28 @@ func ClassifyGlobalRiskGate(tradeDate string, quotes []model.GlobalQuote) Global
 	}
 	gate.Signals, gate.Score = signals, total
 
-	// 核心数据缺失守卫：A50 与美股同时缺失时无法感知隔夜风险，保守降档。
+	// 数据完备性守卫（先于档位判定）：因子缺失会削弱负分累积能力，
+	// 让「无风险信号」与「感知不到风险」在结果上无法区分。
+	missing := make([]string, 0, len(signals))
+	available := 0
+	for _, signal := range signals {
+		if signal.HasData {
+			available++
+		} else {
+			missing = append(missing, signal.Name)
+		}
+	}
+	// 核心因子缺失：A50 与美股同时缺失时完全无法感知隔夜风险。
 	if !a50.HasData && !us.HasData {
 		gate.Level = MarketGateYellow
 		gate.Reason = "A50期指与美股行情均缺失，隔夜风险不可感知，保守降档"
+		return gate
+	}
+	// 有效因子不足：即便核心因子在，样本太少也不足以支撑绿灯结论。
+	if available < globalGateMinFactors {
+		gate.Level = MarketGateYellow
+		gate.Reason = fmt.Sprintf("仅%d/%d个外盘因子有数据（缺失：%s），隔夜风险感知不完整，保守降档",
+			available, len(signals), strings.Join(missing, "、"))
 		return gate
 	}
 
@@ -195,6 +225,10 @@ func ClassifyGlobalRiskGate(tradeDate string, quotes []model.GlobalQuote) Global
 			gate.Reason = "隔夜外盘整体平稳（" + strings.Join(reasons, "；") + "）"
 		} else {
 			gate.Reason = "隔夜外盘无风险信号"
+		}
+		// 绿灯但存在缺失因子时如实披露：避免「感知范围不全」被读成「确认安全」。
+		if len(missing) > 0 {
+			gate.Reason += fmt.Sprintf("；注意：%s无数据，风险感知范围不完整", strings.Join(missing, "、"))
 		}
 	}
 	return gate

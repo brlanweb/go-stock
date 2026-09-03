@@ -19,9 +19,16 @@ func TestRecommendationOverextendedByGain5(t *testing.T) {
 		}
 		return klines
 	}
-	// 近 5 日涨 30% 超过 25% 硬上限 → 剔除
+	// 近 5 日涨 30% 远超硬上限 → 剔除
 	if !recommendationOverextended(build(0.30)) {
 		t.Fatal("gain5=30% must be filtered as overextended")
+	}
+	// 近 5 日涨 20%：旧 25% 阈值下会被放行，收紧到 15% 后必须剔除。
+	// 该区间正是 2026-09 复盘中追高候选最密集的地带（实际推荐股推荐前
+	// 5 日平均涨幅 11.23%，全市场中位数仅 1.92%）。
+	// 此构造下 MA5 乖离约 7.1% 未触发乖离规则，可隔离验证 gain5 阈值。
+	if !recommendationOverextended(build(0.20)) {
+		t.Fatal("gain5=20% must be filtered after tightening threshold to 15%")
 	}
 	// 近 5 日涨 10% → 保留
 	if recommendationOverextended(build(0.10)) {

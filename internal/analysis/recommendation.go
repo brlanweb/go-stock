@@ -233,16 +233,17 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 	if analysisDate == "" || analysisDate < previousTradingDay(now).Format("2006-01-02") {
 		return fmt.Errorf("最近收盘日 K 尚未就绪: latest=%s", analysisDate)
 	}
-	// 最近复盘仍提供市场阶段与策略优化指令，但个股 risk_score 不再参与候选过滤、
-	// 排序或 AI 选举，只随结果展示给用户自行判断。
+	// 最近复盘提供市场阶段与策略优化指令。个股 risk_score 已在 store 层完成
+	// 硬否决（>= RecommendationProductionMaxRisk 剔除），此处不再重复过滤。
 	guidance, guidanceErr := s.st.LatestReviewGuidanceForRecommendation(ctx, analysisDate)
 	if guidanceErr != nil {
 		slog.Warn("读取每日复盘优化指令失败，本次按基础规则推荐", "err", guidanceErr)
 		guidance = store.LatestReviewGuidance{}
 	}
-	// 风险指标尚不完善：指数风向门（含全球风险门）不再拥有跳过当日推荐的权限。
-	// red/yellow 只作为市场警示注入提示词供 AI 客观说明，风险由用户自行判断；
-	// 不能因 risk_score 或风向档位过滤、降权候选。红灯仍保留持仓防御模式（entry/risk 层）。
+	// 指数风向门（含全球风险门）：red 表示系统性风险高，此时推荐数量收紧到
+	// 最多 1 只且允许交白卷（见下方 maxPicks），yellow 收紧到 2 只。
+	// 2026-09 复盘结论：此前 red/yellow 只注入提示词、不改变行为，导致
+	// 2026-09-02 这类全市场 76% 下跌日仍被强制推出 3 只。
 	gate, gateErr := s.st.MarketDirectionGate(ctx, analysisDate)
 	if gateErr != nil {
 		slog.Warn("计算指数风向门失败，按黄灯保守处理", "err", gateErr)
@@ -258,9 +259,11 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		gate.Level = merged
 		slog.Info("全球风险门收紧风向档位", "level", gate.Level, "global_score", globalGate.Score)
 	}
+	// maxPicks 按风向档位收紧当日推荐上限。AI 可以在上限内自由选择更少，
+	// 包括一只都不选（空仓）——市场没有值得参与的机会时交白卷是正确输出。
+	maxPicks := recommendationMaxPicks(gate.Level)
 	if gate.Level == store.MarketGateRed {
-		// 风险指标尚不完善，红灯不再跳过当日推荐，仅记录并在提示词中强警示。
-		slog.Warn("风险感知红灯，仍继续生成当日推荐，仅注入强警示", "reason", gate.Reason)
+		slog.Warn("风险感知红灯，当日推荐上限收紧", "reason", gate.Reason, "max_picks", maxPicks)
 	}
 	// 候选池优先复用当日热点漏斗 final 报告（08:00 先于推荐运行）：漏斗已完成
 	// “数据筛选→AI 产业链分析→数据回验”，其卡点概念成分股即为热点候选；
@@ -283,28 +286,32 @@ func (s *Service) runDailyAt(ctx context.Context, now time.Time) error {
 		prompt = "你是严格受限的股票趋势评审器。候选股、热点题材、趋势评分和最近60个交易日OHLCV均来自本地数据库。评审目标是在趋势跟踪口径下选择结构最完整、可持续性最强的候选，不设固定持有天数，也不得承诺收益。"
 	}
 	if gate.Level == store.MarketGateYellow {
-		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：请在推荐理由中客观说明市场环境，但不得依据候选 risk_score 排除、降权或改变排名。"
+		prompt += "\n当前指数风向为黄灯（" + gate.Reason + "）：市场环境偏弱，本次最多只能选 2 只，且必须在推荐理由中客观说明市场环境。若候选中没有结构足够扎实的标的，返回空列表比凑数更好。"
 	}
 	if gate.Level == store.MarketGateRed {
-		prompt += "\n当前指数风向为红灯（" + gate.Reason + "）：市场系统性风险较高，请在推荐理由中明确提示该风险，但仍必须正常完成3只推荐，不得依据候选 risk_score 或风向档位排除、降权或改变排名，风险由用户自行判断。"
+		prompt += "\n当前指数风向为红灯（" + gate.Reason + "）：市场系统性风险高，本次最多只能选 1 只，且只有在该标的趋势结构显著强于大盘、建仓空间充足时才可给出。默认应当返回空列表（不推荐任何标的），这是红灯环境下的正确输出，不是失败。"
 	}
 	if guidance.ReviewDate != "" {
 		guidanceJSON, _ := json.Marshal(guidance)
 		prompt += "\n以下是最近一次收盘复盘生成的结构化优化指令：" + string(guidanceJSON) +
-			"。directives 只能在不涉及 risk_score 的前提下调整趋势、板块强度、龙头地位与建仓空间判断；risk_controls 不得用于候选剔除、降权或排名。market_phase 只作为市场背景写入理由，不改变个股风险分的展示口径。"
+			"。directives 用于调整趋势、板块强度、龙头地位与建仓空间的判断口径；market_phase 作为市场背景写入理由。高风险候选已在候选池构建阶段按确定性风险分完成剔除，你收到的候选均已通过风险闸门。"
 	}
-	prompt += fmt.Sprintf(` 只能从用户提供的%d只候选中选择，必须恰好选3只并按建仓机会排序，代码不得重复。选举顺序必须是：
+	prompt += fmt.Sprintf(` 只能从用户提供的%d只候选中选择，最多选 %d 只并按建仓机会排序，代码不得重复。选举顺序必须是：
 1. 先比较 sector_heat、题材持续性和板块趋势，锁定当前最强且具备持续性的板块；
 2. 再在强板块内优先选择 leader_rank 靠前、成交活跃、趋势结构完整的龙头；
 3. 最后确认龙头仍有合理建仓空间，避免昨日接近涨停、短线严重过热等既有禁入形态。
-risk_score 仅用于最终页面展示，禁止用它剔除候选、降低排序、打分或否决推荐，风险由用户自行判断。候选覆盖多个强板块时应兼顾分散，3只不得全部来自同一板块；sector 必须逐字使用候选的 industry 字段，reason 不超过80字，并明确写出“强板块+龙头地位+建仓机会”的核心依据。`, len(candidates))
+
+宁缺毋滥：没有达到标准的候选一律不要选。返回少于 %d 只、甚至返回空列表 {"recommendations":[]}，都是完全合法且被鼓励的输出。不要为了凑满数量而降低标准——凑数推荐造成的亏损远大于错过机会的代价。只有当你能明确写出"强板块+龙头地位+建仓机会"三项依据时，才可以给出该标的。
+
+候选覆盖多个强板块且你选择 2 只以上时应兼顾分散，不得全部来自同一板块；sector 必须逐字使用候选的 industry 字段，reason 不超过80字。
+probability 字段是 0-100 的相对机会分，用于表达候选之间的相对强弱排序，不是胜率、不是统计概率，也不得解读为收益预期。`, len(candidates), maxPicks, maxPicks)
 	request := map[string]interface{}{
 		"model":           s.config.Model,
 		"temperature":     0.2,
 		"response_format": map[string]string{"type": "json_object"},
 		"messages": []map[string]string{
 			{"role": "system", "content": prompt + ` 返回严格JSON：{"recommendations":[{"symbol":"SH600000","probability":72.5,"reason":"不超过80字","sector":"候选industry字段原值"}]}`},
-			{"role": "user", "content": fmt.Sprintf("以下是唯一允许评审的%d只候选股。每只均包含热点题材、确定性趋势评分及最近60个交易日OHLCV；请只返回其中3只。\n", len(candidates)) + string(payload)},
+			{"role": "user", "content": fmt.Sprintf("以下是唯一允许评审的%d只候选股。每只均包含热点题材、确定性趋势评分及最近60个交易日OHLCV；请返回其中最多%d只，达不到标准时返回空列表。\n", len(candidates), maxPicks) + string(payload)},
 		},
 	}
 	body, _ := json.Marshal(request)
@@ -343,8 +350,10 @@ risk_score 仅用于最终页面展示，禁止用它剔除候选、降低排序
 	if err := json.Unmarshal([]byte(envelope.Choices[0].Message.Content), &result); err != nil {
 		return fmt.Errorf("AI recommendation JSON: %w", err)
 	}
-	if len(result.Recommendations) != 3 {
-		return fmt.Errorf("AI recommendation count=%d", len(result.Recommendations))
+	// 允许 0..maxPicks 只：空列表是「今日无值得参与的机会」的合法结论，
+	// 超出上限才是违规输出。
+	if len(result.Recommendations) > maxPicks {
+		return fmt.Errorf("AI recommendation count=%d exceeds max=%d (gate=%s)", len(result.Recommendations), maxPicks, gate.Level)
 	}
 	allowed := make(map[string]store.RecommendationCandidate, len(candidates))
 	for _, candidate := range candidates {
@@ -376,27 +385,60 @@ risk_score 仅用于最终页面展示，禁止用它剔除候选、降低排序
 		}
 	}
 	// 板块分散硬约束：单一题材熄火会拖累趋势组合，候选池覆盖 ≥2 个板块时
-	// 不允许 3 只全部同板块；候选池本身只有一个板块时无法满足，放行。
+	// 不允许多只推荐全部同板块；候选池本身只有一个板块时无法满足，放行。
+	// 仅在推荐数 ≥2 时校验：0 只（空仓）与 1 只不存在分散问题。
 	candidateSectors := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
 		candidateSectors[candidate.Industry] = true
 	}
-	if len(candidateSectors) >= 2 {
-		pickSectors := make(map[string]bool, 3)
+	if len(result.Recommendations) >= 2 && len(candidateSectors) >= 2 {
+		pickSectors := make(map[string]bool, len(result.Recommendations))
 		for _, item := range result.Recommendations {
 			pickSectors[item.Sector] = true
 		}
 		if len(pickSectors) < 2 {
-			return fmt.Errorf("AI returned 3 picks from single sector: %s", result.Recommendations[0].Sector)
+			return fmt.Errorf("AI returned %d picks from single sector: %s", len(result.Recommendations), result.Recommendations[0].Sector)
 		}
 	}
 	if err := s.st.ReplaceRecommendations(ctx, analysisDate, s.config.Model, result.Recommendations); err != nil {
 		return err
 	}
-	// AI 只负责生成三只推荐。加入自选、建仓和平仓都必须由用户主动操作，
+	// 运行留痕必须落库：它是「最近推荐日」的权威来源，空仓日没有推荐行，
+	// 缺失留痕会让前端回退展示上一个交易日的旧推荐。
+	if err := s.st.SaveRecommendationRun(ctx, store.RecommendationRun{
+		AnalysisDate:   analysisDate,
+		GateLevel:      gate.Level,
+		GateReason:     gate.Reason,
+		MaxPicks:       maxPicks,
+		PickCount:      len(result.Recommendations),
+		CandidateCount: len(candidates),
+		ModelName:      s.config.Model,
+	}); err != nil {
+		return fmt.Errorf("保存推荐运行留痕失败: %w", err)
+	}
+	if len(result.Recommendations) == 0 {
+		// 空仓日：明确留痕，便于复盘统计「主动不参与」的天数与后续市场表现。
+		slog.Info("AI 判定当日无值得参与的机会，返回空推荐（空仓）", "date", analysisDate, "gate", gate.Level, "candidates", len(candidates))
+		return nil
+	}
+	// AI 只负责生成推荐。加入自选、建仓和平仓都必须由用户主动操作，
 	// 风险门和历史配置不再拥有改变持仓或自选的权限。
-	slog.Info("AI 推荐已生成，仅供用户选择加入自选", "date", analysisDate, "picks", len(result.Recommendations), "gate", gate.Level)
+	slog.Info("AI 推荐已生成，仅供用户选择加入自选", "date", analysisDate, "picks", len(result.Recommendations), "max_picks", maxPicks, "gate", gate.Level)
 	return nil
+}
+
+// recommendationMaxPicks 按指数风向档位给出当日推荐数量上限。
+// 这是「空仓权」的核心：市场越弱允许推的越少，AI 始终可以在上限内选更少
+// 甚至不选。绿灯 3 只 / 黄灯 2 只 / 红灯 1 只，任何档位都允许 0 只。
+func recommendationMaxPicks(level string) int {
+	switch level {
+	case store.MarketGateRed:
+		return 1
+	case store.MarketGateYellow:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // AutoEntryEnabled 固定返回 false：AI 永不自动建仓。

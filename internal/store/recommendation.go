@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -20,8 +21,19 @@ const (
 	// 说明当日可选机会太少，跳过本次推荐而不是强行凑 3 只。
 	RecommendationCandidateMin = 5
 
-	// 以下阈值仅保留给历史回测对照，不参与生产推荐。生产链路中的 RiskScore
-	// 只计算、落库和展示，不用于候选剔除、排序或 AI 选举。
+	// RecommendationProductionMaxRisk 是生产链路的风险硬否决线：确定性风险分
+	// ≥ 该值的候选在进入 AI 评审前直接剔除，不参与任何排序权衡。
+	//
+	// 该规则是 2026-09 复盘的结论。此前设计把 RiskScore 降级为「仅展示」，
+	// 禁止其参与筛选与否决，导致系统能识别风险却无权规避：2026-09-02 三只
+	// 推荐 risk 分别为 86/71/57、理由中均写明「指数红灯，系统性风险高」，
+	// 仍被强制推出。75 天全量复盘显示 risk>=70 分桶是唯一负超额分桶
+	// （5 日超额 -0.19%）。风险分回归为硬闸门，而非排序维度：
+	// 排序仍由趋势/龙头决定（见 recommendationCandidateSortScore），
+	// 风险只做二值否决，避免高风险候选靠高趋势分把自己"补回来"。
+	RecommendationProductionMaxRisk = 75.0
+
+	// 以下阈值仅保留给历史回测对照与旧接口兼容，不参与生产推荐链路。
 	recommendationBaseMaxRisk  = 70.0
 	recommendationMaxRiskUp    = 85.0
 	recommendationMaxRiskRange = 75.0
@@ -43,9 +55,32 @@ const (
 	// 短线追高硬过滤：趋势筛选要求 5/20/60 日收益全为正，天然偏向已大涨的
 	// 候选；仅靠排序降权仍会让乖离极大的候选进入推荐（计分买入价是次日开盘，
 	// 追高候选高开低走损耗最大）。以下两条为硬剔除，不参与排序权衡：
-	//   - 近 5 日涨幅超过 25%（原 35% 才在风险分中记满，且只降权不剔除）；
+	//   - 近 5 日涨幅超过 15%；
 	//   - 收盘价高于 MA5 超过 8%（短期乖离过大，均值回归风险高）。
-	recommendationHardOverheat5 = 0.25
+	//
+	// 阈值 2026-09 由 25% 收紧至 15%。触发动机：75 条推荐的全量复盘显示，
+	// 推荐股在推荐前 5 日平均已上涨 11.23%，而全市场同期中位数仅 1.92%
+	// （超出 9.31pct），存在系统性买在动量末端的倾向。
+	//
+	// 但必须如实记录：该阈值目前【没有收益层面的实证支持】。
+	// 对同一批样本做阈值敏感性分析（放行组相对全市场中位数的超额）：
+	//
+	//	阈值    放行/拦截   D+1      D+5      D+10
+	//	10%     49/26     -0.92    +0.09    +5.99
+	//	15%     57/18     -0.73    +0.13    +6.11
+	//	20%     61/14     -0.63    +0.35    +5.84
+	//	25%     66/ 9     -0.64    +0.15    +4.63
+	//	不过滤   75/ 0     -0.91    +0.80    +5.53
+	//
+	// D+5 口径下「不过滤」反而最优；按前 5 日涨幅分桶后，后续超额与涨幅
+	// 之间不存在单调关系（5-10% 桶 +3.14%，20-30% 桶 -2.26%，>50% 桶
+	// +8.58%），各桶样本仅 3~22 条，基本是噪声。
+	//
+	// 因此该值应理解为【波动/尾部风险控制】而非收益增强：它降低了单笔最大
+	// 回撤暴露，代价是拦掉约 24% 的候选（含数个大幅盈利样本）。
+	// 在完成覆盖完整下跌周期的回测前，不要把它当成已验证的收益规则，
+	// 也不要在缺乏新证据时进一步收紧。调整前请先跑回测与影子基线对照。
+	recommendationHardOverheat5 = 0.15
 	recommendationMaxBiasMA5    = 0.08
 
 	// 题材成分股规模闸门（与 HotspotCandidates 的 5~150 口径一致）：
@@ -243,9 +278,10 @@ func (s *Store) RecommendationCandidates(ctx context.Context) ([]RecommendationC
 }
 
 // rankRecommendationPool 是候选池的统一收口：只接受完整 60 根日 K 的证券，
-// 先按趋势筛选，再保留昨日涨停与短线追高过滤，最后按
-// “趋势分 × 过热惩罚 × 龙头加权”排序取前 10。RiskScore 始终保留原始分值，
-// 但不参与任何过滤或排序；风险判断完全交给用户。
+// 先按趋势筛选，再依次执行风险硬否决、昨日涨停与短线追高过滤，最后按
+// “趋势分 × 过热惩罚 × 龙头加权”排序取前 10。
+// RiskScore 保留原始分值随候选展示，同时作为二值硬闸门
+// （>= RecommendationProductionMaxRisk 直接剔除），但不参与排序打分。
 // 券商候选在此兜底剔除（SQL 层已过滤一次）。
 func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, pool []RecommendationCandidate) ([]RecommendationCandidate, error) {
 	leaderRanks := recommendationLeaderRanks(pool)
@@ -265,9 +301,13 @@ func (s *Store) rankRecommendationPool(ctx context.Context, tradeDate string, po
 			continue
 		}
 		risk, ok := recommendationRiskScore(klines)
-		// 风险分只用于展示。计算失败说明行情窗口不完整，仍按既有完整数据要求跳过；
-		// 分值再高也不得剔除或降低候选排序。
+		// 计算失败说明行情窗口不完整，按既有完整数据要求跳过。
 		if !ok {
+			continue
+		}
+		// 风险硬否决：高风险候选直接出局，不进入 AI 评审，也不做排序权衡。
+		// 风险分不参与排序（见 recommendationCandidateSortScore），只做二值闸门。
+		if risk >= RecommendationProductionMaxRisk {
 			continue
 		}
 		if recommendationGapRiskHigh(klines, candidate.Code) {
@@ -578,12 +618,58 @@ func (s *Store) ReplaceRecommendations(ctx context.Context, date, modelName stri
 	return tx.Commit()
 }
 
+// RecommendationRun 是一次推荐运行的留痕，PickCount=0 表示当日主动空仓。
+type RecommendationRun struct {
+	AnalysisDate   string `json:"analysis_date"`
+	GateLevel      string `json:"gate_level"`
+	GateReason     string `json:"gate_reason"`
+	MaxPicks       int    `json:"max_picks"`
+	PickCount      int    `json:"pick_count"`
+	CandidateCount int    `json:"candidate_count"`
+	ModelName      string `json:"model_name"`
+}
+
+// SaveRecommendationRun 记录当日推荐运行结果（含 0 只的空仓日）。
+// 必须在 ReplaceRecommendations 之后调用：它是「最近推荐日」的权威来源。
+func (s *Store) SaveRecommendationRun(ctx context.Context, run RecommendationRun) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO recommendation_run
+		(analysis_date,gate_level,gate_reason,max_picks,pick_count,candidate_count,model_name)
+		VALUES (?,?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE gate_level=VALUES(gate_level),gate_reason=VALUES(gate_reason),
+			max_picks=VALUES(max_picks),pick_count=VALUES(pick_count),
+			candidate_count=VALUES(candidate_count),model_name=VALUES(model_name)`,
+		run.AnalysisDate, run.GateLevel, run.GateReason, run.MaxPicks, run.PickCount, run.CandidateCount, run.ModelName)
+	return err
+}
+
+// LatestRecommendationRun 返回最近一次推荐运行留痕，无记录时返回 nil。
+// 前端据此区分「今日主动空仓」与「今日尚未运行」。
+func (s *Store) LatestRecommendationRun(ctx context.Context) (*RecommendationRun, error) {
+	var run RecommendationRun
+	err := s.DB.QueryRowContext(ctx, `SELECT DATE_FORMAT(analysis_date,'%Y-%m-%d'),gate_level,gate_reason,max_picks,pick_count,candidate_count,model_name
+		FROM recommendation_run ORDER BY analysis_date DESC LIMIT 1`).
+		Scan(&run.AnalysisDate, &run.GateLevel, &run.GateReason, &run.MaxPicks, &run.PickCount, &run.CandidateCount, &run.ModelName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 func (s *Store) LatestRecommendations(ctx context.Context) ([]model.StockRecommendation, error) {
 	return s.RecommendationsByDate(ctx, "")
 }
 
 func (s *Store) RecommendationsByDate(ctx context.Context, date string) ([]model.StockRecommendation, error) {
-	where := "r.analysis_date=(SELECT MAX(analysis_date) FROM stock_recommendation)"
+	// 「最近推荐日」以 recommendation_run 为准，而不是 stock_recommendation
+	// 的 MAX(analysis_date)：空仓日在 stock_recommendation 中没有行，
+	// 用后者会静默回退到上一个有推荐的交易日，把旧推荐当成当日结论展示。
+	// recommendation_run 为空（迁移前的旧库）时回退到旧口径保持兼容。
+	where := `r.analysis_date=(SELECT COALESCE(
+		(SELECT MAX(analysis_date) FROM recommendation_run),
+		(SELECT MAX(analysis_date) FROM stock_recommendation)))`
 	var args []interface{}
 	if date != "" {
 		where = "r.analysis_date=?"
