@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // ReviewIndexFact 是复盘日最后一次本地指数快照。
@@ -63,6 +64,17 @@ type ReviewRecommendationFact struct {
 	BenchmarkPct *float64 `json:"benchmark_change_pct"`
 	// ExcessPct = ChangePct - BenchmarkPct，衡量相对大盘的选股贡献。
 	ExcessPct *float64 `json:"excess_change_pct"`
+	// MarketMedianPct 是全市场正常上市个股在同一窗口、同一口径（次日开盘→
+	// 窗口末日收盘）的收益中位数。
+	//
+	// 沪深300 是大盘股指数，而本策略选的是题材热点中小盘龙头，两者的可比性
+	// 很差：用沪深300 衡量会系统性歪曲选股贡献，进而污染复盘产出的 directives。
+	// 全市场中位数回答的是「同期随机买一只股票的收益」，才是这套策略真正的
+	// 机会成本基准。2026-09 复盘即以该口径发现 D+1/D+2/D+3 的负超额
+	// （-0.81% / -0.60% / -0.37%），而这一结论在指数口径下并不显现。
+	MarketMedianPct *float64 `json:"market_median_change_pct"`
+	// ExcessVsMarketPct = ChangePct - MarketMedianPct，相对全市场中位数的超额。
+	ExcessVsMarketPct *float64 `json:"excess_vs_market_pct"`
 }
 
 // ReviewHotspotFact 将盘前热点漏斗选中的概念与复盘日实际板块表现对齐。
@@ -292,9 +304,58 @@ func (s *Store) fillReviewBenchmark(ctx context.Context, fact *ReviewRecommendat
 			excess := *fact.ChangePct - benchmarkPct
 			fact.BenchmarkPct = &benchmarkPct
 			fact.ExcessPct = &excess
-			return nil
+			break
 		}
 	}
+	return s.fillReviewMarketMedian(ctx, fact, lastDate)
+}
+
+// fillReviewMarketMedian 计算全市场正常上市个股在同一窗口、同一口径下的收益
+// 中位数，作为「同期随机买一只」的机会成本基准。
+// 与个股完全同口径：分析日后首个交易日开盘买入 → lastDate 收盘。
+func (s *Store) fillReviewMarketMedian(ctx context.Context, fact *ReviewRecommendationFact, lastDate string) error {
+	if fact.ChangePct == nil || lastDate == "" {
+		return nil
+	}
+	// 全市场统一建仓日：分析日之后的首个交易日。
+	var entryDate string
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COALESCE(DATE_FORMAT(MIN(trade_date),'%Y-%m-%d'),'') FROM kline_daily WHERE trade_date>?`,
+		fact.Date).Scan(&entryDate); err != nil || entryDate == "" {
+		return err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT e.open, x.close
+		FROM kline_daily e
+		INNER JOIN kline_daily x ON x.symbol=e.symbol AND x.trade_date=?
+		INNER JOIN stock_basic b ON b.symbol=e.symbol
+		WHERE e.trade_date=? AND e.open>0 AND x.close>0
+		  AND b.status='listed' AND b.sec_type='stock'`, lastDate, entryDate)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	returns := make([]float64, 0, 6000)
+	for rows.Next() {
+		var open, close float64
+		if err := rows.Scan(&open, &close); err != nil {
+			return err
+		}
+		returns = append(returns, (close/open-1)*100)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(returns) == 0 {
+		return nil
+	}
+	sort.Float64s(returns)
+	median := returns[len(returns)/2]
+	if len(returns)%2 == 0 {
+		median = (returns[len(returns)/2-1] + returns[len(returns)/2]) / 2
+	}
+	excess := *fact.ChangePct - median
+	fact.MarketMedianPct = &median
+	fact.ExcessVsMarketPct = &excess
 	return nil
 }
 
