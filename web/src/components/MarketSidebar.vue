@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmtPct, type EntryAdvice, type Quote, type Recommendation, type SyncStatus, type WatchlistResponse } from '../api'
+import { api, fmtPct, type EntryAdvice, type Quote, type Recommendation, type RecommendationRun, type SyncStatus, type WatchlistResponse } from '../api'
 
 const props = withDefaults(defineProps<{
   market?: string
@@ -36,6 +36,10 @@ const watchlist = ref<Quote[]>([])
 const watchlistStatus = ref<WatchlistResponse['status']>('unavailable')
 const watchlistSymbols = ref<string[]>([])
 const dailyRecommendations = ref<Recommendation[]>([])
+// latestRun 用于区分「今日主动空仓」与「今日尚未运行」：两者推荐列表都为空，
+// 但前者是风险闸门生效后的正确结论。若一律显示“尚未生成”，用户会当成故障
+// 并自行补仓，闸门就白装了。
+const latestRun = ref<RecommendationRun | null>(null)
 const watchSignals = ref<Record<string, EntryAdvice>>({})
 const watchActionSymbol = ref('')
 const syncStatus = ref<SyncStatus | null>(null)
@@ -57,7 +61,25 @@ async function loadWatchlist() {
     watchlistStatus.value = 'unavailable'
     watchlist.value = []
   }
+  // 运行留痕独立失败不应影响自选列表渲染，因此单独 try。
+  try {
+    latestRun.value = (await api.recommendationStatus()).latest_run
+  } catch {
+    latestRun.value = null
+  }
 }
+
+// 空仓提示：仅当留痕存在、当日确实选了 0 只时才显示，避免把「尚未运行」
+// 或「历史留痕」误报成今日空仓。
+const emptyPickReason = computed(() => {
+  const run = latestRun.value
+  if (!run || run.pick_count > 0) return ''
+  const gate = run.gate_level === 'red' ? '红灯' : run.gate_level === 'yellow' ? '黄灯' : '绿灯'
+  return `${run.analysis_date} 主动空仓（${gate}｜上限 ${run.max_picks} 只）：${run.gate_reason || '候选未达建仓标准'}`
+})
+
+// 推荐数量上限随风向档位变化（绿 3 / 黄 2 / 红 1），不再写死 3。
+const pickCap = computed(() => latestRun.value?.max_picks ?? 3)
 
 function signalMeta(symbol: string) {
   const action = watchSignals.value[symbol]?.action
@@ -267,12 +289,13 @@ onUnmounted(() => {
     </div>
 
     <section class="sidebar-section recommendation-panel">
-      <header><strong>每日 AI 推荐</strong><small>{{ dailyRecommendations.length }}/3</small></header>
+      <header><strong>每日 AI 推荐</strong><small>{{ dailyRecommendations.length }}/{{ pickCap }}</small></header>
       <div v-for="item in dailyRecommendations" :key="item.symbol" class="side-stock-row recommendation-row">
-        <button class="stock-main" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em class="reco-scores"><i>机 {{ item.probability.toFixed(0) }}</i><i :class="(item.risk_score ?? 0) > 60 ? 'high' : (item.risk_score ?? 0) > 40 ? 'mid' : 'low'" title="风险分仅展示，不参与推荐选举">险 {{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</i></em></button>
+        <button class="stock-main" @click="openStock(item.symbol)"><span><b>{{ item.name }}</b><small>{{ item.code }}</small></span><em class="reco-scores"><i title="相对机会分，非胜率">机 {{ item.probability.toFixed(0) }}</i><i :class="(item.risk_score ?? 0) > 60 ? 'high' : (item.risk_score ?? 0) > 40 ? 'mid' : 'low'" title="确定性风险分，≥75 的候选已在盘前剔除">险 {{ item.risk_score == null ? '—' : item.risk_score.toFixed(0) }}</i></em></button>
         <button class="row-icon add" :disabled="watchlistSymbols.includes(item.symbol) || watchActionSymbol === item.symbol" :title="watchlistSymbols.includes(item.symbol) ? '已在自选' : '加入自选'" @click="addRecommended(item.symbol)">{{ watchlistSymbols.includes(item.symbol) ? '✓' : '+' }}</button>
       </div>
-      <p v-if="!dailyRecommendations.length">今日推荐尚未生成</p>
+      <p v-if="!dailyRecommendations.length && emptyPickReason" class="empty-pick">{{ emptyPickReason }}</p>
+      <p v-else-if="!dailyRecommendations.length">今日推荐尚未生成</p>
     </section>
 
     <section class="sidebar-section watch-panel">
@@ -310,6 +333,8 @@ onUnmounted(() => {
 .row-icon { width:25px; padding:0; border:1px solid #39455a; border-radius:0; background:#273348; color:#cbd4e1; font-size:16px; cursor:pointer; }.row-icon:hover { border-color:#71809a; background:#344159; }.row-icon:disabled { opacity:.45; cursor:default; }.row-icon.add { color:#55b996; }.row-icon.remove { color:#e48287; }
 .ai-signal { display:inline-grid; width:15px; height:15px; margin-left:2px; place-items:center; border:1px solid currentColor; font-size:9px; font-style:normal; line-height:1; vertical-align:1px; }.ai-signal.buy { color:#ef6a72; }.ai-signal.sell { color:#55b996; }.ai-signal.hold { color:#e9c16c; }
 .recommendation-panel { padding-bottom:8px; border-bottom:1px solid #354157; }
+/* 主动空仓是策略结论而非缺数据，用琥珀色与灰色的“尚未生成”区分开。 */
+.sidebar-section p.empty-pick { color:#d8a657; line-height:1.5; }
 .sidebar-section p { padding:6px 7px; color:#738197; font-size:10px; }.side-help { display:grid; gap:7px; margin-top:auto; padding:10px 7px 4px; border-top:1px solid #354157; color:#9ba8bd; font-size:11px; line-height:1.4; }.side-help strong { color:#e2e7ef; font-size:12px; }
 @media (max-width:900px) { .market-sidebar { display:grid; min-height:auto; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; border-right:0; border-bottom:1px solid #354157; overflow:visible; }.brand,.side-help,.side-stats,.sidebar-section { display:none; }.coverage-status { grid-column:1/-1; }.side-search { margin:0; padding:0; border:0; }.freshness { grid-column:1/-1; }
   /* 移动端非云图页：品牌/自选股/说明本就隐藏，此时只剩数据新鲜度一行，

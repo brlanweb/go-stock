@@ -844,8 +844,11 @@ func (s *Server) handleRecommendationShadowStats(w http.ResponseWriter, r *http.
 // handleRecommendationRiskPolicy 保留兼容字段供旧前端读取。
 // max_risk_score 固定为 100，表示风险分只展示、不设候选上限。
 func (s *Server) handleRecommendationRiskPolicy(w http.ResponseWriter, r *http.Request) {
+	// max_risk_score 必须与 store 层实际执行的硬否决线保持同源：此前固定回
+	// 100（"风险分只展示、不设上限"），在风险分恢复为硬闸门后会对外宣称一个
+	// 不存在的策略口径，误导前端与调用方。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"review_date": "", "market_phase": "", "max_risk_score": 100.0,
+		"review_date": "", "market_phase": "", "max_risk_score": store.RecommendationProductionMaxRisk,
 	})
 }
 
@@ -857,7 +860,24 @@ func (s *Server) handleRecommendationsStatus(w http.ResponseWriter, r *http.Requ
 		running = s.Analysis.Running()
 		lastError = s.Analysis.RecommendationLastError()
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "running": running, "last_error": lastError})
+	// latest_run 让前端能区分「今日主动空仓」与「今日尚未运行」。
+	// 二者在 /recommendations 下都表现为空列表，但含义相反：前者是风险闸门
+	// 生效后的正确结论，后者是任务未执行。缺少该字段时前端只能一律显示
+	// “尚未生成”，会把主动空仓误报成故障，用户据此自行补仓将抵消闸门作用。
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	var latestRun interface{}
+	if run, err := s.St.LatestRecommendationRun(ctx); err != nil {
+		slog.Warn("读取推荐运行留痕失败", "err", err)
+	} else if run != nil {
+		latestRun = run
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled":    enabled,
+		"running":    running,
+		"last_error": lastError,
+		"latest_run": latestRun,
+	})
 }
 
 // handleRecommendationsRun 异步触发 AI 推荐：AI 主请求可能耗时数分钟，

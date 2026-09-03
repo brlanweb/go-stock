@@ -341,11 +341,25 @@ export interface RecommendationShadowStats {
   day_win_rate: number | null
 }
 
-// 兼容字段：max_risk_score 固定为 100，表示风险分只展示、不设推荐上限。
+// max_risk_score 是候选池的风险硬否决线（当前 75）：确定性风险分达到该值的
+// 候选在盘前直接剔除，不进入 AI 评审。
 export interface RecommendationRiskPolicy {
   review_date: string
   market_phase: string
   max_risk_score: number
+}
+
+// RecommendationRun 是一次推荐运行的留痕。pick_count=0 表示当日主动空仓
+// （风险闸门生效后的正确结论），与「今日尚未运行」是两回事——后者表现为
+// latest_run 为 null。
+export interface RecommendationRun {
+  analysis_date: string
+  gate_level: string
+  gate_reason: string
+  max_picks: number
+  pick_count: number
+  candidate_count: number
+  model_name: string
 }
 
 export interface RecommendationPerformance {
@@ -810,7 +824,10 @@ export const api = {
   strategyScorecard: (days = 60, phase: StrategyScorecard['phase'] = 'all') => req<StrategyScorecard>(`/recommendations/scorecard?days=${days}&phase=${phase}`),
   strategyParams: () => req<StrategyParamsResponse>('/recommendations/scorecard/params'),
   positionReviews: (limit = 30) => req<{ items: PositionReview[] }>(`/recommendations/position-reviews?limit=${limit}`),
-  recommendationStatus: () => req<{ enabled: boolean; running: boolean; last_error: string }>('/recommendations/status'),
+  recommendationStatus: () =>
+    req<{ enabled: boolean; running: boolean; last_error: string; latest_run: RecommendationRun | null }>(
+      '/recommendations/status',
+    ),
   runRecommendations: () => req<{ status: string }>('/recommendations/run', { method: 'POST' }),
   recommendationMonteCarlo: (code: string, days = 10) => req<MonteCarloResult>(`/recommendations/montecarlo/${encodeURIComponent(code)}?days=${days}`),
   entryAdvice: (date = '') => req<EntryAdviceResponse>(`/entry/advice${date ? `?date=${encodeURIComponent(date)}` : ''}`),

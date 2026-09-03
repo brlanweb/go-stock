@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, fmt, fmtPct, pctClass, type EntryAdvice, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationStats, type TradeAccount, type TradeOrder, type WatchlistResponse } from '../api'
+import { api, fmt, fmtPct, pctClass, type EntryAdvice, type EntryAdviceResponse, type MonteCarloResult, type Position, type Recommendation, type RecommendationRun, type RecommendationStats, type TradeAccount, type TradeOrder, type WatchlistResponse } from '../api'
 
 const router = useRouter()
 const dates = ref<string[]>([])
@@ -10,6 +10,17 @@ const items = ref<Recommendation[]>([])
 const loading = ref(false)
 const message = ref('')
 const running = ref(false)
+// latestRun 用于把「主动空仓」与「尚未运行/无数据」区分开。仅对最近一次运行
+// 的日期有效，浏览更早的历史日期时不适用。
+const latestRun = ref<RecommendationRun | null>(null)
+
+const emptyPickReason = computed(() => {
+  const run = latestRun.value
+  if (!run || run.pick_count > 0) return ''
+  if (activeDate.value && activeDate.value !== run.analysis_date) return ''
+  const gate = run.gate_level === 'red' ? '红灯' : run.gate_level === 'yellow' ? '黄灯' : '绿灯'
+  return `${run.analysis_date} 主动空仓：风向${gate}，当日上限 ${run.max_picks} 只，${run.candidate_count} 只候选中无一达到建仓标准。${run.gate_reason || ''}`
+})
 const stats = ref<RecommendationStats | null>(null)
 
 // 自选股 AI 分析（交易时段每小时，AI 只给建议）
@@ -207,6 +218,7 @@ async function pollRunStatus() {
     window.clearInterval(pollTimer)
     pollTimer = undefined
     running.value = false
+    latestRun.value = status.latest_run
     message.value = status.last_error ? `生成失败：${status.last_error}` : '生成完成'
     await refreshDates()
   } catch { /* 下一轮继续 */ }
@@ -245,6 +257,7 @@ onMounted(async () => {
   await loadEntryAdvice()
   // 页面加载时若已有推荐任务在执行（如刷新页面），继续轮询直至完成。
   const status = await api.recommendationStatus().catch(() => null)
+  latestRun.value = status?.latest_run ?? null
   if (status?.running) {
     running.value = true
     message.value = '正在生成推荐…'
@@ -353,7 +366,7 @@ onMounted(async () => {
         <section class="reco-table">
           <div v-if="loading" class="empty">加载中…</div>
           <template v-else-if="items.length">
-            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓价</span><span>当前/退出价</span><span>涨跌幅</span><span>动量分</span><span>风险分<small>仅展示</small></span><span>核心依据</span><span>板块</span><span>模拟</span></div>
+            <div class="reco-row head"><span>排名</span><span>股票</span><span>建仓价</span><span>当前/退出价</span><span>涨跌幅</span><span title="0-100 的相对机会分，只表达候选间的相对强弱排序，不是胜率或收益预期">机会分<small>非概率</small></span><span title="确定性风险分，≥75 的候选已在盘前直接剔除，不进入 AI 评审">风险分<small>&lt;75</small></span><span>核心依据</span><span>板块</span><span>模拟</span></div>
             <template v-for="item in items" :key="item.symbol">
               <button class="reco-row" @click="openStock(item.symbol)">
                 <span class="rank">{{ item.rank }}</span>
@@ -393,8 +406,13 @@ onMounted(async () => {
                 <p v-if="mcResult" class="mc-note">基于最近 {{ mcResult.sample_days }} 个真实日收益率有放回抽样，模拟 {{ mcResult.paths }} 条未来 {{ mcResult.days }} 个交易日路径（基准价 {{ mcResult.base_price.toFixed(2) }}，确定性种子可复现）。模拟不构成投资建议。</p>
               </div>
             </template>
-            <p class="disclaimer">说明：每日推荐 3 只股票并固定显示在左侧，点击“+”后才加入自选。AI 每小时分析全部自选股并给出买入、卖出或持有建议，但不会改变持仓；只有用户点击建仓/平仓才产生资金流水。未手动交易的推荐仍按次日开盘至第 10 个交易日收盘展示参考走势，不计入真实账户盈亏。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
+            <p class="disclaimer">说明：每日推荐最多 3 只（按指数风向档位收紧为 3/2/1 只，无合格标的时为 0 只）并显示在左侧，点击“+”后才加入自选。AI 每小时分析全部自选股并给出买入、卖出或持有建议，但不会改变持仓；只有用户点击建仓/平仓才产生资金流水。未手动交易的推荐仍按次日开盘至第 10 个交易日收盘展示参考走势，不计入真实账户盈亏。历史表现不代表未来收益。模型：{{ items[0].model || '—' }}</p>
           </template>
+          <div v-else-if="emptyPickReason" class="empty empty-pick">
+            <b>今日主动空仓</b>
+            <span>{{ emptyPickReason }}</span>
+            <small>空仓是风险闸门生效后的正常结论，不是任务失败。</small>
+          </div>
           <div v-else class="empty">该日期暂无推荐数据</div>
         </section>
       </div>
@@ -479,6 +497,10 @@ onMounted(async () => {
 .track-tag { display:block; margin-top:2px; color:#8895ab; font-size:10px; }
 .disclaimer { padding:10px 4px; color:#6f7c92; font-size:11px; line-height:1.5; }
 .empty { padding:20px; color:#6f7c92; font-size:13px; }
+/* 主动空仓是策略结论，需与「无数据」的灰色空态明显区分。 */
+.empty-pick { display:grid; gap:6px; color:#d8a657; }
+.empty-pick b { font-size:14px; }
+.empty-pick small { color:#8b96a8; }
 /* 盘中建仓建议 */
 .entry-strip { margin-top:12px; padding:10px 12px; border:1px solid #26324a; background:#131e33; }
 .entry-strip .perf-caption { align-items:center; }
